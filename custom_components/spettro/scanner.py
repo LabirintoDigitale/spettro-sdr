@@ -188,6 +188,7 @@ class SpectrumScanner:
         self.analyzing = False
         self.last_analysis: dict[str, Any] | None = None
         self.last_analysis_png: bytes | None = None
+        self.last_analysis_audio: dict[str, bytes] = {}
         self._radio = asyncio.Lock()  # una sola connessione rtl_tcp alla volta
         self._listeners: list[Callable[[dict[str, Any]], None]] = []
         self._task: asyncio.Task | None = None
@@ -346,7 +347,7 @@ class SpectrumScanner:
                         await writer.wait_closed()
                     except OSError:
                         pass
-            result, png = await asyncio.get_running_loop().run_in_executor(
+            result, png, audio = await asyncio.get_running_loop().run_in_executor(
                 None, analyze_iq, raw, rate, center, freq_hz
             )
         finally:
@@ -355,6 +356,7 @@ class SpectrumScanner:
         result["timestamp"] = time.time()
         self.last_analysis = result
         self.last_analysis_png = png
+        self.last_analysis_audio = audio
         self._emit({"kind": "analysis", "analysis": result})
         return result
 

@@ -778,6 +778,7 @@ class SpettroPanel extends HTMLElement {
     const im = r.image;
     const pct = (v) => `${Math.round(v * 100)}%`;
     const rows = [
+      ["Tipo probabile", r.kind],
       ["Frequenza centrale", `${r.center_mhz.toFixed(4)} MHz`],
       ["Picco", `${r.peak_mhz.toFixed(4)} MHz · ${r.peak_db} dBFS`],
       ["Sopra il rumore", `${r.snr_db} dB${r.detected ? "" : " (nessun segnale chiaro)"}`],
@@ -789,10 +790,6 @@ class SpettroPanel extends HTMLElement {
     if (!r.continuous && r.bursts) {
       rows.push(["Durata burst", `${r.burst_ms_min}–${r.burst_ms_max} ms (mediana ${r.burst_ms_median})`]);
       if (r.burst_period_ms) rows.push(["Ripetizione", `ogni ~${r.burst_period_ms} ms`]);
-    }
-    if (r.freq_track && r.freq_track.frac_frames_freq_moving > 0.3) {
-      const up = r.freq_track.frac_moves_upward;
-      rows.push(["Frequenza", up > 0.65 ? "sale nel tempo (chirp?)" : up < 0.35 ? "scende nel tempo (chirp?)" : "salta tra valori (FSK/hopping?)"]);
     }
     const states = this._hass.states;
     const ais = Object.keys(states).filter((e) => e.startsWith("ai_task.")).sort();
@@ -817,7 +814,19 @@ class SpettroPanel extends HTMLElement {
           <div class="hint" style="margin-top:6px">${r.bands.length ? esc(r.bands.join(" · ")) : "Frequenza non presente nella tabella delle bande."}</div>
         </div>
       </div>
+      ${r.audio ? `<div class="row">
+          <select id="audmode">${[["wfm", "FM larga (radio)"], ["nfm", "FM stretta (voce)"], ["am", "AM"]]
+            .map(([k, t]) => `<option value="${k}"${k === r.audio_mode ? " selected" : ""}>${t}</option>`).join("")}</select>
+          <audio id="player" controls preload="auto" style="flex:1;min-width:200px;height:36px"></audio>
+        </div>` : ""}
       ${aiCtl}`;
+    const player = this.shadowRoot.getElementById("player");
+    if (player) {
+      const sel = this.shadowRoot.getElementById("audmode");
+      const load = () => { player.src = `data:audio/wav;base64,${r.audio[sel.value]}`; };
+      sel.addEventListener("change", () => { load(); player.play().catch(() => {}); });
+      load();
+    }
     const btn = this.shadowRoot.getElementById("askai");
     if (btn) btn.addEventListener("click", () => this._askAi());
   }

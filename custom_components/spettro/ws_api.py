@@ -157,7 +157,11 @@ async def ws_analyze(hass: HomeAssistant, connection: websocket_api.ActiveConnec
         return
     connection.send_result(
         msg["id"],
-        {**result, "png": base64.b64encode(scanner.last_analysis_png).decode()},
+        {
+            **result,
+            "png": base64.b64encode(scanner.last_analysis_png).decode(),
+            "audio": {mode: base64.b64encode(wav).decode() for mode, wav in scanner.last_analysis_audio.items()},
+        },
     )
 
 

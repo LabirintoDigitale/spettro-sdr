@@ -13,6 +13,8 @@ import zlib
 
 import numpy as np
 
+from .demod import MODES, demodulate
+
 FFT_SIZE = 2048  # ~1 kHz di risoluzione e ~1 ms per riga a 2 MS/s
 USABLE_FRACTION = 0.8  # i bordi della banda sono attenuati dal filtro della chiavetta
 IMG_ROWS = 400
@@ -89,8 +91,37 @@ def _runs(mask: np.ndarray) -> list[tuple[int, int]]:
     return list(zip(np.nonzero(d == 1)[0].tolist(), np.nonzero(d == -1)[0].tolist(), strict=True))
 
 
-def analyze_iq(raw: bytes, rate: int, center_hz: float, target_hz: float) -> tuple[dict[str, Any], bytes]:
-    """Misure del segnale vicino a target_hz e immagine PNG della cascata."""
+def classify(r: dict[str, Any]) -> tuple[str, str]:
+    """Ipotesi sul tipo di segnale dalle sole misure, e la demodulazione più adatta per ascoltarlo."""
+    if not r["detected"]:
+        return "nessun segnale chiaro sopra il rumore", "nfm"
+    f, bw, tr = r["center_mhz"], r["obw_99_khz"], r["freq_track"]
+    moving = tr.get("frac_frames_freq_moving", 0)
+    up = tr.get("frac_moves_upward", 0.5)
+    if 87.5 <= f <= 108:
+        return "FM a banda larga: radio broadcast (audio)", "wfm"
+    if moving > 0.5 and (up > 0.7 or up < 0.3) and bw >= 50:
+        return "chirp: frequenza che " + ("sale" if up > 0.5 else "scende") + " in modo regolare (LoRa?)", "nfm"
+    if r["tones"] == 2 and moving > 0.2 and not (r["continuous"] and bw >= 40):
+        return "due toni alternati: FSK (dati digitali)", "nfm"
+    if 118 <= f <= 137:
+        return "AM: banda aerea (voce)", "am"
+    if r["continuous"] and bw >= 40:
+        return "segnale continuo a banda larga (FM broadcast, video o digitale)", "wfm"
+    if r["continuous"] or (r["burst_ms_median"] or 0) >= 500:
+        # AM e portanti hanno una riga stretta che domina; in FM la potenza si sparge sulla deviazione
+        if moving > 0.2 or r["bw_3db_khz"] >= 2.5 * r["resolution_hz"] / 1e3:
+            return "FM a banda stretta: trasmissione in fonia o continua", "nfm"
+        return "portante stabile o AM", "am"
+    if r["bursts"]:
+        return "brevi pacchetti a impulsi: probabilmente dati (telemetria, sensori, telecomandi)", "nfm"
+    return "segnale non classificato", "nfm"
+
+
+def analyze_iq(
+    raw: bytes, rate: int, center_hz: float, target_hz: float
+) -> tuple[dict[str, Any], bytes, dict[str, bytes]]:
+    """Misure del segnale vicino a target_hz, immagine PNG della cascata e audio demodulato (WAV)."""
     n = FFT_SIZE
     a = np.frombuffer(raw, dtype=np.uint8).astype(np.float32) - 127.5
     iq = a[0::2] + 1j * a[1::2]
@@ -267,7 +298,9 @@ def analyze_iq(raw: bytes, rate: int, center_hz: float, target_hz: float) -> tup
         ).tolist(),
         "noise_power_db": round(noise_pw, 1),
     }
-    return result, png
+    result["kind"], result["audio_mode"] = classify(result)
+    audio = {mode: demodulate(iq, rate, centroid - center_hz, mode) for mode in MODES}
+    return result, png, audio
 
 
 def describe(result: dict[str, Any]) -> str:
@@ -288,6 +321,7 @@ def describe(result: dict[str, Any]) -> str:
     ]
     if r["freq_track"]:
         lines.append(f"Andamento della frequenza di picco durante la trasmissione: {r['freq_track']}.")
+    lines.append(f"Ipotesi automatica dalle misure: {r['kind']}.")
     lines.append("Bande note che contengono la frequenza: " + ("; ".join(r["bands"]) or "nessuna in tabella") + ".")
     lines.append(
         f"Ricevitore RTL-SDR, {r['sample_rate'] / 1e6:g} MS/s, risoluzione {r['resolution_hz']} Hz "

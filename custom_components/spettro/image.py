@@ -53,6 +53,7 @@ class SpettroAnalysisImage(ImageEntity):
             return None
         return {
             "frequenza_mhz": r["center_mhz"],
+            "tipo": r["kind"],
             "snr_db": r["snr_db"],
             "banda_khz": r["obw_99_khz"],
             "duty_cycle": r["duty_cycle"],
