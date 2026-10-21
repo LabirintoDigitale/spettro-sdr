@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="https://raw.githubusercontent.com/LabirintoDigitale/spettro-sdr/main/docs/images/logo.png" width="200" alt="Spettro SDR">
+</p>
+
 # Spettro SDR
 
 Integrazione custom per **Home Assistant** che trasforma una chiavetta RTL-SDR condivisa con **rtl_tcp** in un analizzatore di spettro: aggiunge la voce **Spettro** nella **barra laterale** con il grafico di tutte le frequenze dell'intervallo scelto, il waterfall e l'elenco dei segnali trovati.
