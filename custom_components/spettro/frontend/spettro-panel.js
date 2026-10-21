@@ -126,6 +126,8 @@ class SpettroPanel extends HTMLElement {
     if (m.kind !== "spectrum") return;
     const grid = (a, b) => a && b && a.f_start === b.f_start && a.bin_hz === b.bin_hz;
     if (m.complete) {
+      // all'iscrizione il server rimanda le scansioni recenti: quelle già viste si saltano
+      if (this._lastComplete && m.timestamp <= this._lastComplete.timestamp) return;
       const sameGrid = grid(m, this._lastComplete) && this._lastComplete.values.length === m.values.length;
       if (!sameGrid) { this._history = []; this._maxHold = null; }
       if (!this._history.length || this._history[0].sweep_id !== m.sweep_id) {

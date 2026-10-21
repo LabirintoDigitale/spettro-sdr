@@ -8,6 +8,7 @@ ricompone uno spettro unico su tutto l'intervallo richiesto.
 from __future__ import annotations
 
 import asyncio
+from collections import deque
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, fields
 import logging
@@ -48,6 +49,7 @@ USABLE_FRACTION = 0.75  # parte centrale della banda tenuta (i bordi sono attenu
 AVERAGES = 16  # FFT mediate per ogni passo
 MAX_POINTS = 6000  # punti massimi inviati al pannello (riduzione con max-hold, i picchi restano)
 MAX_PEAKS = 25
+HISTORY = 60  # scansioni complete ricordate (cascata del pannello, stesso valore di MAX_HISTORY nel JS)
 PARTIAL_EVERY = 1.5  # secondi tra un aggiornamento parziale e l'altro
 CONNECT_TIMEOUT = 8
 IO_TIMEOUT = 10
@@ -187,6 +189,7 @@ class SpectrumScanner:
         self._sweep_id = 0
         self.last_spectrum: dict[str, Any] | None = None
         self.last_complete: dict[str, Any] | None = None
+        self.history: deque[dict[str, Any]] = deque(maxlen=HISTORY)
         self.status: dict[str, Any] = {
             "kind": "status",
             "state": "starting",
@@ -223,8 +226,13 @@ class SpectrumScanner:
         return remove
 
     def snapshot(self) -> list[dict[str, Any]]:
-        out = [dict(self.status)]
-        if self.last_spectrum is not None:
+        """Stato, scansioni complete recenti (dalla più vecchia) ed eventuale parziale in corso.
+
+        Un pannello appena aperto ricostruisce così grafico, max hold e cascata
+        invece di ripartire dalla sola parte già scansionata del giro in corso.
+        """
+        out = [dict(self.status), *self.history]
+        if self.last_spectrum is not None and not self.last_spectrum["complete"]:
             out.append(self.last_spectrum)
         return out
 
@@ -458,4 +466,5 @@ class SpectrumScanner:
         self.last_spectrum = payload
         if complete:
             self.last_complete = payload
+            self.history.append(payload)
         self._emit(payload)
