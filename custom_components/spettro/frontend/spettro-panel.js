@@ -39,6 +39,10 @@ function fmtMHz(hz, span) {
   return (hz / 1e6).toFixed(d);
 }
 
+function esc(t) {
+  return String(t).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+}
+
 function niceStep(span, target) {
   const raw = span / target;
   const p = Math.pow(10, Math.floor(Math.log10(raw)));
@@ -60,6 +64,8 @@ class SpettroPanel extends HTMLElement {
     this._drag = null;
     this._formDirty = false;
     this._showMax = true;
+    this._sel = null; // frequenza (Hz) scelta per l'analisi
+    this._ana = null; // risultato dell'ultima analisi
   }
 
   set hass(hass) {
@@ -200,6 +206,15 @@ class SpettroPanel extends HTMLElement {
         .chk input { width:auto; }
         .msg { font-size:12px; min-height:16px; }
         .msg.err { color:var(--error-color,#db4437); }
+        .ana { border-top:1px solid var(--divider-color); padding-top:10px; margin-top:4px; display:flex; flex-direction:column; gap:10px; }
+        .ana select, .ana input { width:auto; }
+        .ana input#question { flex:1; min-width:160px; }
+        .anaimg img { display:block; width:100%; max-width:640px; image-rendering:pixelated; border-radius:4px; }
+        .anaimg .axis { display:flex; justify-content:space-between; max-width:640px; font-size:11px; color:var(--secondary-text-color); }
+        .anagrid { display:grid; grid-template-columns:repeat(auto-fit, minmax(240px, 1fr)); gap:12px; align-items:start; }
+        .answer { white-space:pre-wrap; font-size:14px; line-height:1.45; background:var(--secondary-background-color);
+                  border-radius:6px; padding:10px; }
+        .err { color:var(--error-color,#db4437); }
       </style>
       <div class="toolbar"><ha-menu-button></ha-menu-button><div class="title">Spettro</div></div>
       <div class="content">
@@ -215,6 +230,17 @@ class SpettroPanel extends HTMLElement {
           <canvas id="spec"></canvas>
           <canvas id="wf"></canvas>
           <div class="hint">Trascina sul grafico per ingrandire, doppio clic per tornare all'intervallo completo.</div>
+          <div class="ana">
+            <h3 style="margin:0">Analisi segnale</h3>
+            <div class="row">
+              <div class="hint" id="selinfo" style="flex:1;min-width:200px">Tocca un picco sul grafico o una riga di "Segnali rilevati" per sceglierlo.</div>
+              <select id="anadur" title="Durata della registrazione">
+                <option value="1">1 s</option><option value="2" selected>2 s</option><option value="5">5 s</option>
+              </select>
+              <button class="primary" id="analyze" disabled>Analizza</button>
+            </div>
+            <div id="anaout"></div>
+          </div>
         </div>
         <div class="side">
           <div class="card">
@@ -298,6 +324,7 @@ class SpettroPanel extends HTMLElement {
       this._draw();
     });
     $("resetzoom").addEventListener("click", () => { this._view = null; this._draw(); });
+    $("analyze").addEventListener("click", () => this._analyze());
     $("zoomscan").addEventListener("click", () => {
       if (!this._view) return;
       $("start").value = (this._view[0] / 1e6).toFixed(3);
@@ -398,7 +425,8 @@ class SpettroPanel extends HTMLElement {
         break;
       }
       case "paused":
-        text = s.paused === "disabled" ? "In pausa (interruttore Scansione spento)" : "In pausa: nessun pannello aperto";
+        text = s.paused === "analysis" ? "Analisi del segnale in corso, scansione sospesa…"
+          : s.paused === "disabled" ? "In pausa (interruttore Scansione spento)" : "In pausa: nessun pannello aperto";
         break;
       case "error": {
         err = true;
@@ -428,6 +456,7 @@ class SpettroPanel extends HTMLElement {
       </tbody></table>`;
     el.querySelectorAll("tr.pk").forEach((tr) => tr.addEventListener("click", () => {
       const f = parseFloat(tr.dataset.f) * 1e6;
+      this._select(f);
       const full = this._spec.range_stop - this._spec.range_start;
       const half = Math.max(50e3, full * 0.02);
       this._view = [Math.max(this._spec.range_start, f - half), Math.min(this._spec.range_stop, f + half)];
@@ -457,6 +486,15 @@ class SpettroPanel extends HTMLElement {
       if (d && this._plot && Math.abs(d.x1 - d.x0) > 6) {
         const a = this._plot.xToF(Math.min(d.x0, d.x1)), b = this._plot.xToF(Math.max(d.x0, d.x1));
         this._view = [a, b];
+      } else if (d && this._plot && this._spec) {
+        // tocco: sceglie il picco più vicino (entro 14 px), altrimenti la frequenza sotto il dito
+        const { xToF, fToX } = this._plot;
+        let best = null, bestDx = 14;
+        for (const p of this._spec.peaks) {
+          const dx = Math.abs(fToX(p.freq_mhz * 1e6) - d.x0);
+          if (dx < bestDx) { best = p; bestDx = dx; }
+        }
+        this._select(best ? best.freq_mhz * 1e6 : xToF(d.x0));
       }
       this._draw();
     });
@@ -658,6 +696,17 @@ class SpettroPanel extends HTMLElement {
       }
     });
 
+    // frequenza scelta per l'analisi
+    if (this._sel !== null && this._sel >= lo && this._sel <= hi) {
+      const x = Math.round(fToX(this._sel)) + 0.5;
+      ctx.strokeStyle = "#43a047";
+      ctx.lineWidth = 1.5;
+      ctx.setLineDash([6, 3]);
+      ctx.beginPath(); ctx.moveTo(x, T); ctx.lineTo(x, T + ph); ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.lineWidth = 1;
+    }
+
     // selezione zoom
     if (this._drag) {
       const a = Math.min(this._drag.x0, this._drag.x1), b = Math.max(this._drag.x0, this._drag.x1);
@@ -689,7 +738,109 @@ class SpettroPanel extends HTMLElement {
       ctx.fillText(label, bx + 6, T + 14);
     }
 
-    this._plot = { L, pw, xToF };
+    this._plot = { L, pw, xToF, fToX };
+  }
+
+  // ---------------------------------------------------------------- analisi
+
+  _select(f) {
+    this._sel = f;
+    const $ = (id) => this.shadowRoot.getElementById(id);
+    $("selinfo").textContent = `Selezionato: ${(f / 1e6).toFixed(4)} MHz`;
+    $("analyze").disabled = !!this._analyzing;
+    this._draw();
+  }
+
+  async _analyze() {
+    if (this._sel === null || this._analyzing) return;
+    const $ = (id) => this.shadowRoot.getElementById(id);
+    this._analyzing = true;
+    $("analyze").disabled = true;
+    $("analyze").textContent = "Registrazione…";
+    $("anaout").innerHTML = `<div class="hint">Registrazione e analisi di ${(this._sel / 1e6).toFixed(4)} MHz…</div>`;
+    try {
+      this._ana = await this._hass.callWS({
+        type: "spettro/analyze", freq_mhz: this._sel / 1e6, duration_s: parseFloat($("anadur").value),
+      });
+      this._renderAnalysis();
+    } catch (err) {
+      $("anaout").innerHTML = `<div class="err">Analisi non riuscita: ${esc(err.message || err.code || err)}</div>`;
+    } finally {
+      this._analyzing = false;
+      $("analyze").disabled = this._sel === null;
+      $("analyze").textContent = "Analizza";
+    }
+  }
+
+  _renderAnalysis() {
+    const r = this._ana;
+    const out = this.shadowRoot.getElementById("anaout");
+    const im = r.image;
+    const pct = (v) => `${Math.round(v * 100)}%`;
+    const rows = [
+      ["Frequenza centrale", `${r.center_mhz.toFixed(4)} MHz`],
+      ["Picco", `${r.peak_mhz.toFixed(4)} MHz · ${r.peak_db} dBFS`],
+      ["Sopra il rumore", `${r.snr_db} dB${r.detected ? "" : " (nessun segnale chiaro)"}`],
+      ["Banda occupata 99%", `${r.obw_99_khz} kHz`],
+      ["Banda a −3 dB", `${r.bw_3db_khz} kHz`],
+      ...(r.tones >= 1 && r.tones <= 4 ? [["Toni distinti", r.tones === 2 ? "2 (FSK?)" : r.tones]] : []),
+      ["Nel tempo", r.continuous ? "trasmissione continua" : `${pct(r.duty_cycle)} attivo · ${r.bursts} burst`],
+    ];
+    if (!r.continuous && r.bursts) {
+      rows.push(["Durata burst", `${r.burst_ms_min}–${r.burst_ms_max} ms (mediana ${r.burst_ms_median})`]);
+      if (r.burst_period_ms) rows.push(["Ripetizione", `ogni ~${r.burst_period_ms} ms`]);
+    }
+    if (r.freq_track && r.freq_track.frac_frames_freq_moving > 0.3) {
+      const up = r.freq_track.frac_moves_upward;
+      rows.push(["Frequenza", up > 0.65 ? "sale nel tempo (chirp?)" : up < 0.35 ? "scende nel tempo (chirp?)" : "salta tra valori (FSK/hopping?)"]);
+    }
+    const states = this._hass.states;
+    const ais = Object.keys(states).filter((e) => e.startsWith("ai_task.")).sort();
+    const aiCtl = ais.length
+      ? `<div class="row">
+          <select id="aient"><option value="">AI predefinita</option>
+            ${ais.map((e) => `<option value="${esc(e)}">${esc(states[e].attributes.friendly_name || e)}</option>`).join("")}</select>
+          <input id="question" type="text" placeholder="Domanda facoltativa (es. può essere un sensore meteo?)">
+          <button class="primary" id="askai">Chiedi all'AI</button>
+        </div>
+        <div id="aiout"></div>`
+      : `<div class="hint">Per l'identificazione con l'AI serve un'entità <b>AI Task</b> (Home Assistant 2025.8+):
+          aggiungi un'integrazione come Anthropic, OpenAI, Google Gemini o Ollama e attiva il suo AI Task.</div>`;
+    out.innerHTML = `
+      <div class="anagrid">
+        <div class="anaimg">
+          <img src="data:image/png;base64,${r.png}" alt="Cascata del segnale">
+          <div class="axis"><span>${im.f_lo_mhz.toFixed(4)}</span><span>MHz · tempo ↓ ${r.duration_s} s</span><span>${im.f_hi_mhz.toFixed(4)}</span></div>
+        </div>
+        <div>
+          <table><tbody>${rows.map(([k, v]) => `<tr><td>${k}</td><td class="num">${esc(v)}</td></tr>`).join("")}</tbody></table>
+          <div class="hint" style="margin-top:6px">${r.bands.length ? esc(r.bands.join(" · ")) : "Frequenza non presente nella tabella delle bande."}</div>
+        </div>
+      </div>
+      ${aiCtl}`;
+    const btn = this.shadowRoot.getElementById("askai");
+    if (btn) btn.addEventListener("click", () => this._askAi());
+  }
+
+  async _askAi() {
+    const $ = (id) => this.shadowRoot.getElementById(id);
+    const btn = $("askai"), outEl = $("aiout");
+    btn.disabled = true;
+    btn.textContent = "In attesa dell'AI…";
+    outEl.innerHTML = "";
+    try {
+      const res = await this._hass.callWS({
+        type: "spettro/ask_ai", entity_id: $("aient").value || null, question: $("question").value.trim() || null,
+      });
+      const text = esc(res.answer).replace(/\*\*(.+?)\*\*/g, "<b>$1</b>");
+      outEl.innerHTML = `<div class="answer">${text}</div>`
+        + (res.with_image ? "" : `<div class="hint">Il modello scelto non accetta immagini: ha ricevuto solo le misure.</div>`);
+    } catch (err) {
+      outEl.innerHTML = `<div class="err">${esc(err.message || err.code || err)}</div>`;
+    } finally {
+      btn.disabled = false;
+      btn.textContent = "Chiedi all'AI";
+    }
   }
 
   _drawWaterfall() {

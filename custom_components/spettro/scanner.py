@@ -20,6 +20,8 @@ from typing import Any
 
 import numpy as np
 
+from .analysis import analyze_iq
+
 _LOGGER = logging.getLogger(__name__)
 
 # Comandi del protocollo rtl_tcp (1 byte comando + uint32 big endian)
@@ -54,6 +56,7 @@ PARTIAL_EVERY = 1.5  # secondi tra un aggiornamento parziale e l'altro
 CONNECT_TIMEOUT = 8
 IO_TIMEOUT = 10
 MIN_ERROR_RETRY = 10
+ANALYSIS_MAX_S = 5  # durata massima di una registrazione per l'analisi
 
 
 @dataclass
@@ -182,6 +185,10 @@ class SpectrumScanner:
         self.settings = settings
         self.enabled = enabled
         self.viewers = 0
+        self.analyzing = False
+        self.last_analysis: dict[str, Any] | None = None
+        self.last_analysis_png: bytes | None = None
+        self._radio = asyncio.Lock()  # una sola connessione rtl_tcp alla volta
         self._listeners: list[Callable[[dict[str, Any]], None]] = []
         self._task: asyncio.Task | None = None
         self._wake = asyncio.Event()
@@ -250,6 +257,8 @@ class SpectrumScanner:
     # --- pausa -------------------------------------------------------------
 
     def _pause_reason(self) -> str | None:
+        if self.analyzing:
+            return "analysis"
         if not self.enabled:
             return "disabled"
         if self.settings.only_when_viewed and self.viewers <= 0:
@@ -304,6 +313,51 @@ class SpectrumScanner:
     def scan_now(self) -> None:
         self._wake.set()
 
+    async def analyze(self, freq_hz: float, duration_s: float) -> dict[str, Any]:
+        """Mette in pausa la scansione, registra il segnale a frequenza fissa e lo misura."""
+        if self.analyzing:
+            raise RuntimeError("C'è già un'analisi in corso")
+        rate = int(self.settings.sample_rate)
+        capture_bytes = int(rate * min(duration_s, ANALYSIS_MAX_S)) * 2
+        discard_bytes = RCV_BUF + 2 * READ_LIMIT + int(rate * 2 * max(self.settings.settle_ms, 100) / 1000)
+        discard_bytes -= discard_bytes % 2
+        # sintonia spostata: il segnale non deve cadere sul picco DC al centro della banda
+        center = float(round(freq_hz + rate / 8))
+        self.analyzing = True
+        self._update_active()  # la scansione in corso si ferma al passo successivo e libera la chiavetta
+        try:
+            async with self._radio:
+                reader, writer, tuner = await _open(self.host, self.port)
+                try:
+                    self.status["tuner"] = TUNER_NAMES.get(tuner, f"Tipo {tuner}")
+                    await self._configure(writer, rate)
+                    await self._send(writer, CMD_SET_FREQ, int(center))
+                    async with asyncio.timeout(IO_TIMEOUT + ANALYSIS_MAX_S):
+                        remaining = discard_bytes
+                        while remaining > 0:
+                            chunk = await reader.read(min(remaining, READ_LIMIT))
+                            if not chunk:
+                                raise ConnectionError("Connessione chiusa dal server")
+                            remaining -= len(chunk)
+                        raw = await reader.readexactly(capture_bytes)
+                finally:
+                    writer.close()
+                    try:
+                        await writer.wait_closed()
+                    except OSError:
+                        pass
+            result, png = await asyncio.get_running_loop().run_in_executor(
+                None, analyze_iq, raw, rate, center, freq_hz
+            )
+        finally:
+            self.analyzing = False
+            self._update_active()  # riparte la scansione
+        result["timestamp"] = time.time()
+        self.last_analysis = result
+        self.last_analysis_png = png
+        self._emit({"kind": "analysis", "analysis": result})
+        return result
+
     async def _run(self) -> None:
         while True:
             await self._active.wait()
@@ -348,7 +402,25 @@ class SpectrumScanner:
         writer.write(struct.pack(">BI", cmd, value & 0xFFFFFFFF))
         await writer.drain()
 
+    async def _configure(self, writer: asyncio.StreamWriter, rate: int) -> None:
+        """Sample rate, correzione ppm e guadagno presi dalle impostazioni."""
+        s = self.settings
+        await self._send(writer, CMD_SET_SAMPLE_RATE, rate)
+        await self._send(writer, CMD_SET_FREQ_CORRECTION, int(s.ppm))
+        await self._send(writer, CMD_SET_AGC_MODE, 0)
+        if s.gain_db is None:
+            await self._send(writer, CMD_SET_GAIN_MODE, 0)
+        else:
+            await self._send(writer, CMD_SET_GAIN_MODE, 1)
+            await self._send(writer, CMD_SET_GAIN, int(round(s.gain_db * 10)))
+
     async def _sweep(self) -> None:
+        async with self._radio:
+            if not self._active.is_set():
+                raise ScanPaused
+            await self._sweep_locked()
+
+    async def _sweep_locked(self) -> None:
         s = self.settings
         f_start = s.start_mhz * 1e6
         f_stop = s.stop_mhz * 1e6
@@ -376,14 +448,7 @@ class SpectrumScanner:
         reader, writer, tuner = await _open(self.host, self.port)
         try:
             self.status["tuner"] = TUNER_NAMES.get(tuner, f"Tipo {tuner}")
-            await self._send(writer, CMD_SET_SAMPLE_RATE, rate)
-            await self._send(writer, CMD_SET_FREQ_CORRECTION, int(s.ppm))
-            await self._send(writer, CMD_SET_AGC_MODE, 0)
-            if s.gain_db is None:
-                await self._send(writer, CMD_SET_GAIN_MODE, 0)
-            else:
-                await self._send(writer, CMD_SET_GAIN_MODE, 1)
-                await self._send(writer, CMD_SET_GAIN, int(round(s.gain_db * 10)))
+            await self._configure(writer, rate)
             self._set_status(state="scanning")
 
             t0 = time.monotonic()

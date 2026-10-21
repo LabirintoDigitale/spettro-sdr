@@ -9,7 +9,9 @@ Integrazione custom per **Home Assistant** che trasforma una chiavetta RTL-SDR c
 - Parametri dal pannello: **da / a (MHz)**, **ogni quanto ripetere** la scansione (0 = continua), **guadagno** (automatico o in dB), **soglia picchi**; nelle *Avanzate* sample rate, punti FFT, tempo di assestamento e correzione ppm.
 - Preset pronti: radio FM, banda aerea, satelliti meteo, 2 m, marina VHF, 70 cm, LPD/ISM 433, PMR446, ISM 868, GSM 900, ADS-B, tutto.
 - **Zoom** trascinando sul grafico (doppio clic per tornare indietro), lettura frequenza/livello sotto il cursore, pulsante **Scansiona zona** per usare la zona ingrandita come nuovo intervallo.
-- Tabella dei **segnali rilevati** (frequenza, livello, dB sopra il rumore): un clic ingrandisce il segnale.
+- Tabella dei **segnali rilevati** (frequenza, livello, dB sopra il rumore): un clic ingrandisce il segnale e lo sceglie per l'analisi.
+- **Analisi segnale**: tocca un picco sul grafico (o una riga della tabella) e premi **Analizza**. La scansione si sospende per qualche secondo, la chiavetta registra il segnale a frequenza fissa e il pannello mostra una cascata ad alta risoluzione (~1 kHz, ~5 ms per riga) con le misure: frequenza centrale, banda occupata, SNR, toni distinti, trasmissione continua o a burst (durata e ripetizione), frequenza che sale/scende (chirp) o salta (FSK). L'ultima analisi è anche un'entità immagine (**Ultima analisi**).
+- **Chiedi all'AI**: invia misure e cascata all'entità **AI Task** di Home Assistant (Anthropic, OpenAI, Google Gemini, Ollama…) per un'ipotesi su che segnale è e, se è pubblico e in chiaro, con quale programma decodificarlo. Serve Home Assistant 2025.8 o successivo e un utente amministratore; se il modello non accetta immagini riceve solo le misure.
 - Durante le scansioni lunghe il grafico si aggiorna man mano, con la barra di avanzamento.
 - Sensori per automazioni: **Picco principale** (MHz, con la lista dei picchi negli attributi), **Rumore di fondo** (dBFS) e **Segnali rilevati**.
 - Interruttore **Scansione** (`switch.spettro_sdr_scansione`, anche nel pannello) per mettere in pausa la scansione a mano o da un'automazione.
@@ -47,6 +49,7 @@ Copia la cartella `custom_components/spettro` dentro `config/custom_components/`
 - Meglio collegare server e Home Assistant via cavo; con il Wi-Fi conviene abbassare il sample rate (Avanzate).
 - I livelli sono in **dBFS** (relativi al fondo scala della chiavetta), non in dBm calibrati.
 - Le stazioni FM sono larghe: a volte la stessa stazione compare con due picchi vicini.
+- L'analisi **riconosce** i segnali, non li decifra: le comunicazioni cifrate restano tali e in Italia intercettare comunicazioni private altrui è vietato. Le decodifiche lecite (FM/RDS, ADS-B, AIS, APRS, sensori con rtl_433…) si fanno con i programmi dedicati che l'AI suggerisce.
 
 ## Rilasci
 

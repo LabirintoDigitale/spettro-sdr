@@ -24,7 +24,7 @@ from .const import (
 )
 from .scanner import ScanSettings, SpectrumScanner
 
-PLATFORMS = [Platform.SENSOR, Platform.SWITCH]
+PLATFORMS = [Platform.IMAGE, Platform.SENSOR, Platform.SWITCH]
 
 type SpettroConfigEntry = ConfigEntry[SpectrumScanner]
 

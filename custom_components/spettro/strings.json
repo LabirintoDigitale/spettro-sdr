@@ -35,6 +35,11 @@
       "scan": {
         "name": "Scanning"
       }
+    },
+    "image": {
+      "analysis": {
+        "name": "Last analysis"
+      }
     }
   }
 }
