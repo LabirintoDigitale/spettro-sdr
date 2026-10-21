@@ -22,6 +22,42 @@ Integrazione custom per **Home Assistant** che trasforma una chiavetta RTL-SDR c
 - Interruttore **Scansione** (`switch.spettro_sdr_scansione`, anche nel pannello) per mettere in pausa la scansione a mano o da un'automazione.
 - Opzione **Scansiona solo con il pannello aperto**: con il pannello chiuso l'integrazione non si collega al server, utile se sullo stesso computer girano altri servizi (Pi-hole, DNS…). In questa modalità i sensori si aggiornano solo mentre il pannello è aperto.
 
+## Come si legge il pannello
+
+Esempio reale: scansione da 600 a 1500 MHz con un'antenna da interno, poi ingrandita sulla banda GSM 900.
+
+<p align="center">
+  <img src="docs/images/screenshots/spettro.jpg" width="260" alt="Grafico dello spettro">
+  <img src="docs/images/screenshots/analisi.jpg" width="260" alt="Analisi di un segnale">
+  <img src="docs/images/screenshots/impostazioni-segnali.jpg" width="260" alt="Impostazioni e segnali rilevati">
+</p>
+
+**1. Spettro** (prima schermata)
+
+- In alto lo **stato**: avanzamento della scansione in corso (37%), tuner della chiavetta, durata e ora dell'ultima scansione completa. La barra azzurra è l'avanzamento.
+- Il grafico mostra il livello in **dBFS** per ogni frequenza. Qui è ingrandito su 930–950 MHz (trascinando il dito sul grafico): ogni picco stretto è la portante di una **cella GSM** (larga 200 kHz), il blocco piatto a destra largo vari MHz è una portante **LTE/UMTS**.
+- I **triangoli rossi** sono i segnali rilevati, con la frequenza scritta sopra ai più forti; la **linea rossa tratteggiata** è la soglia di rilevamento (rumore di fondo + *Soglia picchi*).
+- La **linea verde tratteggiata** è la frequenza scelta per l'analisi (qui 944,80 MHz): si sceglie toccando un picco.
+- **Max hold** aggiunge la traccia arancione con il massimo raggiunto in ogni punto (*Azzera max* la riparte); **Scansiona zona** usa la zona ingrandita come nuovo intervallo; **Zoom 100%** torna all'intervallo completo.
+- Sotto, la **cascata**: una riga per scansione completa, la più recente in alto (*ora*); i colori vanno dal blu (debole) al giallo e rosso (forte).
+
+**2. Analisi segnale** (seconda schermata)
+
+- *Selezionato* è la frequenza scelta; *1 s* è quanto registrare (1, 2 o 5 s); **Analizza** sospende la scansione, registra e la fa ripartire.
+- L'immagine è la **cascata ad alta risoluzione** attorno al segnale: frequenza in orizzontale (estremi scritti sotto), tempo che scorre verso il basso. Qui si vede una banda piatta e sempre accesa, larga circa 250 kHz: la "firma" di una portante GSM.
+- **Tipo probabile** è l'ipotesi ricavata dalle misure (qui *portante GSM, telefonia digitale cifrata*): non serve l'AI.
+- **Frequenza centrale** e **Picco**: dove sta il segnale e quanto è forte; **Sopra il rumore**: di quanto spicca (SNR).
+- **Banda occupata 99%**: larghezza che contiene quasi tutta la potenza (la voce analogica sta sotto i 25 kHz, i segnali digitali vanno da decine di kHz a vari MHz); **Banda a −3 dB**: larghezza della sola parte più forte.
+- **Nel tempo**: trasmissione continua oppure percentuale di attività, numero, durata e ripetizione dei burst.
+- Sotto, la banda di appartenenza dalla tabella delle frequenze italiane e il **lettore audio** con la registrazione demodulata (FM larga, FM stretta o AM); per i segnali digitali come questo si sente solo rumore.
+- Con un'entità **AI Task** configurata compare anche **Chiedi all'AI**.
+
+**3. Impostazioni e segnali rilevati** (terza schermata)
+
+- **Da / A** è l'intervallo scansionato (qui 600–1500 MHz, circa 80 s a 2 MS/s), **Ripeti ogni** la pausa tra due scansioni, **Guadagno** fisso in dB (vuoto = automatico), **Soglia picchi** quanti dB sopra il rumore deve stare un segnale per essere elencato.
+- **Applica** salva e riparte; **Scansiona ora** non aspetta la pausa.
+- **Segnali rilevati**: frequenza, livello e dB sopra il rumore, dal più forte. Qui in testa ci sono le celle GSM 900 (933–956 MHz) e poi le portanti LTE 800 (760–821 MHz). Toccando una riga si ingrandisce il segnale e lo si sceglie per l'analisi.
+
 ## Requisiti
 
 - Un server **rtl_tcp** raggiungibile in rete (porta predefinita `1234`), ad esempio su un mini PC o un Raspberry Pi con la chiavetta RTL-SDR collegata:
