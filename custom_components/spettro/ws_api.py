@@ -7,9 +7,10 @@ from typing import Any
 import voluptuous as vol
 
 from homeassistant.components import websocket_api
+from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
 
-from .const import DATA_WS_REGISTERED, DOMAIN
+from .const import DATA_WS_REGISTERED, DOMAIN, OPT_ENABLED
 from .scanner import FFT_SIZES, SAMPLE_RATES, ScanSettings
 
 
@@ -21,6 +22,14 @@ def async_setup(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, ws_subscribe)
     websocket_api.async_register_command(hass, ws_set_config)
     websocket_api.async_register_command(hass, ws_scan_now)
+    websocket_api.async_register_command(hass, ws_set_enabled)
+
+
+@callback
+def set_scan_enabled(hass: HomeAssistant, entry: ConfigEntry, enabled: bool) -> None:
+    """Attiva o mette in pausa la scansione e lo ricorda tra un riavvio e l'altro."""
+    entry.runtime_data.set_enabled(enabled)
+    hass.config_entries.async_update_entry(entry, options={**entry.options, OPT_ENABLED: enabled})
 
 
 def _scanner(hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]):
@@ -43,7 +52,8 @@ def ws_subscribe(hass: HomeAssistant, connection: websocket_api.ActiveConnection
     def forward(payload: dict[str, Any]) -> None:
         connection.send_message(websocket_api.event_message(msg["id"], payload))
 
-    connection.subscriptions[msg["id"]] = scanner.add_listener(forward)
+    # il pannello conta come "spettatore": serve all'opzione "solo con il pannello aperto"
+    connection.subscriptions[msg["id"]] = scanner.add_listener(forward, viewer=True)
     connection.send_result(msg["id"])
     for payload in scanner.snapshot():
         forward(payload)
@@ -61,6 +71,7 @@ def ws_subscribe(hass: HomeAssistant, connection: websocket_api.ActiveConnection
         vol.Optional("threshold_db"): vol.All(vol.Coerce(float), vol.Range(min=1, max=60)),
         vol.Optional("settle_ms"): vol.All(vol.Coerce(int), vol.Range(min=0, max=1000)),
         vol.Optional("ppm"): vol.All(vol.Coerce(int), vol.Range(min=-200, max=200)),
+        vol.Optional("only_when_viewed"): bool,
     }
 )
 @websocket_api.require_admin
@@ -87,4 +98,15 @@ def ws_scan_now(hass: HomeAssistant, connection: websocket_api.ActiveConnection,
     if scanner is None:
         return
     scanner.scan_now()
+    connection.send_result(msg["id"])
+
+
+@websocket_api.websocket_command({vol.Required("type"): "spettro/set_enabled", vol.Required("enabled"): bool})
+@websocket_api.require_admin
+@callback
+def ws_set_enabled(hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]) -> None:
+    entry, scanner = _scanner(hass, connection, msg)
+    if scanner is None:
+        return
+    set_scan_enabled(hass, entry, msg["enabled"])
     connection.send_result(msg["id"])

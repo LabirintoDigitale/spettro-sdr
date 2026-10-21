@@ -118,6 +118,7 @@ class SpettroPanel extends HTMLElement {
   _onMessage(m) {
     if (m.kind === "status") {
       this._status = m;
+      this.shadowRoot.getElementById("enabled").checked = m.enabled !== false;
       if (!this._formDirty) this._fillForm(m.settings);
       this._updateStatus();
       return;
@@ -216,6 +217,7 @@ class SpettroPanel extends HTMLElement {
         <div class="side">
           <div class="card">
             <h3>Scansione</h3>
+            <label class="chk" style="margin-bottom:8px"><input type="checkbox" id="enabled" checked> Scansione attiva</label>
             <label>Preset
               <select id="preset">${PRESETS.map((p, i) => `<option value="${i}">${p[0]}</option>`).join("")}</select>
             </label>
@@ -226,6 +228,8 @@ class SpettroPanel extends HTMLElement {
               <label>Guadagno (dB)<input id="gain" type="text" placeholder="auto" title="Vuoto = automatico"></label>
               <label>Soglia picchi (dB)<input id="threshold" type="number" step="1" min="1" max="60"></label>
             </div>
+            <label class="chk" style="margin-top:8px" title="Con il pannello chiuso il server rtl_tcp resta libero (niente traffico di rete)">
+              <input type="checkbox" id="viewonly"> Scansiona solo con il pannello aperto</label>
             <details>
               <summary>Avanzate</summary>
               <div class="grid2">
@@ -259,7 +263,7 @@ class SpettroPanel extends HTMLElement {
     this._menu.hass = this._hass;
     this._menu.narrow = this._narrow;
 
-    const form = ["start", "stop", "interval", "gain", "threshold", "rate", "fft", "settle", "ppm"];
+    const form = ["start", "stop", "interval", "gain", "threshold", "viewonly", "rate", "fft", "settle", "ppm"];
     for (const id of form) $(id).addEventListener("input", () => {
       this._formDirty = true;
       if (id === "start" || id === "stop") $("preset").value = "0";
@@ -272,6 +276,16 @@ class SpettroPanel extends HTMLElement {
       this._formDirty = true;
     });
     $("apply").addEventListener("click", () => this._apply());
+    $("enabled").addEventListener("change", async (e) => {
+      const enabled = e.target.checked;
+      try {
+        await this._hass.callWS({ type: "spettro/set_enabled", enabled });
+        this._msg(enabled ? "Scansione riattivata." : "Scansione in pausa.");
+      } catch (err) {
+        e.target.checked = !enabled;
+        this._msg(err.message || String(err), true);
+      }
+    });
     $("scannow").addEventListener("click", async () => {
       try { await this._hass.callWS({ type: "spettro/scan_now" }); this._msg("Scansione avviata."); }
       catch (err) { this._msg(err.message || String(err), true); }
@@ -309,6 +323,7 @@ class SpettroPanel extends HTMLElement {
     $("fft").value = String(s.fft_size);
     $("settle").value = s.settle_ms;
     $("ppm").value = s.ppm;
+    $("viewonly").checked = !!s.only_when_viewed;
     const idx = PRESETS.findIndex((p) => p[1] === s.start_mhz && p[2] === s.stop_mhz);
     $("preset").value = String(idx > 0 ? idx : 0);
   }
@@ -331,6 +346,7 @@ class SpettroPanel extends HTMLElement {
       fft_size: parseInt($("fft").value, 10),
       settle_ms: parseInt($("settle").value, 10) || 0,
       ppm: parseInt($("ppm").value, 10) || 0,
+      only_when_viewed: $("viewonly").checked,
     };
     $("apply").disabled = true;
     try {
@@ -379,6 +395,9 @@ class SpettroPanel extends HTMLElement {
         text = left === null ? "In attesa" : left > 0 ? `Prossima scansione tra ${left} s` : "Avvio scansione…";
         break;
       }
+      case "paused":
+        text = s.paused === "disabled" ? "In pausa (interruttore Scansione spento)" : "In pausa: nessun pannello aperto";
+        break;
       case "error": {
         err = true;
         const left = s.next_scan ? Math.max(0, Math.round(s.next_scan - Date.now() / 1000)) : 0;

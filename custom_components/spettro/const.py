@@ -1,9 +1,12 @@
 """Costanti dell'integrazione Spettro."""
 
 DOMAIN = "spettro"
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 
 DEFAULT_PORT = 1234
+
+# opzione salvata nella config entry: interruttore "Scansione"
+OPT_ENABLED = "enabled"
 
 PANEL_URL = "spettro"
 PANEL_TITLE = "Spettro"

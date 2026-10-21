@@ -21,9 +21,20 @@
   },
   "entity": {
     "sensor": {
-      "main_peak": { "name": "Picco principale" },
-      "noise_floor": { "name": "Rumore di fondo" },
-      "signals": { "name": "Segnali rilevati" }
+      "main_peak": {
+        "name": "Picco principale"
+      },
+      "noise_floor": {
+        "name": "Rumore di fondo"
+      },
+      "signals": {
+        "name": "Segnali rilevati"
+      }
+    },
+    "switch": {
+      "scan": {
+        "name": "Scansione"
+      }
     }
   }
 }

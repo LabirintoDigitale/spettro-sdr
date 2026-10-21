@@ -21,9 +21,20 @@
   },
   "entity": {
     "sensor": {
-      "main_peak": { "name": "Main peak" },
-      "noise_floor": { "name": "Noise floor" },
-      "signals": { "name": "Detected signals" }
+      "main_peak": {
+        "name": "Main peak"
+      },
+      "noise_floor": {
+        "name": "Noise floor"
+      },
+      "signals": {
+        "name": "Detected signals"
+      }
+    },
+    "switch": {
+      "scan": {
+        "name": "Scanning"
+      }
     }
   }
 }

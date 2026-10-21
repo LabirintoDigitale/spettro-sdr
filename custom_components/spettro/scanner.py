@@ -67,6 +67,7 @@ class ScanSettings:
     threshold_db: float = 10.0
     settle_ms: int = 60
     ppm: int = 0
+    only_when_viewed: bool = False  # scansiona solo mentre qualcuno ha il pannello aperto
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> ScanSettings:
@@ -79,6 +80,10 @@ class ScanSettings:
 
 class RtlTcpError(Exception):
     """Il server non risponde come un rtl_tcp."""
+
+
+class ScanPaused(Exception):
+    """La scansione è stata messa in pausa mentre era in corso."""
 
 
 async def _open(host: str, port: int) -> tuple[asyncio.StreamReader, asyncio.StreamWriter, int]:
@@ -169,13 +174,16 @@ def find_peaks(
 class SpectrumScanner:
     """Esegue scansioni periodiche e notifica i risultati agli ascoltatori."""
 
-    def __init__(self, host: str, port: int, settings: ScanSettings) -> None:
+    def __init__(self, host: str, port: int, settings: ScanSettings, enabled: bool = True) -> None:
         self.host = host
         self.port = port
         self.settings = settings
+        self.enabled = enabled
+        self.viewers = 0
         self._listeners: list[Callable[[dict[str, Any]], None]] = []
         self._task: asyncio.Task | None = None
         self._wake = asyncio.Event()
+        self._active = asyncio.Event()
         self._sweep_id = 0
         self.last_spectrum: dict[str, Any] | None = None
         self.last_complete: dict[str, Any] | None = None
@@ -191,16 +199,26 @@ class SpectrumScanner:
             "host": host,
             "port": port,
             "settings": settings.as_dict(),
+            "enabled": enabled,
+            "paused": None,
         }
+        self._update_active(emit=False)
 
     # --- ascoltatori -------------------------------------------------------
 
-    def add_listener(self, cb: Callable[[dict[str, Any]], None]) -> Callable[[], None]:
+    def add_listener(self, cb: Callable[[dict[str, Any]], None], viewer: bool = False) -> Callable[[], None]:
+        """Registra un ascoltatore; viewer=True per il pannello (conta chi sta guardando)."""
         self._listeners.append(cb)
+        if viewer:
+            self.viewers += 1
+            self._update_active()
 
         def remove() -> None:
             if cb in self._listeners:
                 self._listeners.remove(cb)
+                if viewer:
+                    self.viewers -= 1
+                    self._update_active()
 
         return remove
 
@@ -221,6 +239,35 @@ class SpectrumScanner:
         self.status.update(changes)
         self._emit(dict(self.status))
 
+    # --- pausa -------------------------------------------------------------
+
+    def _pause_reason(self) -> str | None:
+        if not self.enabled:
+            return "disabled"
+        if self.settings.only_when_viewed and self.viewers <= 0:
+            return "no_viewers"
+        return None
+
+    def _update_active(self, emit: bool = True) -> None:
+        reason = self._pause_reason()
+        was_paused = self.status["paused"] is not None or not self._active.is_set()
+        self.status["enabled"] = self.enabled
+        self.status["paused"] = reason
+        if reason is None:
+            if not self._active.is_set():
+                self._active.set()
+                if was_paused:
+                    self._wake.set()  # riattivato: scansiona subito invece di aspettare l'intervallo
+        else:
+            self._active.clear()
+            self.status.update(state="paused", next_scan=None)
+        if emit:
+            self._emit(dict(self.status))
+
+    def set_enabled(self, enabled: bool) -> None:
+        self.enabled = enabled
+        self._update_active()
+
     # --- ciclo di vita -----------------------------------------------------
 
     def start(self) -> None:
@@ -240,6 +287,7 @@ class SpectrumScanner:
         """Applica i nuovi parametri ripartendo subito con una scansione."""
         self.settings = settings
         self.status["settings"] = settings.as_dict()
+        self._update_active()
         if self._task is not None:
             self._task.cancel()
             self._task = None
@@ -250,12 +298,15 @@ class SpectrumScanner:
 
     async def _run(self) -> None:
         while True:
+            await self._active.wait()
             self._wake.clear()
             failed = False
             try:
                 await self._sweep()
             except asyncio.CancelledError:
                 raise
+            except ScanPaused:
+                continue
             except (OSError, TimeoutError, asyncio.IncompleteReadError, RtlTcpError) as err:
                 failed = True
                 msg = str(err) or type(err).__name__
@@ -266,6 +317,9 @@ class SpectrumScanner:
                 _LOGGER.exception("Errore imprevisto durante la scansione")
                 self.status["error"] = str(err)
 
+            if not self._active.is_set():
+                self._update_active()  # messo in pausa a fine scansione: mostra lo stato "paused"
+                continue
             wait = self.settings.interval_s
             if failed:
                 wait = max(wait, MIN_ERROR_RETRY)
@@ -327,6 +381,8 @@ class SpectrumScanner:
             t0 = time.monotonic()
             last_partial = t0
             for i in range(steps):
+                if not self._active.is_set():
+                    raise ScanPaused
                 center = f_start + (i * keep + keep / 2) * bin_hz
                 await self._send(writer, CMD_SET_FREQ, int(round(center)))
                 async with asyncio.timeout(IO_TIMEOUT):

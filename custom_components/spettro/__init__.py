@@ -14,6 +14,7 @@ from . import ws_api
 from .const import (
     DATA_STATIC_REGISTERED,
     DOMAIN,
+    OPT_ENABLED,
     PANEL_ELEMENT,
     PANEL_ICON,
     PANEL_TITLE,
@@ -23,7 +24,7 @@ from .const import (
 )
 from .scanner import ScanSettings, SpectrumScanner
 
-PLATFORMS = [Platform.SENSOR]
+PLATFORMS = [Platform.SENSOR, Platform.SWITCH]
 
 type SpettroConfigEntry = ConfigEntry[SpectrumScanner]
 
@@ -31,7 +32,9 @@ type SpettroConfigEntry = ConfigEntry[SpectrumScanner]
 async def async_setup_entry(hass: HomeAssistant, entry: SpettroConfigEntry) -> bool:
     """Avvia lo scanner, registra il pannello e i comandi websocket."""
     settings = ScanSettings.from_dict({**ScanSettings().as_dict(), **entry.options})
-    scanner = SpectrumScanner(entry.data[CONF_HOST], entry.data[CONF_PORT], settings)
+    scanner = SpectrumScanner(
+        entry.data[CONF_HOST], entry.data[CONF_PORT], settings, enabled=entry.options.get(OPT_ENABLED, True)
+    )
     entry.runtime_data = scanner
     hass.data[DOMAIN] = entry
 

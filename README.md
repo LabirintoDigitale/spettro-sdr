@@ -12,6 +12,8 @@ Integrazione custom per **Home Assistant** che trasforma una chiavetta RTL-SDR c
 - Tabella dei **segnali rilevati** (frequenza, livello, dB sopra il rumore): un clic ingrandisce il segnale.
 - Durante le scansioni lunghe il grafico si aggiorna man mano, con la barra di avanzamento.
 - Sensori per automazioni: **Picco principale** (MHz, con la lista dei picchi negli attributi), **Rumore di fondo** (dBFS) e **Segnali rilevati**.
+- Interruttore **Scansione** (`switch.spettro_sdr_scansione`, anche nel pannello) per mettere in pausa la scansione a mano o da un'automazione.
+- Opzione **Scansiona solo con il pannello aperto**: con il pannello chiuso l'integrazione non si collega al server, utile se sullo stesso computer girano altri servizi (Pi-hole, DNS…). In questa modalità i sensori si aggiornano solo mentre il pannello è aperto.
 
 ## Requisiti
 
@@ -41,7 +43,8 @@ Copia la cartella `custom_components/spettro` dentro `config/custom_components/`
 
 - rtl_tcp accetta **un solo client alla volta**. L'integrazione si collega solo durante la scansione e poi si stacca, quindi tra una scansione e l'altra puoi usare SDR#, SDR++ o altri programmi. Se un altro client resta collegato, la scansione va in errore e riprova dopo almeno 10 secondi.
 - Tempi indicativi a 2,048 MS/s: banda FM (20 MHz) circa 2 s, tutto 24–1766 MHz circa 2–3 minuti.
-- Durante la scansione il traffico di rete è di circa 4 MB/s: meglio collegare server e Home Assistant via cavo. Con il Wi-Fi conviene abbassare il sample rate.
+- Mentre è collegata, la chiavetta invia dati in continuo: a 2,048 MS/s sono circa 4 MB/s (33 Mbit/s) e un po' di carico CPU/USB sul server. Se il server ospita anche altri servizi e li rallenta, usa l'interruttore **Scansione**, l'opzione *solo con il pannello aperto* o un intervallo più lungo.
+- Meglio collegare server e Home Assistant via cavo; con il Wi-Fi conviene abbassare il sample rate (Avanzate).
 - I livelli sono in **dBFS** (relativi al fondo scala della chiavetta), non in dBm calibrati.
 - Le stazioni FM sono larghe: a volte la stessa stazione compare con due picchi vicini.
 
