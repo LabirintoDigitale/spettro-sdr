@@ -1,0 +1,39 @@
+name: Release
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Read version
+        id: version
+        run: |
+          manifest=$(jq -r .version custom_components/spettro/manifest.json)
+          const=$(sed -n 's/^VERSION = "\(.*\)"/\1/p' custom_components/spettro/const.py)
+          echo "manifest=$manifest const=$const"
+          if [ "$manifest" != "$const" ]; then
+            echo "::error::manifest.json ($manifest) and const.py ($const) versions differ"
+            exit 1
+          fi
+          echo "tag=v$manifest" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub release if missing
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "$TAG already released"
+          else
+            gh release create "$TAG" --target "$GITHUB_SHA" --title "$TAG" --generate-notes
+          fi

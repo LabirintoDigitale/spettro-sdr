@@ -1,0 +1,29 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Server SDR (rtl_tcp)",
+        "description": "Inserisci l'indirizzo del mini PC su cui gira rtl_tcp. Durante la verifica nessun altro programma (SDR#, SDR++…) deve essere collegato al server.",
+        "data": {
+          "host": "Indirizzo IP o nome del mini PC",
+          "port": "Porta"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Impossibile collegarsi. Controlla IP e porta e che nessun altro client sia collegato a rtl_tcp.",
+      "not_rtl_tcp": "Il server risponde ma non è un rtl_tcp."
+    },
+    "abort": {
+      "already_configured": "Questo server è già configurato.",
+      "single_instance_allowed": "Spettro è già configurato."
+    }
+  },
+  "entity": {
+    "sensor": {
+      "main_peak": { "name": "Picco principale" },
+      "noise_floor": { "name": "Rumore di fondo" },
+      "signals": { "name": "Segnali rilevati" }
+    }
+  }
+}

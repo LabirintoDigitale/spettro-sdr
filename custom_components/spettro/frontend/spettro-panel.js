@@ -1,0 +1,721 @@
+// Pannello "Spettro" per Home Assistant: grafico dello spettro, waterfall e picchi.
+
+const PRESETS = [
+  ["Personalizzato", null, null],
+  ["Radio FM (87.5–108)", 87.5, 108],
+  ["Banda aerea (118–137)", 118, 137],
+  ["Satelliti meteo (137–138)", 137, 138],
+  ["Radioamatori 2 m (144–146)", 144, 146],
+  ["Marina VHF (156–162)", 156, 162.1],
+  ["Radioamatori 70 cm (430–440)", 430, 440],
+  ["LPD / ISM 433 (433–435)", 433.05, 434.8],
+  ["PMR446 (446.0–446.2)", 446.0, 446.2],
+  ["ISM 868 (863–870)", 863, 870],
+  ["GSM 900 (925–960)", 925, 960],
+  ["ADS-B (1085–1095)", 1085, 1095],
+  ["Tutto (24–1766)", 24, 1766],
+];
+const SAMPLE_RATES = [250000, 1024000, 1400000, 1800000, 2048000, 2400000, 2560000, 2880000];
+const FFT_SIZES = [256, 512, 1024, 2048, 4096];
+const MAX_HISTORY = 60;
+
+// colormap del waterfall (blu notte → ciano → giallo → rosso)
+const LUT = (() => {
+  const stops = [[0, [8, 8, 32]], [0.3, [20, 50, 160]], [0.55, [30, 180, 200]], [0.78, [245, 210, 40]], [1, [255, 40, 0]]];
+  const lut = new Uint8ClampedArray(256 * 3);
+  for (let i = 0; i < 256; i++) {
+    const t = i / 255;
+    let k = 0;
+    while (k < stops.length - 2 && t > stops[k + 1][0]) k++;
+    const [t0, c0] = stops[k], [t1, c1] = stops[k + 1];
+    const u = (t - t0) / (t1 - t0);
+    for (let j = 0; j < 3; j++) lut[i * 3 + j] = c0[j] + (c1[j] - c0[j]) * u;
+  }
+  return lut;
+})();
+
+function fmtMHz(hz, span) {
+  const d = span < 2e5 ? 4 : span < 5e6 ? 3 : span < 5e7 ? 2 : 1;
+  return (hz / 1e6).toFixed(d);
+}
+
+function niceStep(span, target) {
+  const raw = span / target;
+  const p = Math.pow(10, Math.floor(Math.log10(raw)));
+  for (const m of [1, 2, 2.5, 5, 10]) if (raw <= m * p) return m * p;
+  return 10 * p;
+}
+
+class SpettroPanel extends HTMLElement {
+  constructor() {
+    super();
+    this.attachShadow({ mode: "open" });
+    this._spec = null; // spettro mostrato (eventualmente parziale)
+    this._lastComplete = null;
+    this._maxHold = null;
+    this._history = [];
+    this._status = null;
+    this._view = null; // [lo, hi] in Hz quando si è fatto zoom
+    this._hoverX = null;
+    this._drag = null;
+    this._formDirty = false;
+    this._showMax = true;
+  }
+
+  set hass(hass) {
+    const first = !this._hass;
+    this._hass = hass;
+    if (this._menu) this._menu.hass = hass;
+    if (first) this._init();
+  }
+  get hass() { return this._hass; }
+
+  set narrow(v) {
+    this._narrow = v;
+    if (this._menu) this._menu.narrow = v;
+  }
+
+  connectedCallback() {
+    if (this._hass && !this._unsub) this._subscribe();
+  }
+
+  disconnectedCallback() {
+    this._unsubscribe();
+    clearInterval(this._tick);
+    this._tick = null;
+    if (this._ro) this._ro.disconnect();
+  }
+
+  _init() {
+    this._render();
+    this._subscribe();
+  }
+
+  async _subscribe() {
+    if (this._unsub || this._subscribing) return;
+    this._subscribing = true;
+    try {
+      this._unsub = await this._hass.connection.subscribeMessage(
+        (m) => this._onMessage(m), { type: "spettro/subscribe" });
+    } catch (err) {
+      this._setStatusText(`Errore: ${err.message || err.code || err}`, true);
+    } finally {
+      this._subscribing = false;
+    }
+    if (!this._tick) this._tick = setInterval(() => this._updateStatus(), 1000);
+    if (this._ro && this.$spec) { this._ro.observe(this.$spec); this._ro.observe(this.$wf); }
+  }
+
+  _unsubscribe() {
+    if (this._unsub) {
+      try { this._unsub(); } catch (e) { /* connessione già chiusa */ }
+      this._unsub = null;
+    }
+  }
+
+  // ---------------------------------------------------------------- dati
+
+  _onMessage(m) {
+    if (m.kind === "status") {
+      this._status = m;
+      if (!this._formDirty) this._fillForm(m.settings);
+      this._updateStatus();
+      return;
+    }
+    if (m.kind !== "spectrum") return;
+    const grid = (a, b) => a && b && a.f_start === b.f_start && a.bin_hz === b.bin_hz;
+    if (m.complete) {
+      const sameGrid = grid(m, this._lastComplete) && this._lastComplete.values.length === m.values.length;
+      if (!sameGrid) { this._history = []; this._maxHold = null; }
+      if (!this._history.length || this._history[0].sweep_id !== m.sweep_id) {
+        this._history.unshift(m);
+        if (this._history.length > MAX_HISTORY) this._history.pop();
+      }
+      this._maxHold = this._maxHold && sameGrid
+        ? this._maxHold.map((v, i) => Math.max(v, m.values[i] ?? -999))
+        : m.values.slice();
+      this._lastComplete = m;
+      this._spec = { ...m, cursor: null };
+      this._renderPeaks(m);
+    } else {
+      // scansione in corso: si mostra la parte nuova + il resto della scansione precedente
+      let values = m.values, peaks = m.peaks;
+      if (grid(m, this._lastComplete) && this._lastComplete.values.length > values.length) {
+        values = values.concat(this._lastComplete.values.slice(values.length));
+        peaks = this._lastComplete.peaks;
+      }
+      this._spec = { ...m, values, peaks, cursor: m.f_start + m.values.length * m.bin_hz };
+      if (!this._lastComplete) this._renderPeaks(m);
+    }
+    if (this._view && (this._view[1] < m.range_start || this._view[0] > m.range_stop)) this._view = null;
+    this._draw();
+  }
+
+  // ---------------------------------------------------------------- UI
+
+  _render() {
+    this.shadowRoot.innerHTML = `
+      <style>
+        :host { display:block; height:100%; background:var(--primary-background-color); color:var(--primary-text-color);
+                font-family:var(--paper-font-body1_-_font-family, Roboto, sans-serif); }
+        .toolbar { display:flex; align-items:center; height:var(--header-height,56px); padding:0 12px; gap:8px;
+                   background:var(--app-header-background-color, var(--primary-color)); color:var(--app-header-text-color, #fff);
+                   font-size:20px; box-sizing:border-box; }
+        .toolbar .title { flex:1; }
+        .content { padding:12px; display:grid; gap:12px; grid-template-columns: minmax(0,1fr) 300px; max-width:1800px; margin:0 auto; }
+        @media (max-width: 1000px) { .content { grid-template-columns: minmax(0,1fr); } }
+        .card { background:var(--card-background-color,#fff); border-radius:var(--ha-card-border-radius,12px);
+                box-shadow:var(--ha-card-box-shadow,none); border:1px solid var(--divider-color); padding:12px; min-width:0; }
+        .charts { display:flex; flex-direction:column; gap:6px; }
+        canvas { display:block; width:100%; }
+        #spec { height:340px; cursor:crosshair; touch-action:none; }
+        #wf { height:220px; border-radius:4px; }
+        .row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+        .status { font-size:13px; color:var(--secondary-text-color); flex:1; min-width:200px; }
+        .status.err { color:var(--error-color,#db4437); }
+        .bar { height:4px; background:var(--divider-color); border-radius:2px; overflow:hidden; }
+        .bar > div { height:100%; width:0; background:var(--primary-color); transition:width .4s; }
+        label { display:flex; flex-direction:column; font-size:12px; color:var(--secondary-text-color); gap:3px; }
+        input, select { font:inherit; font-size:14px; padding:7px 8px; border-radius:6px; border:1px solid var(--divider-color);
+                background:var(--primary-background-color); color:var(--primary-text-color); min-width:0; box-sizing:border-box; width:100%; }
+        .grid2 { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
+        .side { display:flex; flex-direction:column; gap:12px; }
+        h3 { margin:0 0 8px; font-size:15px; font-weight:500; }
+        button { font:inherit; font-size:14px; padding:8px 12px; border-radius:6px; border:1px solid var(--divider-color);
+                 background:transparent; color:var(--primary-text-color); cursor:pointer; }
+        button.primary { background:var(--primary-color); color:var(--text-primary-color,#fff); border-color:var(--primary-color); }
+        button:disabled { opacity:.5; cursor:default; }
+        details summary { cursor:pointer; font-size:13px; color:var(--secondary-text-color); margin:4px 0; }
+        table { width:100%; border-collapse:collapse; font-size:13px; font-variant-numeric:tabular-nums; }
+        th { text-align:left; font-weight:500; color:var(--secondary-text-color); padding:4px; border-bottom:1px solid var(--divider-color); }
+        td { padding:4px; border-bottom:1px solid var(--divider-color); }
+        td.num, th.num { text-align:right; }
+        tr.pk { cursor:pointer; }
+        tr.pk:hover td { background:var(--secondary-background-color); }
+        .hint { font-size:12px; color:var(--secondary-text-color); }
+        .chk { flex-direction:row; align-items:center; gap:6px; font-size:13px; }
+        .chk input { width:auto; }
+        .msg { font-size:12px; min-height:16px; }
+        .msg.err { color:var(--error-color,#db4437); }
+      </style>
+      <div class="toolbar"><ha-menu-button></ha-menu-button><div class="title">Spettro</div></div>
+      <div class="content">
+        <div class="card charts">
+          <div class="row">
+            <div class="status" id="status">Collegamento…</div>
+            <label class="chk"><input type="checkbox" id="showmax" checked> Max hold</label>
+            <button id="clearmax">Azzera max</button>
+            <button id="zoomscan" disabled title="Usa la zona ingrandita come nuovo intervallo di scansione">Scansiona zona</button>
+            <button id="resetzoom" disabled>Zoom 100%</button>
+          </div>
+          <div class="bar"><div id="bar"></div></div>
+          <canvas id="spec"></canvas>
+          <canvas id="wf"></canvas>
+          <div class="hint">Trascina sul grafico per ingrandire, doppio clic per tornare all'intervallo completo.</div>
+        </div>
+        <div class="side">
+          <div class="card">
+            <h3>Scansione</h3>
+            <label>Preset
+              <select id="preset">${PRESETS.map((p, i) => `<option value="${i}">${p[0]}</option>`).join("")}</select>
+            </label>
+            <div class="grid2" style="margin-top:8px">
+              <label>Da (MHz)<input id="start" type="number" step="0.001" min="0.5" max="2200"></label>
+              <label>A (MHz)<input id="stop" type="number" step="0.001" min="0.5" max="2200"></label>
+              <label>Ripeti ogni (s)<input id="interval" type="number" step="1" min="0" title="0 = scansione continua"></label>
+              <label>Guadagno (dB)<input id="gain" type="text" placeholder="auto" title="Vuoto = automatico"></label>
+              <label>Soglia picchi (dB)<input id="threshold" type="number" step="1" min="1" max="60"></label>
+            </div>
+            <details>
+              <summary>Avanzate</summary>
+              <div class="grid2">
+                <label>Sample rate
+                  <select id="rate">${SAMPLE_RATES.map((r) => `<option value="${r}">${(r / 1e6).toFixed(3)} MS/s</option>`).join("")}</select>
+                </label>
+                <label>Punti FFT
+                  <select id="fft">${FFT_SIZES.map((n) => `<option value="${n}">${n}</option>`).join("")}</select>
+                </label>
+                <label>Assestamento (ms)<input id="settle" type="number" step="10" min="0" max="1000"></label>
+                <label>Correzione (ppm)<input id="ppm" type="number" step="1" min="-200" max="200"></label>
+              </div>
+            </details>
+            <div class="row" style="margin-top:10px">
+              <button class="primary" id="apply">Applica</button>
+              <button id="scannow">Scansiona ora</button>
+            </div>
+            <div class="msg" id="msg"></div>
+          </div>
+          <div class="card">
+            <h3>Segnali rilevati</h3>
+            <div id="peaks" class="hint">Nessun dato ancora.</div>
+          </div>
+        </div>
+      </div>`;
+
+    const $ = (id) => this.shadowRoot.getElementById(id);
+    this.$spec = $("spec");
+    this.$wf = $("wf");
+    this._menu = this.shadowRoot.querySelector("ha-menu-button");
+    this._menu.hass = this._hass;
+    this._menu.narrow = this._narrow;
+
+    const form = ["start", "stop", "interval", "gain", "threshold", "rate", "fft", "settle", "ppm"];
+    for (const id of form) $(id).addEventListener("input", () => {
+      this._formDirty = true;
+      if (id === "start" || id === "stop") $("preset").value = "0";
+    });
+    $("preset").addEventListener("change", (e) => {
+      const p = PRESETS[+e.target.value];
+      if (p[1] === null) return;
+      $("start").value = p[1];
+      $("stop").value = p[2];
+      this._formDirty = true;
+    });
+    $("apply").addEventListener("click", () => this._apply());
+    $("scannow").addEventListener("click", async () => {
+      try { await this._hass.callWS({ type: "spettro/scan_now" }); this._msg("Scansione avviata."); }
+      catch (err) { this._msg(err.message || String(err), true); }
+    });
+    $("showmax").addEventListener("change", (e) => { this._showMax = e.target.checked; this._draw(); });
+    $("clearmax").addEventListener("click", () => {
+      this._maxHold = this._lastComplete ? this._lastComplete.values.slice() : null;
+      this._draw();
+    });
+    $("resetzoom").addEventListener("click", () => { this._view = null; this._draw(); });
+    $("zoomscan").addEventListener("click", () => {
+      if (!this._view) return;
+      $("start").value = (this._view[0] / 1e6).toFixed(3);
+      $("stop").value = (this._view[1] / 1e6).toFixed(3);
+      $("preset").value = "0";
+      this._view = null;
+      this._apply();
+    });
+
+    this._bindChart();
+    this._ro = new ResizeObserver(() => this._draw());
+    this._ro.observe(this.$spec);
+    this._ro.observe(this.$wf);
+  }
+
+  _fillForm(s) {
+    if (!s) return;
+    const $ = (id) => this.shadowRoot.getElementById(id);
+    $("start").value = s.start_mhz;
+    $("stop").value = s.stop_mhz;
+    $("interval").value = s.interval_s;
+    $("gain").value = s.gain_db === null || s.gain_db === undefined ? "" : s.gain_db;
+    $("threshold").value = s.threshold_db;
+    $("rate").value = String(s.sample_rate);
+    $("fft").value = String(s.fft_size);
+    $("settle").value = s.settle_ms;
+    $("ppm").value = s.ppm;
+    const idx = PRESETS.findIndex((p) => p[1] === s.start_mhz && p[2] === s.stop_mhz);
+    $("preset").value = String(idx > 0 ? idx : 0);
+  }
+
+  async _apply() {
+    const $ = (id) => this.shadowRoot.getElementById(id);
+    const start = parseFloat($("start").value), stop = parseFloat($("stop").value);
+    if (!(start > 0) || !(stop > start)) { this._msg("Intervallo non valido: 'A' deve essere maggiore di 'Da'.", true); return; }
+    const gainTxt = $("gain").value.trim().toLowerCase();
+    const gain = gainTxt === "" || gainTxt === "auto" ? null : parseFloat(gainTxt.replace(",", "."));
+    if (gain !== null && isNaN(gain)) { this._msg("Guadagno non valido (numero in dB o vuoto per automatico).", true); return; }
+    const msg = {
+      type: "spettro/set_config",
+      start_mhz: start,
+      stop_mhz: stop,
+      interval_s: Math.max(0, parseFloat($("interval").value) || 0),
+      gain_db: gain,
+      threshold_db: parseFloat($("threshold").value) || 10,
+      sample_rate: parseInt($("rate").value, 10),
+      fft_size: parseInt($("fft").value, 10),
+      settle_ms: parseInt($("settle").value, 10) || 0,
+      ppm: parseInt($("ppm").value, 10) || 0,
+    };
+    $("apply").disabled = true;
+    try {
+      await this._hass.callWS(msg);
+      this._formDirty = false;
+      this._view = null;
+      this._msg("Impostazioni salvate, nuova scansione in corso.");
+    } catch (err) {
+      this._msg(err.message || String(err), true);
+    } finally {
+      $("apply").disabled = false;
+    }
+  }
+
+  _msg(text, err = false) {
+    const el = this.shadowRoot.getElementById("msg");
+    el.textContent = text;
+    el.className = "msg" + (err ? " err" : "");
+    clearTimeout(this._msgT);
+    this._msgT = setTimeout(() => { el.textContent = ""; }, 6000);
+  }
+
+  _setStatusText(text, err) {
+    const el = this.shadowRoot && this.shadowRoot.getElementById("status");
+    if (!el) return;
+    el.textContent = text;
+    el.className = "status" + (err ? " err" : "");
+  }
+
+  _updateStatus() {
+    const s = this._status;
+    if (!s || !this.shadowRoot.getElementById("status")) return;
+    const bar = this.shadowRoot.getElementById("bar");
+    const extra = [];
+    if (s.tuner) extra.push(`tuner ${s.tuner}`);
+    if (s.sweep_s != null) extra.push(`ultima scansione ${s.sweep_s} s`);
+    if (s.last_scan) extra.push(new Date(s.last_scan * 1000).toLocaleTimeString());
+    const tail = extra.length ? ` · ${extra.join(" · ")}` : "";
+    let text, err = false, prog = 0;
+    switch (s.state) {
+      case "connecting": text = `Collegamento a ${s.host}:${s.port}…`; break;
+      case "scanning": prog = s.progress; text = `Scansione in corso ${Math.round(s.progress * 100)}%`; break;
+      case "idle": {
+        prog = 1;
+        const left = s.next_scan ? Math.max(0, Math.round(s.next_scan - Date.now() / 1000)) : null;
+        text = left === null ? "In attesa" : left > 0 ? `Prossima scansione tra ${left} s` : "Avvio scansione…";
+        break;
+      }
+      case "error": {
+        err = true;
+        const left = s.next_scan ? Math.max(0, Math.round(s.next_scan - Date.now() / 1000)) : 0;
+        text = `Errore: ${s.error} — nuovo tentativo tra ${left} s`;
+        break;
+      }
+      default: text = "Avvio…";
+    }
+    this._setStatusText(text + tail, err);
+    bar.style.width = `${Math.round(prog * 100)}%`;
+  }
+
+  _renderPeaks(m) {
+    const el = this.shadowRoot.getElementById("peaks");
+    if (!m.peaks.length) {
+      el.className = "hint";
+      el.textContent = `Nessun segnale sopra la soglia (rumore di fondo ${m.floor_db} dBFS).`;
+      return;
+    }
+    el.className = "";
+    el.innerHTML = `
+      <div class="hint" style="margin-bottom:6px">Rumore di fondo ${m.floor_db} dBFS${m.complete ? "" : " · parziale"}</div>
+      <table><thead><tr><th>MHz</th><th class="num">dBFS</th><th class="num">sopra rumore</th></tr></thead><tbody>
+      ${m.peaks.map((p) => `<tr class="pk" data-f="${p.freq_mhz}"><td>${p.freq_mhz.toFixed(4)}</td>
+        <td class="num">${p.db.toFixed(1)}</td><td class="num">+${p.snr.toFixed(1)} dB</td></tr>`).join("")}
+      </tbody></table>`;
+    el.querySelectorAll("tr.pk").forEach((tr) => tr.addEventListener("click", () => {
+      const f = parseFloat(tr.dataset.f) * 1e6;
+      const full = this._spec.range_stop - this._spec.range_start;
+      const half = Math.max(50e3, full * 0.02);
+      this._view = [Math.max(this._spec.range_start, f - half), Math.min(this._spec.range_stop, f + half)];
+      this._draw();
+    }));
+  }
+
+  // ---------------------------------------------------------------- grafico
+
+  _bindChart() {
+    const c = this.$spec;
+    const fx = (e) => { const r = c.getBoundingClientRect(); return e.clientX - r.left; };
+    c.addEventListener("pointerdown", (e) => {
+      if (!this._plot) return;
+      c.setPointerCapture(e.pointerId);
+      this._drag = { x0: fx(e), x1: fx(e) };
+    });
+    c.addEventListener("pointermove", (e) => {
+      this._hoverX = fx(e);
+      if (this._drag) this._drag.x1 = this._hoverX;
+      this._draw();
+    });
+    c.addEventListener("pointerleave", () => { this._hoverX = null; this._draw(); });
+    c.addEventListener("pointerup", () => {
+      const d = this._drag;
+      this._drag = null;
+      if (d && this._plot && Math.abs(d.x1 - d.x0) > 6) {
+        const a = this._plot.xToF(Math.min(d.x0, d.x1)), b = this._plot.xToF(Math.max(d.x0, d.x1));
+        this._view = [a, b];
+      }
+      this._draw();
+    });
+    c.addEventListener("dblclick", () => { this._view = null; this._draw(); });
+  }
+
+  _draw() {
+    if (this._raf) return;
+    this._raf = requestAnimationFrame(() => {
+      this._raf = null;
+      this._drawSpectrum();
+      this._drawWaterfall();
+      const z = this.shadowRoot.getElementById("resetzoom");
+      if (z) z.disabled = !this._view;
+      const zs = this.shadowRoot.getElementById("zoomscan");
+      if (zs) zs.disabled = !this._view;
+    });
+  }
+
+  _setupCanvas(c) {
+    const dpr = window.devicePixelRatio || 1;
+    const w = c.clientWidth, h = c.clientHeight;
+    if (!w || !h) return null;
+    if (c.width !== Math.round(w * dpr) || c.height !== Math.round(h * dpr)) {
+      c.width = Math.round(w * dpr);
+      c.height = Math.round(h * dpr);
+    }
+    const ctx = c.getContext("2d");
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, w, h);
+    return { ctx, w, h };
+  }
+
+  // massimo dei valori che cadono nella colonna [fa, fb)
+  static _colMax(values, f0, bin, fa, fb) {
+    let ia = Math.floor((fa - f0) / bin + 0.5), ib = Math.floor((fb - f0) / bin + 0.5);
+    if (ib <= ia) ib = ia + 1;
+    ia = Math.max(0, ia);
+    ib = Math.min(values.length, ib);
+    let m = null;
+    for (let i = ia; i < ib; i++) { const v = values[i]; if (v !== null && (m === null || v > m)) m = v; }
+    return m;
+  }
+
+  _drawSpectrum() {
+    const s = this._spec;
+    const g = this._setupCanvas(this.$spec);
+    if (!g) return;
+    const { ctx, w, h } = g;
+    const css = getComputedStyle(this);
+    const txt = css.getPropertyValue("--secondary-text-color").trim() || "#888";
+    const grid = css.getPropertyValue("--divider-color").trim() || "rgba(128,128,128,.25)";
+    const prim = css.getPropertyValue("--primary-color").trim() || "#03a9f4";
+    ctx.font = "11px Roboto, sans-serif";
+
+    if (!s) {
+      ctx.fillStyle = txt;
+      ctx.textAlign = "center";
+      ctx.fillText("In attesa della prima scansione…", w / 2, h / 2);
+      this._plot = null;
+      return;
+    }
+
+    const L = 46, R = 10, T = 10, B = 24;
+    const pw = w - L - R, ph = h - T - B;
+    const lo = this._view ? this._view[0] : s.range_start;
+    const hi = this._view ? this._view[1] : s.range_stop;
+    const span = hi - lo;
+    const xToF = (x) => lo + ((x - L) / pw) * span;
+    const fToX = (f) => L + ((f - lo) / span) * pw;
+
+    // valori per colonna di pixel
+    const cols = Math.max(1, Math.floor(pw));
+    const line = new Array(cols), maxl = new Array(cols);
+    let vmin = Infinity, vmax = -Infinity;
+    for (let x = 0; x < cols; x++) {
+      const fa = lo + (x / cols) * span, fb = lo + ((x + 1) / cols) * span;
+      const v = SpettroPanel._colMax(s.values, s.f_start, s.bin_hz, fa, fb);
+      line[x] = v;
+      if (v !== null) { vmin = Math.min(vmin, v); vmax = Math.max(vmax, v); }
+      if (this._showMax && this._maxHold && this._lastComplete) {
+        const mv = SpettroPanel._colMax(this._maxHold, this._lastComplete.f_start, this._lastComplete.bin_hz, fa, fb);
+        maxl[x] = mv;
+        if (mv !== null) vmax = Math.max(vmax, mv);
+      }
+    }
+    if (!isFinite(vmin)) { vmin = -80; vmax = -20; }
+    const floor = s.floor_db ?? vmin;
+    let yMin = Math.floor((Math.min(floor - 10, vmin) - 2) / 10) * 10;
+    let yMax = Math.ceil((vmax + 3) / 10) * 10;
+    if (yMax - yMin < 20) yMax = yMin + 20;
+    this._yRange = [Math.max(floor - 5, yMin), yMax];
+    const vToY = (v) => T + ph - ((v - yMin) / (yMax - yMin)) * ph;
+
+    // griglia e assi
+    ctx.strokeStyle = grid;
+    ctx.fillStyle = txt;
+    ctx.lineWidth = 1;
+    ctx.textAlign = "right";
+    ctx.textBaseline = "middle";
+    const yStep = yMax - yMin > 60 ? 20 : 10;
+    for (let v = yMin; v <= yMax; v += yStep) {
+      const y = Math.round(vToY(v)) + 0.5;
+      ctx.beginPath(); ctx.moveTo(L, y); ctx.lineTo(L + pw, y); ctx.stroke();
+      ctx.fillText(`${v}`, L - 6, y);
+    }
+    ctx.save();
+    ctx.translate(11, T + ph / 2); ctx.rotate(-Math.PI / 2);
+    ctx.textAlign = "center"; ctx.fillText("dBFS", 0, 0);
+    ctx.restore();
+    ctx.textAlign = "center";
+    ctx.textBaseline = "top";
+    const xStep = niceStep(span, Math.max(2, Math.floor(pw / 90)));
+    for (let f = Math.ceil(lo / xStep) * xStep; f <= hi; f += xStep) {
+      const x = Math.round(fToX(f)) + 0.5;
+      ctx.beginPath(); ctx.moveTo(x, T); ctx.lineTo(x, T + ph); ctx.stroke();
+      ctx.fillText(fmtMHz(f, span), x, T + ph + 6);
+    }
+
+    ctx.save();
+    ctx.beginPath(); ctx.rect(L, T, pw, ph); ctx.clip();
+
+    // max hold
+    if (this._showMax && this._maxHold) {
+      ctx.strokeStyle = "rgba(255,152,0,.75)";
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      let pen = false;
+      for (let x = 0; x < cols; x++) {
+        const v = maxl[x];
+        if (v === null || v === undefined) { pen = false; continue; }
+        const px = L + x + 0.5, py = vToY(v);
+        pen ? ctx.lineTo(px, py) : ctx.moveTo(px, py);
+        pen = true;
+      }
+      ctx.stroke();
+    }
+
+    // spettro con riempimento
+    let seg = [];
+    const flush = () => {
+      if (seg.length < 2) { seg = []; return; }
+      ctx.beginPath();
+      ctx.moveTo(seg[0][0], T + ph);
+      for (const [px, py] of seg) ctx.lineTo(px, py);
+      ctx.lineTo(seg[seg.length - 1][0], T + ph);
+      ctx.closePath();
+      ctx.fillStyle = prim;
+      ctx.globalAlpha = 0.22;
+      ctx.fill();
+      ctx.globalAlpha = 1;
+      ctx.beginPath();
+      seg.forEach(([px, py], i) => (i ? ctx.lineTo(px, py) : ctx.moveTo(px, py)));
+      ctx.strokeStyle = prim;
+      ctx.lineWidth = 1.2;
+      ctx.stroke();
+      seg = [];
+    };
+    for (let x = 0; x < cols; x++) {
+      const v = line[x];
+      if (v === null) { flush(); continue; }
+      seg.push([L + x + 0.5, vToY(v)]);
+    }
+    flush();
+
+    // soglia di rilevamento
+    if (s.floor_db != null && this._status && this._status.settings) {
+      const y = vToY(s.floor_db + this._status.settings.threshold_db);
+      ctx.setLineDash([4, 4]);
+      ctx.strokeStyle = "rgba(219,68,55,.6)";
+      ctx.beginPath(); ctx.moveTo(L, y); ctx.lineTo(L + pw, y); ctx.stroke();
+      ctx.setLineDash([]);
+    }
+
+    // posizione della scansione in corso
+    if (s.cursor != null && s.cursor >= lo && s.cursor <= hi) {
+      const x = fToX(s.cursor);
+      ctx.fillStyle = "rgba(128,128,128,.12)";
+      ctx.fillRect(x, T, L + pw - x, ph);
+      ctx.strokeStyle = prim;
+      ctx.beginPath(); ctx.moveTo(x, T); ctx.lineTo(x, T + ph); ctx.stroke();
+    }
+
+    // picchi
+    ctx.textAlign = "center";
+    ctx.textBaseline = "bottom";
+    const labeled = [];
+    s.peaks.forEach((p, i) => {
+      const f = p.freq_mhz * 1e6;
+      if (f < lo || f > hi) return;
+      const x = fToX(f), y = vToY(p.db);
+      ctx.fillStyle = "#e53935";
+      ctx.beginPath(); ctx.moveTo(x, y - 3); ctx.lineTo(x - 4, y - 10); ctx.lineTo(x + 4, y - 10); ctx.closePath(); ctx.fill();
+      if (i < 12 && labeled.every((lx) => Math.abs(lx - x) > 52)) {
+        labeled.push(x);
+        ctx.fillStyle = txt;
+        const lx = Math.min(Math.max(x, L + 22), L + pw - 22);
+        ctx.fillText(p.freq_mhz.toFixed(span < 5e6 ? 3 : 2), lx, Math.max(T + 12, y - 12));
+      }
+    });
+
+    // selezione zoom
+    if (this._drag) {
+      const a = Math.min(this._drag.x0, this._drag.x1), b = Math.max(this._drag.x0, this._drag.x1);
+      ctx.fillStyle = "rgba(3,169,244,.15)";
+      ctx.fillRect(a, T, b - a, ph);
+    }
+    ctx.restore();
+
+    // cursore con lettura
+    const hx = this._hoverX;
+    if (hx !== null && hx >= L && hx <= L + pw && !this._drag) {
+      const col = Math.min(cols - 1, Math.max(0, Math.floor(hx - L)));
+      const v = line[col];
+      ctx.strokeStyle = txt;
+      ctx.setLineDash([2, 3]);
+      ctx.beginPath(); ctx.moveTo(hx + 0.5, T); ctx.lineTo(hx + 0.5, T + ph); ctx.stroke();
+      ctx.setLineDash([]);
+      const label = `${fmtMHz(xToF(hx), span / 10)} MHz${v !== null ? `  ${v.toFixed(1)} dBFS` : ""}`;
+      ctx.font = "12px Roboto, sans-serif";
+      const tw = ctx.measureText(label).width + 12;
+      const bx = Math.min(Math.max(L, hx + 8), L + pw - tw);
+      ctx.fillStyle = css.getPropertyValue("--card-background-color").trim() || "#fff";
+      ctx.strokeStyle = grid;
+      ctx.fillRect(bx, T + 4, tw, 20);
+      ctx.strokeRect(bx + 0.5, T + 4.5, tw, 20);
+      ctx.fillStyle = css.getPropertyValue("--primary-text-color").trim() || "#000";
+      ctx.textAlign = "left";
+      ctx.textBaseline = "middle";
+      ctx.fillText(label, bx + 6, T + 14);
+    }
+
+    this._plot = { L, pw, xToF };
+  }
+
+  _drawWaterfall() {
+    const g = this._setupCanvas(this.$wf);
+    if (!g) return;
+    const { ctx, w, h } = g;
+    const rows = this._history;
+    const s = this._spec;
+    if (!s || !rows.length) {
+      ctx.fillStyle = "#080820";
+      ctx.fillRect(0, 0, w, h);
+      return;
+    }
+    const L = 46, R = 10;
+    const pw = Math.max(1, Math.floor(w - L - R));
+    const lo = this._view ? this._view[0] : s.range_start;
+    const hi = this._view ? this._view[1] : s.range_stop;
+    const span = hi - lo;
+    const [vlo, vhi] = this._yRange || [-80, -20];
+    const nrows = Math.min(rows.length, MAX_HISTORY);
+    const img = ctx.createImageData(pw, nrows);
+    for (let r = 0; r < nrows; r++) {
+      const row = rows[r];
+      for (let x = 0; x < pw; x++) {
+        const fa = lo + (x / pw) * span, fb = lo + ((x + 1) / pw) * span;
+        const v = SpettroPanel._colMax(row.values, row.f_start, row.bin_hz, fa, fb);
+        const o = (r * pw + x) * 4;
+        const t = v === null ? 0 : Math.max(0, Math.min(255, Math.round(((v - vlo) / (vhi - vlo)) * 255)));
+        img.data[o] = LUT[t * 3]; img.data[o + 1] = LUT[t * 3 + 1]; img.data[o + 2] = LUT[t * 3 + 2]; img.data[o + 3] = 255;
+      }
+    }
+    const off = document.createElement("canvas");
+    off.width = pw; off.height = nrows;
+    off.getContext("2d").putImageData(img, 0, 0);
+    ctx.fillStyle = "#080820";
+    ctx.fillRect(L, 0, pw, h);
+    const rowH = h / MAX_HISTORY;
+    ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(off, L, 0, pw, Math.max(rowH * nrows, 1));
+    ctx.fillStyle = getComputedStyle(this).getPropertyValue("--secondary-text-color").trim() || "#888";
+    ctx.font = "11px Roboto, sans-serif";
+    ctx.textAlign = "right";
+    ctx.textBaseline = "top";
+    ctx.fillText("ora", L - 6, 2);
+    ctx.textBaseline = "bottom";
+    if (nrows > 1) ctx.fillText(`-${nrows - 1}`, L - 6, Math.max(rowH * nrows, 14));
+  }
+}
+
+if (!customElements.get("spettro-panel")) customElements.define("spettro-panel", SpettroPanel);
