@@ -20,6 +20,8 @@ USABLE_FRACTION = 0.8  # i bordi della banda sono attenuati dal filtro della chi
 IMG_ROWS = 400
 IMG_COLS = 512
 ACTIVE_DB = 6.0  # un istante conta come "trasmissione" se supera il rumore di questi dB
+CONTINUOUS = 0.9  # attivo per almeno questa frazione del tempo = trasmissione continua
+VOICE_MAX_KHZ = 25.0  # la fonia analogica a banda stretta occupa meno di così (NFM ~11 kHz, AM ~6 kHz)
 JOIN_HZ = 60e3  # buchi più stretti di così restano nello stesso segnale (es. i due toni di un FSK)
 
 # piano delle bande (MHz) usato per dare un contesto all'AI e al pannello
@@ -91,30 +93,40 @@ def _runs(mask: np.ndarray) -> list[tuple[int, int]]:
     return list(zip(np.nonzero(d == 1)[0].tolist(), np.nonzero(d == -1)[0].tolist(), strict=True))
 
 
-def classify(r: dict[str, Any]) -> tuple[str, str]:
-    """Ipotesi sul tipo di segnale dalle sole misure, e la demodulazione più adatta per ascoltarlo."""
+def classify(r: dict[str, Any]) -> tuple[str, str | None]:
+    """Ipotesi sul tipo di segnale dalle sole misure, e la demodulazione più adatta per ascoltarlo.
+
+    Il modo audio è None per i segnali digitali: demodulati si sente solo rumore.
+    """
     if not r["detected"]:
-        return "nessun segnale chiaro sopra il rumore", "nfm"
+        return "nessun segnale chiaro sopra il rumore", None
     f, bw, tr = r["center_mhz"], r["obw_99_khz"], r["freq_track"]
     moving = tr.get("frac_frames_freq_moving", 0)
     up = tr.get("frac_moves_upward", 0.5)
     if 87.5 <= f <= 108:
         return "FM a banda larga: radio broadcast (audio)", "wfm"
     if moving > 0.5 and (up > 0.7 or up < 0.3) and bw >= 50:
-        return "chirp: frequenza che " + ("sale" if up > 0.5 else "scende") + " in modo regolare (LoRa?)", "nfm"
+        return "chirp: frequenza che " + ("sale" if up > 0.5 else "scende") + " in modo regolare (LoRa?)", None
     if r["tones"] == 2 and moving > 0.2 and not (r["continuous"] and bw >= 40):
-        return "due toni alternati: FSK (dati digitali)", "nfm"
-    if 118 <= f <= 137:
+        return "due toni alternati: FSK (dati digitali)", None
+    if 118 <= f <= 137 and bw < VOICE_MAX_KHZ:
         return "AM: banda aerea (voce)", "am"
-    if r["continuous"] and bw >= 40:
-        return "segnale continuo a banda larga (FM broadcast, video o digitale)", "wfm"
+    if bw >= VOICE_MAX_KHZ:
+        # troppo largo per la fonia analogica: modulazione digitale
+        if (880 <= f <= 960 or 1710 <= f <= 1880) and 120 <= bw <= 350:
+            return "portante GSM (200 kHz, GMSK): telefonia cellulare digitale, cifrata", None
+        if bw >= 1000:
+            return "segnale digitale a banda larga (OFDM: LTE, DAB+ o TV digitale)", None
+        if r["continuous"]:
+            return "segnale digitale continuo (dati)", None
+        return "pacchetti di dati digitali", None
     if r["continuous"] or (r["burst_ms_median"] or 0) >= 500:
         # AM e portanti hanno una riga stretta che domina; in FM la potenza si sparge sulla deviazione
         if moving > 0.2 or r["bw_3db_khz"] >= 2.5 * r["resolution_hz"] / 1e3:
             return "FM a banda stretta: trasmissione in fonia o continua", "nfm"
         return "portante stabile o AM", "am"
     if r["bursts"]:
-        return "brevi pacchetti a impulsi: probabilmente dati (telemetria, sensori, telecomandi)", "nfm"
+        return "brevi pacchetti a impulsi: probabilmente dati (telemetria, sensori, telecomandi)", None
     return "segnale non classificato", "nfm"
 
 
@@ -135,12 +147,20 @@ def analyze_iq(
     lin = (spec.real**2 + spec.imag**2) / norm  # frames x n, potenza lineare
     c = n // 2
     lin[:, c - 2 : c + 3] = (lin[:, c - 4 : c - 3] + lin[:, c + 4 : c + 5]) / 2  # picco DC della chiavetta
+    bin_hz = rate / n
+    keep = int(n * USABLE_FRACTION) // 2
+
+    # dopo il cambio di frequenza la chiavetta può dare qualche ms quasi muto: si scarta
+    total = lin[:, c - keep : c + keep].sum(axis=1)
+    quiet = total < np.median(total) / 4
+    skip = int(np.argmin(quiet)) if quiet[0] else 0
+    if 0 < skip <= frames // 5:
+        lin, frames = lin[skip:], frames - skip
+        iq = iq[skip * n :]
     db = 10 * np.log10(lin + 1e-20)
 
-    bin_hz = rate / n
     frame_s = n / rate
     freqs = center_hz + (np.arange(n) - c) * bin_hz
-    keep = int(n * USABLE_FRACTION) // 2
     lo_u, hi_u = c - keep, c + keep  # bin utilizzabili
 
     mean_db = 10 * np.log10(lin.mean(axis=0) + 1e-20)
@@ -272,7 +292,7 @@ def analyze_iq(
         "obw_99_khz": round(obw / 1e3, 1),
         "tones": tones,
         "duty_cycle": round(duty, 3),
-        "continuous": duty > 0.97,
+        "continuous": duty >= CONTINUOUS,
         "bursts": len(merged),
         "burst_ms_min": round(min(durations), 1) if durations else None,
         "burst_ms_median": round(float(np.median(durations)), 1) if durations else None,

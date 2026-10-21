@@ -816,14 +816,22 @@ class SpettroPanel extends HTMLElement {
       </div>
       ${r.audio ? `<div class="row">
           <select id="audmode">${[["wfm", "FM larga (radio)"], ["nfm", "FM stretta (voce)"], ["am", "AM"]]
-            .map(([k, t]) => `<option value="${k}"${k === r.audio_mode ? " selected" : ""}>${t}</option>`).join("")}</select>
+            .map(([k, t]) => `<option value="${k}"${k === (r.audio_mode || "nfm") ? " selected" : ""}>${t}</option>`).join("")}</select>
           <audio id="player" controls preload="auto" style="flex:1;min-width:200px;height:36px"></audio>
-        </div>` : ""}
+        </div>
+        ${r.audio_mode ? "" : `<div class="hint">Segnale digitale: demodulato si sente solo rumore.</div>`}` : ""}
       ${aiCtl}`;
     const player = this.shadowRoot.getElementById("player");
     if (player) {
       const sel = this.shadowRoot.getElementById("audmode");
-      const load = () => { player.src = `data:audio/wav;base64,${r.audio[sel.value]}`; };
+      // Blob invece di un URL data: più affidabile sui browser mobili con file da centinaia di kB
+      const load = () => {
+        if (player.src) URL.revokeObjectURL(player.src);
+        const bin = atob(r.audio[sel.value]);
+        const bytes = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+        player.src = URL.createObjectURL(new Blob([bytes], { type: "audio/wav" }));
+      };
       sel.addEventListener("change", () => { load(); player.play().catch(() => {}); });
       load();
     }
