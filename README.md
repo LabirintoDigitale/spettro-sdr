@@ -62,7 +62,7 @@ Esempio reale: scansione da 600 a 1500 MHz, poi ingrandita sulla banda GSM 900.
 - **Applica** salva e riparte; **Scansiona ora** non aspetta la pausa.
 - **Segnali rilevati**: frequenza, livello e dB sopra il rumore, dal più forte. Qui in testa ci sono le celle GSM 900 (933–956 MHz) e poi le portanti LTE 800 (760–821 MHz). Dalla versione 1.4.5 questa tabella è sostituita dalla scheda **Archivio spike**, che elenca i segnali analizzati con le loro analisi.
 
-**4. RDS di una radio FM** (dettaglio, analisi automatica di 5 s su 99,6 MHz)
+**4. RDS di una radio FM** (finestra di Spettro, analisi automatica di 5 s su 99,6 MHz)
 
 <p align="center">
   <a href="https://raw.githubusercontent.com/LabirintoDigitale/spettro-sdr/main/docs/images/screenshots/rds.jpg"><img src="https://raw.githubusercontent.com/LabirintoDigitale/spettro-sdr/main/docs/images/screenshots/rds.jpg" width="800" alt="Analisi di una radio FM con i dati RDS decodificati"></a>
@@ -72,6 +72,7 @@ Esempio reale: scansione da 600 a 1500 MHz, poi ingrandita sulla banda GSM 900.
 - Il nome ricevuto finisce nel **Tipo probabile** (*radio broadcast «M DUE O»*), quindi anche nell'Archivio spike.
 - **Programma** è il tipo dichiarato dalla stazione (qui *varietà*), **Codice PI** l'identificativo unico della stazione (in Italia inizia con 5), **Altre frequenze** quelle su cui la stessa radio trasmette in altre zone, **Stereo** indica il pilota a 19 kHz e **Traffico** se la radio dà informazioni sul traffico. Se la stazione trasmette l'ora, compare anche **Ora trasmessa**.
 - *57 gruppi RDS ricevuti* in 5 s: nome e testo vengono confermati sulle ripetizioni, così un errore isolato non li sporca; con segnale debole i caratteri mancanti compaiono come «·».
+- A destra l'**Archivio spike** con le analisi automatiche fatte scansionando la banda FM: ora, frequenza, SNR e, sotto, il tipo rilevato (le righe *nessun segnale chiaro sopra il rumore* sono picchi troppo deboli per essere misurati).
 - Nella cascata si vede l'audio: la larghezza del segnale cambia con il volume della musica e della voce, e a circa un terzo dall'alto una breve pausa lo stringe quasi alla sola portante. Con il lettore sotto l'immagine si ascoltano i 5 s registrati.
 
 ## Requisiti
