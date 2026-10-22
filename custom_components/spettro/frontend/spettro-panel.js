@@ -66,6 +66,8 @@ class SpettroPanel extends HTMLElement {
     this._showMax = true;
     this._sel = null; // frequenza (Hz) scelta per l'analisi
     this._ana = null; // risultato dell'ultima analisi
+    this._archive = []; // analisi archiviate (solo indice), dalla più recente
+    this._archHours = null;
   }
 
   set hass(hass) {
@@ -109,6 +111,7 @@ class SpettroPanel extends HTMLElement {
       this._subscribing = false;
     }
     if (!this._tick) this._tick = setInterval(() => this._updateStatus(), 1000);
+    this._loadArchive();
     if (this._ro && this.$spec) { this._ro.observe(this.$spec); this._ro.observe(this.$wf); }
   }
 
@@ -129,6 +132,14 @@ class SpettroPanel extends HTMLElement {
       this._updateStatus();
       return;
     }
+    if (m.kind === "analysis") {
+      if (m.entry && !this._archive.some((e) => e.id === m.entry.id)) {
+        this._archive.unshift(m.entry);
+        this._renderArchive();
+      }
+      return;
+    }
+    if (m.kind === "archive_pruned") { this._loadArchive(); return; }
     if (m.kind !== "spectrum") return;
     const grid = (a, b) => a && b && a.f_start === b.f_start && a.bin_hz === b.bin_hz;
     if (m.complete) {
@@ -215,6 +226,11 @@ class SpettroPanel extends HTMLElement {
         .answer { white-space:pre-wrap; font-size:14px; line-height:1.45; background:var(--secondary-background-color);
                   border-radius:6px; padding:10px; }
         .err { color:var(--error-color,#db4437); }
+        td.an { text-align:center; color:var(--primary-color); }
+        #archive table td { cursor:pointer; }
+        #archive tr:hover td { background:var(--secondary-background-color); }
+        #archive td.kind { color:var(--secondary-text-color); font-size:12px; }
+        .anahead { font-size:12px; color:var(--secondary-text-color); }
       </style>
       <div class="toolbar"><ha-menu-button></ha-menu-button><div class="title">Spettro</div></div>
       <div class="content">
@@ -258,6 +274,12 @@ class SpettroPanel extends HTMLElement {
             </div>
             <label class="chk" style="margin-top:8px" title="Con il pannello chiuso il server rtl_tcp resta libero (niente traffico di rete)">
               <input type="checkbox" id="viewonly"> Scansiona solo con il pannello aperto</label>
+            <label class="chk" style="margin-top:4px" title="Quando un passo della scansione trova un picco sopra la soglia, la scansione si ferma, il picco viene registrato e analizzato (1 s) e poi si riprende">
+              <input type="checkbox" id="autoana"> Analizza subito i picchi trovati</label>
+            <div class="grid2" style="margin-top:8px">
+              <label title="Un picco già analizzato non viene rianalizzato in automatico prima di questo tempo (0 = ogni volta)">Rianalizza dopo (min)<input id="reana" type="number" step="1" min="0"></label>
+              <label title="Le analisi archiviate più vecchie vengono cancellate">Archivio: cancella dopo (h)<input id="archhours" type="number" step="1" min="1"></label>
+            </div>
             <details>
               <summary>Avanzate</summary>
               <div class="grid2">
@@ -281,6 +303,14 @@ class SpettroPanel extends HTMLElement {
             <h3>Segnali rilevati</h3>
             <div id="peaks" class="hint">Nessun dato ancora.</div>
           </div>
+          <div class="card">
+            <div class="row" style="justify-content:space-between">
+              <h3 style="margin:0">Archivio spike</h3>
+              <button id="archclear" title="Cancella tutte le analisi archiviate">Svuota</button>
+            </div>
+            <div class="hint" id="archinfo" style="margin:6px 0"></div>
+            <div id="archive" class="hint">Nessuna analisi archiviata.</div>
+          </div>
         </div>
       </div>`;
 
@@ -291,7 +321,8 @@ class SpettroPanel extends HTMLElement {
     this._menu.hass = this._hass;
     this._menu.narrow = this._narrow;
 
-    const form = ["start", "stop", "interval", "gain", "threshold", "viewonly", "rate", "fft", "settle", "ppm"];
+    const form = ["start", "stop", "interval", "gain", "threshold", "viewonly", "autoana", "reana", "archhours",
+      "rate", "fft", "settle", "ppm"];
     for (const id of form) $(id).addEventListener("input", () => {
       this._formDirty = true;
       if (id === "start" || id === "stop") $("preset").value = "0";
@@ -325,6 +356,15 @@ class SpettroPanel extends HTMLElement {
     });
     $("resetzoom").addEventListener("click", () => { this._view = null; this._draw(); });
     $("analyze").addEventListener("click", () => this._analyze());
+    $("archclear").addEventListener("click", async () => {
+      if (!this._archive.length || !confirm("Cancellare tutte le analisi archiviate?")) return;
+      try {
+        await this._hass.callWS({ type: "spettro/archive_delete" });
+        await this._loadArchive();
+      } catch (err) {
+        this._msg(err.message || String(err), true);
+      }
+    });
     $("zoomscan").addEventListener("click", () => {
       if (!this._view) return;
       $("start").value = (this._view[0] / 1e6).toFixed(3);
@@ -353,6 +393,9 @@ class SpettroPanel extends HTMLElement {
     $("settle").value = s.settle_ms;
     $("ppm").value = s.ppm;
     $("viewonly").checked = !!s.only_when_viewed;
+    $("autoana").checked = !!s.auto_analyze;
+    $("reana").value = s.reanalyze_min ?? 30;
+    $("archhours").value = s.archive_hours ?? 24;
     const idx = PRESETS.findIndex((p) => p[1] === s.start_mhz && p[2] === s.stop_mhz);
     $("preset").value = String(idx > 0 ? idx : 0);
   }
@@ -376,6 +419,9 @@ class SpettroPanel extends HTMLElement {
       settle_ms: parseInt($("settle").value, 10) || 0,
       ppm: parseInt($("ppm").value, 10) || 0,
       only_when_viewed: $("viewonly").checked,
+      auto_analyze: $("autoana").checked,
+      reanalyze_min: Math.max(0, parseFloat($("reana").value) || 0),
+      archive_hours: Math.max(1, parseFloat($("archhours").value) || 24),
     };
     $("apply").disabled = true;
     try {
@@ -417,7 +463,11 @@ class SpettroPanel extends HTMLElement {
     let text, err = false, prog = 0;
     switch (s.state) {
       case "connecting": text = `Collegamento a ${s.host}:${s.port}…`; break;
-      case "scanning": prog = s.progress; text = `Scansione in corso ${Math.round(s.progress * 100)}%`; break;
+      case "scanning":
+        prog = s.progress;
+        text = `Scansione in corso ${Math.round(s.progress * 100)}%`
+          + (s.auto_mhz ? ` · analisi automatica ${s.auto_mhz.toFixed(4)} MHz` : "");
+        break;
       case "idle": {
         prog = 1;
         const left = s.next_scan ? Math.max(0, Math.round(s.next_scan - Date.now() / 1000)) : null;
@@ -450,13 +500,16 @@ class SpettroPanel extends HTMLElement {
     el.className = "";
     el.innerHTML = `
       <div class="hint" style="margin-bottom:6px">Rumore di fondo ${m.floor_db} dBFS${m.complete ? "" : " · parziale"}</div>
-      <table><thead><tr><th>MHz</th><th class="num">dBFS</th><th class="num">sopra rumore</th></tr></thead><tbody>
-      ${m.peaks.map((p) => `<tr class="pk" data-f="${p.freq_mhz}"><td>${p.freq_mhz.toFixed(4)}</td>
-        <td class="num">${p.db.toFixed(1)}</td><td class="num">+${p.snr.toFixed(1)} dB</td></tr>`).join("")}
-      </tbody></table>`;
+      <table><thead><tr><th>MHz</th><th class="num">dBFS</th><th class="num">sopra rumore</th><th title="Analisi archiviata">an.</th></tr></thead><tbody>
+      ${m.peaks.map((p) => `<tr class="pk" data-f="${p.freq_mhz}" data-aid="${esc(p.aid || "")}"><td>${p.freq_mhz.toFixed(4)}</td>
+        <td class="num">${p.db.toFixed(1)}</td><td class="num">+${p.snr.toFixed(1)} dB</td>
+        <td class="an" title="${esc(p.kind || "")}">${p.aid ? "●" : ""}</td></tr>`).join("")}
+      </tbody></table>
+      <div class="hint" style="margin-top:6px">● = già analizzato: tocca la riga per vedere l'analisi.</div>`;
     el.querySelectorAll("tr.pk").forEach((tr) => tr.addEventListener("click", () => {
       const f = parseFloat(tr.dataset.f) * 1e6;
       this._select(f);
+      if (tr.dataset.aid) this._openArchived(tr.dataset.aid);
       const full = this._spec.range_stop - this._spec.range_start;
       const half = Math.max(50e3, full * 0.02);
       this._view = [Math.max(this._spec.range_start, f - half), Math.min(this._spec.range_stop, f + half)];
@@ -772,6 +825,59 @@ class SpettroPanel extends HTMLElement {
     }
   }
 
+  async _loadArchive() {
+    try {
+      const res = await this._hass.callWS({ type: "spettro/archive_list" });
+      this._archive = res.entries;
+      this._archHours = res.hours;
+      this._renderArchive();
+    } catch (err) {
+      /* integrazione vecchia o non caricata: l'archivio resta vuoto */
+    }
+  }
+
+  _renderArchive() {
+    const el = this.shadowRoot.getElementById("archive");
+    const info = this.shadowRoot.getElementById("archinfo");
+    if (!el) return;
+    const hours = this._archHours ?? (this._status && this._status.settings && this._status.settings.archive_hours);
+    info.textContent = `${this._archive.length} analisi · cancellate dopo ${hours ?? "?"} ore`;
+    if (!this._archive.length) {
+      el.className = "hint";
+      el.textContent = "Nessuna analisi archiviata. Attiva \"Analizza subito i picchi trovati\" o usa Analizza.";
+      return;
+    }
+    const fmt = (t) => {
+      const d = new Date(t * 1000), today = new Date().toDateString() === d.toDateString();
+      return (today ? "" : d.toLocaleDateString([], { day: "2-digit", month: "2-digit" }) + " ")
+        + d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    };
+    el.className = "";
+    el.innerHTML = `<table><thead><tr><th>Ora</th><th>MHz</th><th class="num">SNR</th></tr></thead><tbody>
+      ${this._archive.map((e) => `<tr data-id="${esc(e.id)}">
+        <td>${fmt(e.timestamp)}${e.auto ? "" : " ✋"}</td><td>${e.target_mhz.toFixed(4)}</td><td class="num">${e.snr_db} dB</td></tr>
+        <tr data-id="${esc(e.id)}"><td colspan="3" class="kind">${esc(e.kind)}</td></tr>`).join("")}
+      </tbody></table>
+      <div class="hint" style="margin-top:6px">✋ = analisi avviata a mano.</div>`;
+    el.querySelectorAll("tr[data-id]").forEach((tr) => tr.addEventListener("click", () => {
+      const e = this._archive.find((x) => x.id === tr.dataset.id);
+      if (e) this._select(e.target_mhz * 1e6);
+      this._openArchived(tr.dataset.id, true);
+    }));
+  }
+
+  async _openArchived(id, scroll = false) {
+    const out = this.shadowRoot.getElementById("anaout");
+    out.innerHTML = `<div class="hint">Caricamento dell'analisi…</div>`;
+    if (scroll) this.shadowRoot.querySelector(".ana").scrollIntoView({ behavior: "smooth", block: "start" });
+    try {
+      this._ana = await this._hass.callWS({ type: "spettro/archive_get", entry_id: id });
+      this._renderAnalysis();
+    } catch (err) {
+      out.innerHTML = `<div class="err">${esc(err.message || err.code || err)}</div>`;
+    }
+  }
+
   _renderAnalysis() {
     const r = this._ana;
     const out = this.shadowRoot.getElementById("anaout");
@@ -803,7 +909,10 @@ class SpettroPanel extends HTMLElement {
         <div id="aiout"></div>`
       : `<div class="hint">Per l'identificazione con l'AI serve un'entità <b>AI Task</b> (Home Assistant 2025.8+):
           aggiungi un'integrazione come Anthropic, OpenAI, Google Gemini o Ollama e attiva il suo AI Task.</div>`;
+    const when = r.timestamp ? new Date(r.timestamp * 1000).toLocaleString() : "";
     out.innerHTML = `
+      <div class="anahead">${r.auto ? "Analisi automatica durante la scansione" : "Analisi manuale"}${when ? ` · ${when}` : ""}
+        · ${r.target_mhz.toFixed(4)} MHz</div>
       <div class="anagrid">
         <div class="anaimg">
           <img src="data:image/png;base64,${r.png}" alt="Cascata del segnale">

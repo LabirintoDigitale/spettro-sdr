@@ -1,9 +1,12 @@
 """Costanti dell'integrazione Spettro."""
 
 DOMAIN = "spettro"
-VERSION = "1.3.4"
+VERSION = "1.4.0"
 
 DEFAULT_PORT = 1234
+
+# cartella (dentro la configurazione di Home Assistant) dell'archivio delle analisi
+ARCHIVE_DIR = "spettro_archivio"
 
 # opzione salvata nella config entry: interruttore "Scansione"
 OPT_ENABLED = "enabled"

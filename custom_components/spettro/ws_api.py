@@ -48,6 +48,9 @@ def async_setup(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, ws_set_enabled)
     websocket_api.async_register_command(hass, ws_analyze)
     websocket_api.async_register_command(hass, ws_ask_ai)
+    websocket_api.async_register_command(hass, ws_archive_list)
+    websocket_api.async_register_command(hass, ws_archive_get)
+    websocket_api.async_register_command(hass, ws_archive_delete)
 
 
 @callback
@@ -97,6 +100,9 @@ def ws_subscribe(hass: HomeAssistant, connection: websocket_api.ActiveConnection
         vol.Optional("settle_ms"): vol.All(vol.Coerce(int), vol.Range(min=0, max=1000)),
         vol.Optional("ppm"): vol.All(vol.Coerce(int), vol.Range(min=-200, max=200)),
         vol.Optional("only_when_viewed"): bool,
+        vol.Optional("auto_analyze"): bool,
+        vol.Optional("archive_hours"): vol.All(vol.Coerce(float), vol.Range(min=1, max=24 * 90)),
+        vol.Optional("reanalyze_min"): vol.All(vol.Coerce(float), vol.Range(min=0, max=7 * 24 * 60)),
     }
 )
 @websocket_api.require_admin
@@ -113,6 +119,7 @@ def ws_set_config(hass: HomeAssistant, connection: websocket_api.ActiveConnectio
     merged = {**ScanSettings().as_dict(), **entry.options, **changes}
     hass.config_entries.async_update_entry(entry, options=merged)
     scanner.update_settings(ScanSettings.from_dict(merged))
+    hass.async_create_task(scanner.prune_archive())  # le ore di conservazione possono essere cambiate
     connection.send_result(msg["id"], merged)
 
 
@@ -155,14 +162,16 @@ async def ws_analyze(hass: HomeAssistant, connection: websocket_api.ActiveConnec
     except (OSError, TimeoutError, RuntimeError, ValueError) as err:
         connection.send_error(msg["id"], "analysis_failed", str(err) or type(err).__name__)
         return
-    connection.send_result(
-        msg["id"],
-        {
-            **result,
-            "png": base64.b64encode(scanner.last_analysis_png).decode(),
-            "audio": {mode: base64.b64encode(wav).decode() for mode, wav in scanner.last_analysis_audio.items()},
-        },
-    )
+    connection.send_result(msg["id"], _with_media(result, scanner.last_analysis_png, scanner.last_analysis_audio))
+
+
+def _with_media(result: dict[str, Any], png: bytes, audio: dict[str, bytes]) -> dict[str, Any]:
+    """Analisi con cascata e audio in base64, come le usa il pannello."""
+    return {
+        **result,
+        "png": base64.b64encode(png).decode(),
+        "audio": {mode: base64.b64encode(wav).decode() for mode, wav in audio.items()},
+    }
 
 
 @websocket_api.websocket_command(
@@ -218,3 +227,47 @@ async def ws_ask_ai(hass: HomeAssistant, connection: websocket_api.ActiveConnect
         return
     answer = response.get("data") if isinstance(response, dict) else response
     connection.send_result(msg["id"], {"answer": str(answer), "with_image": with_image})
+
+
+@websocket_api.websocket_command({vol.Required("type"): "spettro/archive_list"})
+@callback
+def ws_archive_list(hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]) -> None:
+    """Analisi archiviate, dalla più recente."""
+    _entry, scanner = _scanner(hass, connection, msg)
+    if scanner is None:
+        return
+    entries = scanner.archive.entries if scanner.archive else []
+    connection.send_result(msg["id"], {"entries": entries, "hours": scanner.settings.archive_hours})
+
+
+@websocket_api.websocket_command({vol.Required("type"): "spettro/archive_get", vol.Required("entry_id"): str})
+@websocket_api.async_response
+async def ws_archive_get(hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]) -> None:
+    """Un'analisi dell'archivio completa di cascata e audio."""
+    _entry, scanner = _scanner(hass, connection, msg)
+    if scanner is None:
+        return
+    found = await hass.async_add_executor_job(scanner.archive.get, msg["entry_id"]) if scanner.archive else None
+    if found is None:
+        connection.send_error(msg["id"], "not_found", "Analisi non più presente nell'archivio")
+        return
+    result, png, audio = found
+    connection.send_result(msg["id"], _with_media(result, png, audio))
+
+
+@websocket_api.websocket_command({vol.Required("type"): "spettro/archive_delete", vol.Optional("entry_id"): str})
+@websocket_api.require_admin
+@websocket_api.async_response
+async def ws_archive_delete(hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]) -> None:
+    """Cancella un'analisi dall'archivio, o tutto l'archivio se entry_id manca."""
+    _entry, scanner = _scanner(hass, connection, msg)
+    if scanner is None:
+        return
+    if scanner.archive is None:
+        connection.send_result(msg["id"], {"removed": 0})
+        return
+    if msg.get("entry_id"):
+        removed = int(await hass.async_add_executor_job(scanner.archive.delete, msg["entry_id"]))
+    else:
+        removed = await hass.async_add_executor_job(scanner.archive.clear)
+    connection.send_result(msg["id"], {"removed": removed})

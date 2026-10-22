@@ -21,6 +21,7 @@ from typing import Any
 import numpy as np
 
 from .analysis import analyze_iq
+from .archive import SpikeArchive
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -57,6 +58,10 @@ CONNECT_TIMEOUT = 8
 IO_TIMEOUT = 10
 MIN_ERROR_RETRY = 10
 ANALYSIS_MAX_S = 5  # durata massima di una registrazione per l'analisi
+AUTO_ANALYSIS_S = 1.0  # registrazione dell'analisi automatica di un picco
+AUTO_MAX_PER_STEP = 3  # picchi analizzati al massimo per ogni passo della scansione
+AUTO_MAX_PER_SWEEP = 20  # e per ogni scansione completa
+SPIKE_TOL_HZ = 100e3  # due picchi così vicini sono lo stesso segnale
 
 
 @dataclass
@@ -73,6 +78,9 @@ class ScanSettings:
     settle_ms: int = 60
     ppm: int = 0
     only_when_viewed: bool = False  # scansiona solo mentre qualcuno ha il pannello aperto
+    auto_analyze: bool = False  # analizza subito i picchi trovati durante la scansione
+    archive_hours: float = 24.0  # dopo quante ore si cancellano le analisi archiviate
+    reanalyze_min: float = 30.0  # la stessa frequenza non si rianalizza in automatico prima di così
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> ScanSettings:
@@ -189,6 +197,7 @@ class SpectrumScanner:
         self.last_analysis: dict[str, Any] | None = None
         self.last_analysis_png: bytes | None = None
         self.last_analysis_audio: dict[str, bytes] = {}
+        self.archive: SpikeArchive | None = None  # impostato dall'integrazione dopo il caricamento
         self._radio = asyncio.Lock()  # una sola connessione rtl_tcp alla volta
         self._listeners: list[Callable[[dict[str, Any]], None]] = []
         self._task: asyncio.Task | None = None
@@ -212,6 +221,7 @@ class SpectrumScanner:
             "settings": settings.as_dict(),
             "enabled": enabled,
             "paused": None,
+            "auto_mhz": None,  # picco in analisi automatica
         }
         self._update_active(emit=False)
 
@@ -334,12 +344,7 @@ class SpectrumScanner:
                     await self._configure(writer, rate)
                     await self._send(writer, CMD_SET_FREQ, int(center))
                     async with asyncio.timeout(IO_TIMEOUT + ANALYSIS_MAX_S):
-                        remaining = discard_bytes
-                        while remaining > 0:
-                            chunk = await reader.read(min(remaining, READ_LIMIT))
-                            if not chunk:
-                                raise ConnectionError("Connessione chiusa dal server")
-                            remaining -= len(chunk)
+                        await self._discard(reader, discard_bytes)
                         raw = await reader.readexactly(capture_bytes)
                 finally:
                     writer.close()
@@ -353,12 +358,89 @@ class SpectrumScanner:
         finally:
             self.analyzing = False
             self._update_active()  # riparte la scansione
+        return await self._store_analysis(result, png, audio, auto=False)
+
+    async def _store_analysis(
+        self, result: dict[str, Any], png: bytes, audio: dict[str, bytes], auto: bool
+    ) -> dict[str, Any]:
+        """Ultima analisi in memoria, archivio su disco e notifica a pannello ed entità."""
         result["timestamp"] = time.time()
+        result["auto"] = auto
+        entry = None
+        if self.archive is not None:
+            try:
+                entry = await asyncio.get_running_loop().run_in_executor(None, self.archive.add, result, png, audio)
+                result["id"] = entry["id"]
+            except OSError as err:
+                _LOGGER.warning("Impossibile salvare l'analisi nell'archivio: %s", err)
         self.last_analysis = result
         self.last_analysis_png = png
         self.last_analysis_audio = audio
-        self._emit({"kind": "analysis", "analysis": result})
+        self._emit({"kind": "analysis", "analysis": result, "entry": entry})
         return result
+
+    async def prune_archive(self) -> None:
+        if self.archive is None:
+            return
+        removed = await asyncio.get_running_loop().run_in_executor(
+            None, self.archive.prune, self.settings.archive_hours * 3600
+        )
+        if removed:
+            self._emit({"kind": "archive_pruned", "removed": removed})
+
+    def _spike_candidates(self, seg: np.ndarray, f0: float, bin_hz: float, level: float) -> list[float]:
+        """Picchi di un passo della scansione sopra `level`, dal più forte, non ancora analizzati di recente."""
+        if self.archive is None or len(seg) < 3:
+            return []
+        mid = seg[1:-1]
+        idx = np.nonzero((mid > seg[:-2]) & (mid >= seg[2:]) & (mid > level))[0] + 1
+        out: list[float] = []
+        recent = time.time() - self.settings.reanalyze_min * 60
+        for i in idx[np.argsort(seg[idx])[::-1]]:
+            f = f0 + int(i) * bin_hz
+            if any(abs(f - g) <= SPIKE_TOL_HZ for g in out):
+                continue
+            if self.archive.find(f, SPIKE_TOL_HZ, newer_than=recent):
+                continue
+            out.append(f)
+            if len(out) >= AUTO_MAX_PER_STEP:
+                break
+        return out
+
+    async def _auto_analyze(
+        self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, rate: int, freq_hz: float, discard: int
+    ) -> None:
+        """Analisi di un picco a metà scansione, sulla stessa connessione e con le stesse impostazioni."""
+        center = float(round(freq_hz + rate / 8))
+        self._set_status(auto_mhz=round(freq_hz / 1e6, 4))
+        try:
+            await self._send(writer, CMD_SET_FREQ, int(center))
+            async with asyncio.timeout(IO_TIMEOUT + AUTO_ANALYSIS_S):
+                await self._discard(reader, discard)
+                raw = await reader.readexactly(int(rate * AUTO_ANALYSIS_S) * 2)
+            # durante il calcolo rtl_tcp continua a inviare: si scarta, altrimenti il passo
+            # successivo della scansione leggerebbe campioni vecchi della frequenza analizzata
+            job = asyncio.get_running_loop().run_in_executor(None, analyze_iq, raw, rate, center, freq_hz)
+            while True:
+                done, _ = await asyncio.wait([job], timeout=0)
+                if done:
+                    break
+                async with asyncio.timeout(IO_TIMEOUT):
+                    if not await reader.read(READ_LIMIT):
+                        raise ConnectionError("Connessione chiusa dal server")
+            result, png, audio = job.result()
+            await self._store_analysis(result, png, audio, auto=True)
+        finally:
+            self._set_status(auto_mhz=None)
+
+    @staticmethod
+    async def _discard(reader: asyncio.StreamReader, nbytes: int) -> None:
+        remaining = nbytes
+        while remaining > 0:
+            chunk = await reader.read(min(remaining, READ_LIMIT))
+            if not chunk:
+                raise ConnectionError("Connessione chiusa dal server")
+            remaining -= len(chunk)
 
     async def _run(self) -> None:
         while True:
@@ -381,6 +463,10 @@ class SpectrumScanner:
                 _LOGGER.exception("Errore imprevisto durante la scansione")
                 self.status["error"] = str(err)
 
+            try:
+                await self.prune_archive()
+            except OSError as err:
+                _LOGGER.warning("Pulizia dell'archivio non riuscita: %s", err)
             if not self._active.is_set():
                 self._update_active()  # messo in pausa a fine scansione: mostra lo stato "paused"
                 continue
@@ -455,23 +541,29 @@ class SpectrumScanner:
 
             t0 = time.monotonic()
             last_partial = t0
+            auto_left = AUTO_MAX_PER_SWEEP
             for i in range(steps):
                 if not self._active.is_set():
                     raise ScanPaused
                 center = f_start + (i * keep + keep / 2) * bin_hz
                 await self._send(writer, CMD_SET_FREQ, int(round(center)))
                 async with asyncio.timeout(IO_TIMEOUT):
-                    remaining = discard_bytes
-                    while remaining > 0:
-                        chunk = await reader.read(min(remaining, READ_LIMIT))
-                        if not chunk:
-                            raise ConnectionError("Connessione chiusa dal server")
-                        remaining -= len(chunk)
+                    await self._discard(reader, discard_bytes)
                     raw = await reader.readexactly(capture_bytes)
 
                 psd = compute_psd(raw, n, window, norm)
                 lo = (n - keep) // 2
                 spectrum[i * keep : (i + 1) * keep] = psd[lo : lo + keep]
+
+                # picco trovato: si interrompe la ricerca, lo si analizza subito e poi si riprende
+                if s.auto_analyze and auto_left > 0:
+                    level = float(np.median(spectrum[: (i + 1) * keep])) + s.threshold_db
+                    f0 = f_start + i * keep * bin_hz
+                    for f in self._spike_candidates(psd[lo : lo + keep], f0, bin_hz, level)[:auto_left]:
+                        if not self._active.is_set():
+                            raise ScanPaused
+                        auto_left -= 1
+                        await self._auto_analyze(reader, writer, rate, f, discard_bytes)
 
                 now = time.monotonic()
                 if now - last_partial >= PARTIAL_EVERY and i < steps - 1:
@@ -514,6 +606,12 @@ class SpectrumScanner:
         if complete and whole < len(data):
             pooled = np.append(pooled, data[whole:].max())
         peaks, floor = find_peaks(data, f_start, bin_hz, self.settings.threshold_db, min_sep_hz)
+        if self.archive is not None:
+            for p in peaks:
+                entry = self.archive.find(p["freq_mhz"] * 1e6, SPIKE_TOL_HZ)
+                if entry:
+                    p["aid"] = entry["id"]
+                    p["kind"] = entry["kind"]
         payload = {
             "kind": "spectrum",
             "sweep_id": sweep_id,

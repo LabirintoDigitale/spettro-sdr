@@ -12,6 +12,7 @@ from homeassistant.core import HomeAssistant
 
 from . import ws_api
 from .const import (
+    ARCHIVE_DIR,
     DATA_STATIC_REGISTERED,
     DOMAIN,
     OPT_ENABLED,
@@ -22,6 +23,7 @@ from .const import (
     STATIC_URL,
     VERSION,
 )
+from .archive import SpikeArchive
 from .scanner import ScanSettings, SpectrumScanner
 
 PLATFORMS = [Platform.IMAGE, Platform.SENSOR, Platform.SWITCH]
@@ -35,6 +37,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: SpettroConfigEntry) -> b
     scanner = SpectrumScanner(
         entry.data[CONF_HOST], entry.data[CONF_PORT], settings, enabled=entry.options.get(OPT_ENABLED, True)
     )
+    archive = SpikeArchive(Path(hass.config.path(ARCHIVE_DIR)))
+    await hass.async_add_executor_job(archive.load)
+    scanner.archive = archive
+    await scanner.prune_archive()
     entry.runtime_data = scanner
     hass.data[DOMAIN] = entry
 
