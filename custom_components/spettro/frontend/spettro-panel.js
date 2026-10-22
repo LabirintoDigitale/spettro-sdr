@@ -1,7 +1,7 @@
 // Pannello "Spettro" per Home Assistant: grafico dello spettro, waterfall e picchi.
 
 // deve coincidere con VERSION in const.py: se il backend ne riporta un'altra manca un riavvio
-const PANEL_VERSION = "1.4.6";
+const PANEL_VERSION = "1.4.7";
 
 const PRESETS = [
   ["Personalizzato", null, null],
@@ -72,6 +72,7 @@ class SpettroPanel extends HTMLElement {
     this._archive = []; // analisi archiviate (solo indice), dalla più recente
     this._archHours = null;
     this._archSort = { key: "timestamp", desc: true }; // colonna e verso dell'ordinamento dell'archivio
+    this._archSel = null; // id dell'analisi dell'archivio mostrata
     try {
       const saved = JSON.parse(localStorage.getItem("spettro.archSort"));
       if (saved && ["timestamp", "target_mhz", "snr_db"].includes(saved.key)) this._archSort = saved;
@@ -241,8 +242,12 @@ class SpettroPanel extends HTMLElement {
         #archive table td { cursor:pointer; }
         #archive th.sort { cursor:pointer; user-select:none; white-space:nowrap; }
         #archive th.sort:hover { color:var(--primary-text-color); }
-        #archive tr:hover td { background:var(--secondary-background-color); }
+        #archive tbody.entry:hover td { background:var(--secondary-background-color); }
         #archive td.kind { color:var(--secondary-text-color); font-size:12px; }
+        /* le due righe di un'analisi (ora/frequenza e tipo) si evidenziano insieme */
+        #archive tbody.entry tr:first-child td { border-bottom:none; }
+        #archive tbody.entry.sel td { background:rgba(3,169,244,.16); }
+        #archive tbody.entry.sel td:first-child { box-shadow:inset 3px 0 var(--primary-color); }
         .anahead { font-size:12px; color:var(--secondary-text-color); }
       </style>
       <div class="toolbar"><ha-menu-button></ha-menu-button><div class="title"><span>👻 Spettro</span><span class="ver">versione ${PANEL_VERSION}</span></div></div>
@@ -828,6 +833,8 @@ class SpettroPanel extends HTMLElement {
         type: "spettro/analyze", freq_mhz: this._sel / 1e6, duration_s: parseFloat($("anadur").value),
       });
       this._renderAnalysis();
+      this._archSel = this._ana.id || null; // nell'archivio si evidenzia l'analisi appena fatta
+      this._renderArchive();
     } catch (err) {
       $("anaout").innerHTML = `<div class="err">Analisi non riuscita: ${esc(err.message || err.code || err)}</div>`;
     } finally {
@@ -870,11 +877,11 @@ class SpettroPanel extends HTMLElement {
     const rows = this._archive.slice().sort((a, b) => (desc ? b[key] - a[key] : a[key] - b[key]));
     const th = (k, label, cls = "") => `<th class="sort ${cls}" data-key="${k}">${label}${k === key ? (desc ? " ▼" : " ▲") : ""}</th>`;
     el.className = "";
-    el.innerHTML = `<table><thead><tr>${th("timestamp", "Ora")}${th("target_mhz", "MHz")}${th("snr_db", "SNR", "num")}</tr></thead><tbody>
-      ${rows.map((e) => `<tr data-id="${esc(e.id)}">
+    el.innerHTML = `<table><thead><tr>${th("timestamp", "Ora")}${th("target_mhz", "MHz")}${th("snr_db", "SNR", "num")}</tr></thead>
+      ${rows.map((e) => `<tbody class="entry${e.id === this._archSel ? " sel" : ""}" data-id="${esc(e.id)}"><tr>
         <td>${fmt(e.timestamp)}${e.auto ? "" : " ✋"}</td><td>${e.target_mhz.toFixed(4)}</td><td class="num">${e.snr_db} dB</td></tr>
-        <tr data-id="${esc(e.id)}"><td colspan="3" class="kind">${esc(e.kind)}</td></tr>`).join("")}
-      </tbody></table>
+        <tr><td colspan="3" class="kind">${esc(e.kind)}</td></tr></tbody>`).join("")}
+      </table>
       <div class="hint" style="margin-top:6px">✋ = analisi avviata a mano.</div>`;
     el.querySelectorAll("th.sort").forEach((h) => h.addEventListener("click", () => {
       const k = h.dataset.key;
@@ -883,7 +890,7 @@ class SpettroPanel extends HTMLElement {
       try { localStorage.setItem("spettro.archSort", JSON.stringify(this._archSort)); } catch (e) { /* non disponibile */ }
       this._renderArchive();
     }));
-    el.querySelectorAll("tr[data-id]").forEach((tr) => tr.addEventListener("click", () => {
+    el.querySelectorAll("tbody[data-id]").forEach((tr) => tr.addEventListener("click", () => {
       const e = this._archive.find((x) => x.id === tr.dataset.id);
       if (e) {
         const f = e.target_mhz * 1e6;
@@ -901,6 +908,8 @@ class SpettroPanel extends HTMLElement {
   }
 
   async _openArchived(id, scroll = false) {
+    this._archSel = id;
+    this.shadowRoot.querySelectorAll("#archive tbody.entry").forEach((b) => b.classList.toggle("sel", b.dataset.id === id));
     const out = this.shadowRoot.getElementById("anaout");
     out.innerHTML = `<div class="hint">Caricamento dell'analisi…</div>`;
     if (scroll) this.shadowRoot.querySelector(".ana").scrollIntoView({ behavior: "smooth", block: "start" });
