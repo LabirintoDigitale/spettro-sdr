@@ -1,7 +1,7 @@
 // Pannello "Spettro" per Home Assistant: grafico dello spettro, waterfall e picchi.
 
 // deve coincidere con VERSION in const.py: se il backend ne riporta un'altra manca un riavvio
-const PANEL_VERSION = "1.7.1";
+const PANEL_VERSION = "1.7.2";
 
 const PRESETS = [
   ["Personalizzato", null, null],
@@ -901,7 +901,19 @@ class SpettroPanel extends HTMLElement {
     if (!name && ana && ana.rds && ana.rds.ps_complete && Math.abs(ana.target_mhz - mhz) <= 0.1) name = ana.rds.ps;
     try {
       if (fav) await this._hass.callWS({ type: "spettro/favorite_remove", freq_mhz: fav.freq_mhz });
-      else await this._hass.callWS({ type: "spettro/favorite_set", freq_mhz: mhz, name });
+      else await this._hass.callWS({ type: "spettro/favorite_set", freq_mhz: mhz, name, ...(name ? { source: "rds" } : {}) });
+    } catch (err) {
+      this._msg(err.message || String(err), true);
+    }
+  }
+
+  async _renameFav(mhz) {
+    const fav = this._favFor(mhz);
+    if (!fav) return;
+    const name = prompt(`Nome per ${fav.freq_mhz.toFixed(4)} MHz (vuoto = nome automatico):`, fav.name || "");
+    if (name === null) return;
+    try {
+      await this._hass.callWS({ type: "spettro/favorite_set", freq_mhz: fav.freq_mhz, name, source: "user" });
     } catch (err) {
       this._msg(err.message || String(err), true);
     }
@@ -917,7 +929,7 @@ class SpettroPanel extends HTMLElement {
     el.className = "";
     el.innerHTML = `<table><tbody>${this._favs.map((f) => `<tr data-f="${f.freq_mhz}">
         <td class="name">${esc(f.name || "—")}</td><td>${f.freq_mhz.toFixed(4)} MHz</td>
-        <td class="act"><button class="play" title="Analisi continua">▶</button><button class="heart" title="Togli dai preferiti">❤</button></td></tr>`).join("")}
+        <td class="act"><button class="edit" title="Cambia nome">✏</button><button class="play" title="Analisi continua">▶</button><button class="heart" title="Togli dai preferiti">❤</button></td></tr>`).join("")}
       </tbody></table>`;
     el.querySelectorAll("tr[data-f]").forEach((tr) => {
       const mhz = parseFloat(tr.dataset.f);
@@ -936,6 +948,7 @@ class SpettroPanel extends HTMLElement {
       });
       tr.querySelector("button.play").addEventListener("click", () => { this._select(mhz * 1e6); this._liveStart(mhz); });
       tr.querySelector("button.heart").addEventListener("click", () => this._toggleFav(mhz * 1e6));
+      tr.querySelector("button.edit").addEventListener("click", () => this._renameFav(mhz));
     });
   }
 
@@ -999,7 +1012,8 @@ class SpettroPanel extends HTMLElement {
     const live = this._live;
     if (!live) return;
     const fav = this._favFor(live.freq_mhz);
-    const name = (this._liveRds && this._liveRds.ps_complete && this._liveRds.ps) || (fav && fav.name) || "";
+    const name = (fav && fav.source === "user" && fav.name)
+      || (this._liveRds && this._liveRds.ps_complete && this._liveRds.ps) || (fav && fav.name) || "";
     this.shadowRoot.getElementById("livetitle").textContent = `${live.freq_mhz.toFixed(4)} MHz${name ? ` «${name}»` : ""}`;
   }
 
@@ -1073,10 +1087,10 @@ class SpettroPanel extends HTMLElement {
       this._rtHistory.unshift({ text: d.rt, time: new Date() });
       this._rtHistory = this._rtHistory.slice(0, 20);
     }
-    // un preferito senza nome prende il nome RDS della stazione
+    // il preferito prende il nome RDS della stazione, ma un nome scritto a mano resta
     const fav = this._favFor(this._live.freq_mhz);
-    if (fav && !fav.name && d.ps && d.ps_complete) {
-      this._hass.callWS({ type: "spettro/favorite_set", freq_mhz: fav.freq_mhz, name: d.ps }).catch(() => {});
+    if (fav && fav.source !== "user" && d.ps && d.ps_complete && fav.name !== d.ps) {
+      this._hass.callWS({ type: "spettro/favorite_set", freq_mhz: fav.freq_mhz, name: d.ps, source: "rds" }).catch(() => {});
     }
     this._liveTitle();
     const rows = [

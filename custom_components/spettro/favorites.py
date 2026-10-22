@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import time
 from typing import Any
 
@@ -11,6 +12,9 @@ from homeassistant.helpers.storage import Store
 STORAGE_KEY = "spettro.preferiti"
 STORAGE_VERSION = 1
 MATCH_HZ = 30e3  # una frequenza entro 30 kHz da un preferito è lo stesso preferito
+NONAME = "NONAME"
+
+# origine del nome: "auto" (NONAME n), "rds" (nome della stazione), "user" (scritto a mano, mai sovrascritto)
 
 
 class Favorites:
@@ -21,19 +25,39 @@ class Favorites:
     async def async_load(self) -> None:
         self.items = await self._store.async_load() or []
         self.items.sort(key=lambda f: f["freq_mhz"])
+        changed = False
+        for fav in self.items:
+            if "source" not in fav:  # preferiti della 1.7.0: il nome, se c'era, veniva dall'RDS
+                fav["source"] = "rds" if fav.get("name") else "auto"
+                changed = True
+            if not fav.get("name"):
+                fav["name"], fav["source"] = self._next_noname(), "auto"
+                changed = True
+        if changed:
+            await self._store.async_save(self.items)
+
+    def _next_noname(self) -> str:
+        used = {int(m.group(1)) for f in self.items if (m := re.fullmatch(rf"{NONAME} (\d+)", f.get("name") or ""))}
+        n = 1
+        while n in used:
+            n += 1
+        return f"{NONAME} {n}"
 
     def find(self, freq_mhz: float) -> dict[str, Any] | None:
         return next((f for f in self.items if abs(f["freq_mhz"] - freq_mhz) * 1e6 <= MATCH_HZ), None)
 
-    async def async_set(self, freq_mhz: float, name: str | None) -> None:
-        """Aggiunge un preferito, o ne cambia il nome se c'è già."""
+    async def async_set(self, freq_mhz: float, name: str | None, source: str = "user") -> None:
+        """Aggiunge un preferito, o ne cambia il nome; un nome RDS non sostituisce quello scritto a mano."""
         fav = self.find(freq_mhz)
         if fav is None:
-            fav = {"freq_mhz": round(freq_mhz, 4), "name": None, "added": time.time()}
+            fav = {"freq_mhz": round(freq_mhz, 4), "name": None, "source": "auto", "added": time.time()}
             self.items.append(fav)
             self.items.sort(key=lambda f: f["freq_mhz"])
-        if name is not None:
-            fav["name"] = name.strip()[:40] or None
+        if name is not None and not (source == "rds" and fav.get("source") == "user"):
+            name = name.strip()[:40]
+            fav["name"], fav["source"] = (name, source) if name else (None, "auto")
+        if not fav["name"]:
+            fav["name"], fav["source"] = self._next_noname(), "auto"
         await self._store.async_save(self.items)
 
     async def async_remove(self, freq_mhz: float) -> None:
