@@ -1,7 +1,7 @@
 // Pannello "Spettro" per Home Assistant: grafico dello spettro, waterfall e picchi.
 
 // deve coincidere con VERSION in const.py: se il backend ne riporta un'altra manca un riavvio
-const PANEL_VERSION = "1.4.7";
+const PANEL_VERSION = "1.4.8";
 
 const PRESETS = [
   ["Personalizzato", null, null],
@@ -269,9 +269,6 @@ class SpettroPanel extends HTMLElement {
             <h3 style="margin:0">Analisi segnale</h3>
             <div class="row">
               <div class="hint" id="selinfo" style="flex:1;min-width:200px">Tocca un picco sul grafico o una riga dell'Archivio spike per sceglierlo.</div>
-              <select id="anadur" title="Durata della registrazione">
-                <option value="1">1 s</option><option value="2" selected>2 s</option><option value="5">5 s</option>
-              </select>
               <button class="primary" id="analyze" disabled>Analizza</button>
             </div>
             <div id="anaout"></div>
@@ -318,6 +315,9 @@ class SpettroPanel extends HTMLElement {
                 </label>
                 <label>Assestamento (ms)<input id="settle" type="number" step="10" min="0" max="1000"></label>
                 <label>Correzione (ppm)<input id="ppm" type="number" step="1" min="-200" max="200"></label>
+                <label title="Quanto registrare quando premi Analizza (l'analisi automatica dei picchi usa sempre 1 s)">Durata analisi
+                  <select id="anadur"><option value="1">1 s</option><option value="2">2 s</option><option value="5">5 s</option></select>
+                </label>
               </div>
             </details>
             <div class="row" style="margin-top:10px">
@@ -345,7 +345,7 @@ class SpettroPanel extends HTMLElement {
     this._menu.narrow = this._narrow;
 
     const form = ["start", "stop", "interval", "gain", "threshold", "viewonly", "autoana", "reana", "archhours", "limstep", "maxstep", "limsweep", "maxsweep",
-      "rate", "fft", "settle", "ppm"];
+      "rate", "fft", "settle", "ppm", "anadur"];
     for (const id of form) $(id).addEventListener("input", () => {
       this._formDirty = true;
       if (id === "start" || id === "stop") $("preset").value = "0";
@@ -416,6 +416,7 @@ class SpettroPanel extends HTMLElement {
     $("fft").value = String(s.fft_size);
     $("settle").value = s.settle_ms;
     $("ppm").value = s.ppm;
+    $("anadur").value = String(s.analysis_s ?? 2);
     $("viewonly").checked = !!s.only_when_viewed;
     $("autoana").checked = !!s.auto_analyze;
     $("reana").value = s.reanalyze_min ?? 30;
@@ -447,6 +448,7 @@ class SpettroPanel extends HTMLElement {
       fft_size: parseInt($("fft").value, 10),
       settle_ms: parseInt($("settle").value, 10) || 0,
       ppm: parseInt($("ppm").value, 10) || 0,
+      analysis_s: parseFloat($("anadur").value) || 2,
       only_when_viewed: $("viewonly").checked,
       auto_analyze: $("autoana").checked,
       reanalyze_min: Math.max(0, parseFloat($("reana").value) || 0),
@@ -830,7 +832,7 @@ class SpettroPanel extends HTMLElement {
     $("anaout").innerHTML = `<div class="hint">Registrazione e analisi di ${(this._sel / 1e6).toFixed(4)} MHz…</div>`;
     try {
       this._ana = await this._hass.callWS({
-        type: "spettro/analyze", freq_mhz: this._sel / 1e6, duration_s: parseFloat($("anadur").value),
+        type: "spettro/analyze", freq_mhz: this._sel / 1e6, // durata dalle impostazioni (Avanzate)
       });
       this._renderAnalysis();
       this._archSel = this._ana.id || null; // nell'archivio si evidenzia l'analisi appena fatta

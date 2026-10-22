@@ -100,6 +100,7 @@ def ws_subscribe(hass: HomeAssistant, connection: websocket_api.ActiveConnection
         vol.Optional("settle_ms"): vol.All(vol.Coerce(int), vol.Range(min=0, max=1000)),
         vol.Optional("ppm"): vol.All(vol.Coerce(int), vol.Range(min=-200, max=200)),
         vol.Optional("only_when_viewed"): bool,
+        vol.Optional("analysis_s"): vol.All(vol.Coerce(float), vol.Range(min=0.2, max=ANALYSIS_MAX_S)),
         vol.Optional("auto_analyze"): bool,
         vol.Optional("archive_hours"): vol.All(vol.Coerce(float), vol.Range(min=1, max=24 * 90)),
         vol.Optional("reanalyze_min"): vol.All(vol.Coerce(float), vol.Range(min=0, max=7 * 24 * 60)),
@@ -152,7 +153,7 @@ def ws_set_enabled(hass: HomeAssistant, connection: websocket_api.ActiveConnecti
     {
         vol.Required("type"): "spettro/analyze",
         vol.Required("freq_mhz"): vol.All(vol.Coerce(float), vol.Range(min=0.5, max=2200)),
-        vol.Optional("duration_s", default=2): vol.All(vol.Coerce(float), vol.Range(min=0.2, max=ANALYSIS_MAX_S)),
+        vol.Optional("duration_s"): vol.All(vol.Coerce(float), vol.Range(min=0.2, max=ANALYSIS_MAX_S)),
     }
 )
 @websocket_api.async_response
@@ -162,7 +163,7 @@ async def ws_analyze(hass: HomeAssistant, connection: websocket_api.ActiveConnec
     if scanner is None:
         return
     try:
-        result = await scanner.analyze(msg["freq_mhz"] * 1e6, msg["duration_s"])
+        result = await scanner.analyze(msg["freq_mhz"] * 1e6, msg.get("duration_s", scanner.settings.analysis_s))
     except (OSError, TimeoutError, RuntimeError, ValueError) as err:
         connection.send_error(msg["id"], "analysis_failed", str(err) or type(err).__name__)
         return

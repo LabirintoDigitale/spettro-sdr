@@ -46,7 +46,7 @@ Esempio reale: scansione da 600 a 1500 MHz, poi ingrandita sulla banda GSM 900.
 
 **2. Analisi segnale** (seconda schermata)
 
-- *Selezionato* è la frequenza scelta; *1 s* è quanto registrare (1, 2 o 5 s); **Analizza** sospende la scansione, registra e la fa ripartire.
+- *Selezionato* è la frequenza scelta; **Analizza** sospende la scansione, registra e la fa ripartire. Quanto registrare (1, 2 o 5 s) si sceglie in *Avanzate → Durata analisi*.
 - L'immagine è la **cascata ad alta risoluzione** attorno al segnale: frequenza in orizzontale (estremi scritti sotto), tempo che scorre verso il basso. Qui si vede una banda piatta e sempre accesa, larga circa 250 kHz: la "firma" di una portante GSM.
 - **Tipo probabile** è l'ipotesi ricavata dalle misure (qui *portante GSM, telefonia digitale cifrata*): non serve l'AI.
 - **Frequenza centrale** e **Picco**: dove sta il segnale e quanto è forte; **Sopra il rumore**: di quanto spicca (SNR).

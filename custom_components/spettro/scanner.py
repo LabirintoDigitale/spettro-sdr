@@ -83,6 +83,7 @@ class ScanSettings:
     auto_max_per_step: int = 3
     auto_limit_sweep: bool = False  # limita i picchi analizzati per scansione completa
     auto_max_per_sweep: int = 20
+    analysis_s: float = 2.0  # durata della registrazione quando si preme Analizza
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> ScanSettings:
