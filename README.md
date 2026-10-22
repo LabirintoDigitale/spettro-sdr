@@ -78,6 +78,18 @@ Esempio reale: scansione da 600 a 1500 MHz, poi ingrandita sulla banda GSM 900.
 - A destra l'**Archivio spike** con le analisi automatiche fatte scansionando la banda FM: ora, frequenza, SNR e, sotto, il tipo rilevato (le righe *nessun segnale chiaro sopra il rumore* sono picchi troppo deboli per essere misurati).
 - Nella cascata si vede l'audio: la larghezza del segnale cambia con il volume della musica e della voce, e a circa un terzo dall'alto una breve pausa lo stringe quasi alla sola portante. Con il lettore sotto l'immagine si ascoltano i 5 s registrati.
 
+**5. Multiplex DAB+** (finestra di Spettro, analisi automatica di 5 s sul canale 7D, 194,064 MHz)
+
+<p align="center">
+  <a href="https://raw.githubusercontent.com/LabirintoDigitale/spettro-sdr/main/docs/images/screenshots/dab.jpg"><img src="https://raw.githubusercontent.com/LabirintoDigitale/spettro-sdr/main/docs/images/screenshots/dab.jpg" width="800" alt="Analisi di un multiplex DAB+ con l'elenco delle radio decodificato"></a>
+</p>
+
+- Un multiplex DAB+ è un **blocco piatto largo 1,5 MHz** (*Banda occupata 99%* 1517 kHz, trasmissione continua) fatto di 1536 portanti OFDM: nella cascata si vede come una fascia uniforme, con i bordi netti. Le strisce verticali più chiare e più scure sono le portanti attenuate dalle riflessioni del segnale (percorsi multipli), normali in ricezione da interno.
+- Il canale viene riconosciuto (**7D**) e l'analisi si sintonizza al suo centro; poi decodifica il canale di servizio del multiplex: nome (**DAB Italia**), codice **EId** e lo **scarto di frequenza** della chiavetta (qui −0,1 kHz).
+- **Servizi (20)**: le radio contenute nel multiplex con il tipo, **DAB+** (audio HE-AAC) o **DAB** (MP2), più i servizi di **dati** come *EPG-SPI* (la guida ai programmi). I nomi sono quelli trasmessi dalle stazioni, anche quelli con i simboli (*\* RDS \**).
+- *612/612 blocchi informativi integri in 51 trame*: ogni trama dura 96 ms e porta 12 blocchi con controllo CRC; se il segnale è al limite il conteggio scende e il pannello lo segnala.
+- Il nome del multiplex finisce anche nel **Tipo probabile** e quindi nell'Archivio spike. L'audio delle radio DAB+ non viene decodificato: il lettore sotto la cascata, su un segnale digitale, fa sentire solo rumore.
+
 ## Requisiti
 
 - Un server **rtl_tcp** raggiungibile in rete (porta predefinita `1234`), ad esempio su un mini PC o un Raspberry Pi con la chiavetta RTL-SDR collegata:
