@@ -58,6 +58,8 @@ class SpettroAnalysisImage(ImageEntity):
             "banda_khz": r["obw_99_khz"],
             "duty_cycle": r["duty_cycle"],
             "burst": r["bursts"],
+            "rds_stazione": (r.get("rds") or {}).get("ps"),
+            "rds_testo": (r.get("rds") or {}).get("rt"),
         }
 
     async def async_image(self) -> bytes | None:

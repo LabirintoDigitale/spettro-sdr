@@ -13,7 +13,8 @@ import zlib
 
 import numpy as np
 
-from .demod import MODES, demodulate
+from . import rds
+from .demod import MODES, demodulate, fm_multiplex, wfm_audio
 
 FFT_SIZE = 2048  # ~1 kHz di risoluzione e ~1 ms per riga a 2 MS/s
 USABLE_FRACTION = 0.8  # i bordi della banda sono attenuati dal filtro della chiavetta
@@ -319,7 +320,14 @@ def analyze_iq(
         "noise_power_db": round(noise_pw, 1),
     }
     result["kind"], result["audio_mode"] = classify(result)
-    audio = {mode: demodulate(iq, rate, centroid - center_hz, mode) for mode in MODES}
+    offset = centroid - center_hz
+    mpx, fs_mpx = fm_multiplex(iq, rate, offset)
+    audio = {"wfm": wfm_audio(mpx, fs_mpx)}
+    audio.update({mode: demodulate(iq, rate, offset, mode) for mode in MODES if mode != "wfm"})
+    # RDS: solo per le stazioni FM broadcast (FM larga)
+    result["rds"] = rds.decode(mpx, fs_mpx) if result["audio_mode"] == "wfm" else None
+    if result["rds"] and result["rds"]["ps"] and result["rds"]["ps_complete"]:
+        result["kind"] = "FM a banda larga: radio broadcast «" + result["rds"]["ps"] + "»"
     return result, png, audio
 
 
@@ -342,6 +350,11 @@ def describe(result: dict[str, Any]) -> str:
     if r["freq_track"]:
         lines.append(f"Andamento della frequenza di picco durante la trasmissione: {r['freq_track']}.")
     lines.append(f"Ipotesi automatica dalle misure: {r['kind']}.")
+    d = r.get("rds")
+    if d:
+        info = [f"{k} {v}" for k, v in (("PI", d["pi"]), ("nome (PS)", d["ps"]), ("testo (RT)", d["rt"]),
+                                       ("tipo di programma", d["pty"]), ("ora", d["ct"])) if v]
+        lines.append("RDS decodificato: " + "; ".join(info) + (", stereo" if d["stereo"] else "") + ".")
     lines.append("Bande note che contengono la frequenza: " + ("; ".join(r["bands"]) or "nessuna in tabella") + ".")
     lines.append(
         f"Ricevitore RTL-SDR, {r['sample_rate'] / 1e6:g} MS/s, risoluzione {r['resolution_hz']} Hz "

@@ -17,7 +17,7 @@ MARGIN_OUT = 256  # margine scartato ai lati di ogni blocco (assestamento del fi
 
 # modo: (frequenza intermedia desiderata, mezza banda del canale, banda audio)
 MODES: dict[str, tuple[float, float, float]] = {
-    "wfm": (256e3, 100e3, 15e3),  # radio FM broadcast
+    "wfm": (256e3, 125e3, 15e3),  # radio FM broadcast (canale largo: serve anche la sottoportante RDS)
     "nfm": (32e3, 7.5e3, 4e3),  # FM a banda stretta: radioamatori, PMR, marina
     "am": (32e3, 5e3, 4.5e3),  # banda aerea, onde medie/corte
 }
@@ -78,6 +78,8 @@ def _wav(audio: np.ndarray) -> bytes:
 
 def demodulate(iq: np.ndarray, rate: int, offset_hz: float, mode: str) -> bytes:
     """WAV mono a 32 kHz del segnale che sta a `offset_hz` dal centro della registrazione."""
+    if mode == "wfm":
+        return wfm_audio(*fm_multiplex(iq, rate, offset_hz))
     target, half_bw, audio_bw = MODES[mode]
     decim = max(1, int(round(rate / target)))
     z = _channel(iq, rate, offset_hz, decim, half_bw)
@@ -86,4 +88,17 @@ def demodulate(iq: np.ndarray, rate: int, offset_hz: float, mode: str) -> bytes:
         x = np.abs(z).astype(np.float64)
     else:
         x = np.angle(z[1:] * np.conj(z[:-1])).astype(np.float64)  # discriminatore FM
-    return _wav(_to_audio(x, mid_rate, audio_bw, deemph=mode == "wfm"))
+    return _wav(_to_audio(x, mid_rate, audio_bw, deemph=False))
+
+
+def fm_multiplex(iq: np.ndarray, rate: int, offset_hz: float) -> tuple[np.ndarray, float]:
+    """Uscita del discriminatore FM larga: il multiplex completo (audio, pilota, stereo, RDS)."""
+    target, half_bw, _ = MODES["wfm"]
+    decim = max(1, int(round(rate / target)))
+    z = _channel(iq, rate, offset_hz, decim, half_bw)
+    return np.angle(z[1:] * np.conj(z[:-1])).astype(np.float64), rate / decim
+
+
+def wfm_audio(mpx: np.ndarray, fs: float) -> bytes:
+    """Audio mono (L+R) del multiplex, con la de-enfasi europea."""
+    return _wav(_to_audio(mpx, fs, MODES["wfm"][2], deemph=True))

@@ -1,7 +1,7 @@
 // Pannello "Spettro" per Home Assistant: grafico dello spettro, waterfall e picchi.
 
 // deve coincidere con VERSION in const.py: se il backend ne riporta un'altra manca un riavvio
-const PANEL_VERSION = "1.5.1";
+const PANEL_VERSION = "1.6.0";
 
 const PRESETS = [
   ["Personalizzato", null, null],
@@ -954,6 +954,22 @@ class SpettroPanel extends HTMLElement {
       rows.push(["Durata burst", `${r.burst_ms_min}–${r.burst_ms_max} ms (mediana ${r.burst_ms_median})`]);
       if (r.burst_period_ms) rows.push(["Ripetizione", `ogni ~${r.burst_period_ms} ms`]);
     }
+    // RDS delle stazioni FM: nome, testo, tipo di programma…
+    const d = r.rds;
+    const rdsRows = d ? [
+      ["Stazione", d.ps ? d.ps + (d.ps_complete ? "" : " (incompleto)") : "—"],
+      ["Testo", d.rt || "—"],
+      ["Programma", d.pty],
+      ["Codice PI", d.pi || "—"],
+      ...(d.ct ? [["Ora trasmessa", d.ct]] : []),
+      ...(d.af.length ? [["Altre frequenze", d.af.map((f) => f.toFixed(1)).join(", ") + " MHz"]] : []),
+      ["Stereo", d.stereo ? "sì (pilota 19 kHz)" : "no"],
+      ["Traffico", d.tp ? (d.ta ? "notiziario sul traffico in corso" : "stazione con info traffico") : "—"],
+    ] : [];
+    const rdsHtml = d ? `<div class="rds"><h3 style="margin:8px 0 4px">RDS</h3>
+        <table><tbody>${rdsRows.map(([k, v]) => `<tr><td>${k}</td><td class="num">${esc(v)}</td></tr>`).join("")}</tbody></table>
+        <div class="hint" style="margin-top:4px">${d.groups} gruppi RDS ricevuti${d.ps_complete && d.rt ? "" : " · con «Durata analisi» più lunga arrivano più dati"}</div></div>`
+      : r.audio_mode === "wfm" ? `<div class="hint" style="margin-top:6px">Nessun dato RDS ricevuto (stazione senza RDS o segnale troppo debole).</div>` : "";
     const states = this._hass.states;
     const ais = Object.keys(states).filter((e) => e.startsWith("ai_task.")).sort();
     const aiCtl = ais.length
@@ -978,6 +994,7 @@ class SpettroPanel extends HTMLElement {
         <div>
           <table><tbody>${rows.map(([k, v]) => `<tr><td>${k}</td><td class="num">${esc(v)}</td></tr>`).join("")}</tbody></table>
           <div class="hint" style="margin-top:6px">${r.bands.length ? esc(r.bands.join(" · ")) : "Frequenza non presente nella tabella delle bande."}</div>
+          ${rdsHtml}
         </div>
       </div>
       ${r.audio ? `<div class="row">
