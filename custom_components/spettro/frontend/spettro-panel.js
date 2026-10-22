@@ -1,7 +1,7 @@
 // Pannello "Spettro" per Home Assistant: grafico dello spettro, waterfall e picchi.
 
 // deve coincidere con VERSION in const.py: se il backend ne riporta un'altra manca un riavvio
-const PANEL_VERSION = "1.5.0";
+const PANEL_VERSION = "1.5.1";
 
 const PRESETS = [
   ["Personalizzato", null, null],
@@ -299,12 +299,9 @@ class SpettroPanel extends HTMLElement {
             </div>
             <label class="chk" style="margin-top:8px" title="Con il pannello chiuso il server rtl_tcp resta libero (niente traffico di rete)">
               <input type="checkbox" id="viewonly"> Scansiona solo con il pannello aperto</label>
-            <label class="chk" style="margin-top:4px" title="Quando un passo della scansione trova un picco sopra la soglia, la scansione si ferma, il picco viene registrato e analizzato (per la «Durata analisi automatica») e poi si riprende">
+            <label class="chk" style="margin-top:4px" title="Quando un passo della scansione trova un picco sopra la soglia, la scansione si ferma, il picco viene registrato e analizzato (per la «Durata analisi» delle Avanzate) e poi si riprende">
               <input type="checkbox" id="autoana"> Analizza subito i picchi trovati</label>
             <div class="grid2" style="margin-top:8px">
-              <label title="Quanto registrare per ogni picco analizzato in automatico: ogni secondo in più allunga la scansione per ogni picco nuovo">Durata analisi automatica
-                <select id="autodur"><option value="1">1 s</option><option value="2">2 s</option><option value="5">5 s</option></select>
-              </label>
               <label title="Un picco già analizzato non viene rianalizzato in automatico prima di questo tempo (0 = ogni volta)">Rianalizza dopo (min)<input id="reana" type="number" step="1" min="0"></label>
               <label title="Le analisi archiviate più vecchie vengono cancellate">Archivio: cancella dopo (h)<input id="archhours" type="number" step="1" min="1"></label>
             </div>
@@ -327,7 +324,7 @@ class SpettroPanel extends HTMLElement {
                 </label>
                 <label>Assestamento (ms)<input id="settle" type="number" step="10" min="0" max="1000"></label>
                 <label>Correzione (ppm)<input id="ppm" type="number" step="1" min="-200" max="200"></label>
-                <label title="Quanto registrare quando premi Analizza (l'analisi automatica ha la sua durata, sotto «Analizza subito i picchi trovati»)">Durata analisi
+                <label title="Quanto registrare per ogni analisi, sia con Analizza sia per i picchi analizzati in automatico (ogni secondo in più allunga la scansione per ogni picco nuovo)">Durata analisi
                   <select id="anadur"><option value="1">1 s</option><option value="2">2 s</option><option value="5">5 s</option></select>
                 </label>
               </div>
@@ -349,7 +346,7 @@ class SpettroPanel extends HTMLElement {
     this._menu.narrow = this._narrow;
 
     const form = ["start", "stop", "interval", "gain", "threshold", "viewonly", "autoana", "reana", "archhours", "limstep", "maxstep", "limsweep", "maxsweep",
-      "rate", "fft", "settle", "ppm", "anadur", "autodur"];
+      "rate", "fft", "settle", "ppm", "anadur"];
     for (const id of form) $(id).addEventListener("input", () => {
       this._formDirty = true;
       if (id === "start" || id === "stop") $("preset").value = "0";
@@ -431,7 +428,6 @@ class SpettroPanel extends HTMLElement {
     $("settle").value = s.settle_ms;
     $("ppm").value = s.ppm;
     $("anadur").value = String(s.analysis_s ?? 2);
-    $("autodur").value = String(s.auto_analysis_s ?? 1);
     $("viewonly").checked = !!s.only_when_viewed;
     $("autoana").checked = !!s.auto_analyze;
     $("reana").value = s.reanalyze_min ?? 30;
@@ -464,7 +460,6 @@ class SpettroPanel extends HTMLElement {
       settle_ms: parseInt($("settle").value, 10) || 0,
       ppm: parseInt($("ppm").value, 10) || 0,
       analysis_s: parseFloat($("anadur").value) || 2,
-      auto_analysis_s: parseFloat($("autodur").value) || 1,
       only_when_viewed: $("viewonly").checked,
       auto_analyze: $("autoana").checked,
       reanalyze_min: Math.max(0, parseFloat($("reana").value) || 0),
@@ -491,7 +486,7 @@ class SpettroPanel extends HTMLElement {
   _syncLimits() {
     const $ = (id) => this.shadowRoot.getElementById(id);
     const auto = $("autoana").checked;
-    for (const id of ["autodur", "reana", "limstep", "limsweep"]) $(id).disabled = !auto;
+    for (const id of ["reana", "limstep", "limsweep"]) $(id).disabled = !auto;
     $("maxstep").disabled = !auto || !$("limstep").checked;
     $("maxsweep").disabled = !auto || !$("limsweep").checked;
   }

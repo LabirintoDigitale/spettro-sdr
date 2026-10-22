@@ -82,8 +82,7 @@ class ScanSettings:
     auto_max_per_step: int = 3
     auto_limit_sweep: bool = False  # limita i picchi analizzati per scansione completa
     auto_max_per_sweep: int = 20
-    analysis_s: float = 2.0  # durata della registrazione quando si preme Analizza
-    auto_analysis_s: float = 1.0  # durata della registrazione dell'analisi automatica di un picco
+    analysis_s: float = 2.0  # durata della registrazione di ogni analisi, manuale o automatica
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> ScanSettings:
@@ -427,7 +426,7 @@ class SpectrumScanner:
         self._set_status(auto_mhz=round(freq_hz / 1e6, 4))
         try:
             await self._send(writer, CMD_SET_FREQ, int(center))
-            duration = min(self.settings.auto_analysis_s, ANALYSIS_MAX_S)
+            duration = min(self.settings.analysis_s, ANALYSIS_MAX_S)
             async with asyncio.timeout(IO_TIMEOUT + duration):
                 await self._discard(reader, discard)
                 raw = await reader.readexactly(int(rate * duration) * 2)
