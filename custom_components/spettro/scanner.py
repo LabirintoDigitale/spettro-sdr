@@ -58,7 +58,6 @@ CONNECT_TIMEOUT = 8
 IO_TIMEOUT = 10
 MIN_ERROR_RETRY = 10
 ANALYSIS_MAX_S = 5  # durata massima di una registrazione per l'analisi
-AUTO_ANALYSIS_S = 1.0  # registrazione dell'analisi automatica di un picco
 SPIKE_TOL_HZ = 100e3  # due picchi così vicini sono lo stesso segnale
 
 
@@ -84,6 +83,7 @@ class ScanSettings:
     auto_limit_sweep: bool = False  # limita i picchi analizzati per scansione completa
     auto_max_per_sweep: int = 20
     analysis_s: float = 2.0  # durata della registrazione quando si preme Analizza
+    auto_analysis_s: float = 1.0  # durata della registrazione dell'analisi automatica di un picco
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> ScanSettings:
@@ -427,9 +427,10 @@ class SpectrumScanner:
         self._set_status(auto_mhz=round(freq_hz / 1e6, 4))
         try:
             await self._send(writer, CMD_SET_FREQ, int(center))
-            async with asyncio.timeout(IO_TIMEOUT + AUTO_ANALYSIS_S):
+            duration = min(self.settings.auto_analysis_s, ANALYSIS_MAX_S)
+            async with asyncio.timeout(IO_TIMEOUT + duration):
                 await self._discard(reader, discard)
-                raw = await reader.readexactly(int(rate * AUTO_ANALYSIS_S) * 2)
+                raw = await reader.readexactly(int(rate * duration) * 2)
             # durante il calcolo rtl_tcp continua a inviare: si scarta, altrimenti il passo
             # successivo della scansione leggerebbe campioni vecchi della frequenza analizzata
             job = asyncio.get_running_loop().run_in_executor(None, analyze_iq, raw, rate, center, freq_hz)
