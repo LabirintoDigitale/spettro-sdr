@@ -711,7 +711,16 @@ class SpectrumScanner:
                 if s.auto_analyze and auto_left > 0:
                     level = float(np.median(spectrum[: (i + 1) * keep])) + s.threshold_db
                     f0 = f_start + i * keep * bin_hz
-                    for f in self._spike_candidates(psd[lo : lo + keep], f0, bin_hz, level):
+                    spikes = self._spike_candidates(psd[lo : lo + keep], f0, bin_hz, level)
+                    if spikes and i < steps - 1:
+                        # prima il grafico aggiornato: le analisi possono durare parecchi secondi
+                        last_partial = time.monotonic()
+                        progress = (i + 1) / steps
+                        self.status["progress"] = progress
+                        self._publish(spectrum, (i + 1) * keep, total_bins, f_start, f_stop,
+                                      bin_hz, pool, min_sep_hz, sweep_id, False, progress, None)
+                        self._emit(dict(self.status))
+                    for f in spikes:
                         if auto_left <= 0:
                             break
                         if not self._active.is_set():
