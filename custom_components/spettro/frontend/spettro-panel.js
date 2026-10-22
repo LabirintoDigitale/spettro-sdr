@@ -1,7 +1,7 @@
 // Pannello "Spettro" per Home Assistant: grafico dello spettro, waterfall e picchi.
 
 // deve coincidere con VERSION in const.py: se il backend ne riporta un'altra manca un riavvio
-const PANEL_VERSION = "1.4.3";
+const PANEL_VERSION = "1.4.4";
 
 const PRESETS = [
   ["Personalizzato", null, null],
@@ -191,7 +191,8 @@ class SpettroPanel extends HTMLElement {
         .toolbar { display:flex; align-items:center; height:var(--header-height,56px); padding:0 12px; gap:8px;
                    background:var(--app-header-background-color, var(--primary-color)); color:var(--app-header-text-color, #fff);
                    font-size:20px; box-sizing:border-box; }
-        .toolbar .title { flex:1; }
+        .toolbar .title { flex:1; display:flex; flex-direction:column; line-height:1.15; }
+        .toolbar .ver { font-size:12px; opacity:.75; }
         .content { padding:12px; display:grid; gap:12px; grid-template-columns: minmax(0,1fr) 300px; max-width:1800px; margin:0 auto; }
         @media (max-width: 1000px) { .content { grid-template-columns: minmax(0,1fr); } }
         .card { background:var(--card-background-color,#fff); border-radius:var(--ha-card-border-radius,12px);
@@ -242,7 +243,7 @@ class SpettroPanel extends HTMLElement {
         #archive td.kind { color:var(--secondary-text-color); font-size:12px; }
         .anahead { font-size:12px; color:var(--secondary-text-color); }
       </style>
-      <div class="toolbar"><ha-menu-button></ha-menu-button><div class="title">Spettro</div></div>
+      <div class="toolbar"><ha-menu-button></ha-menu-button><div class="title"><span>👻 Spettro</span><span class="ver">versione ${PANEL_VERSION}</span></div></div>
       <div id="verwarn" class="err" style="display:none;padding:10px 16px;font-size:14px"></div>
       <div class="content">
         <div class="card charts">
