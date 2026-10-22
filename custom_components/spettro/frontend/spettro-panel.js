@@ -1,7 +1,7 @@
 // Pannello "Spettro" per Home Assistant: grafico dello spettro, waterfall e picchi.
 
 // deve coincidere con VERSION in const.py: se il backend ne riporta un'altra manca un riavvio
-const PANEL_VERSION = "1.9.3";
+const PANEL_VERSION = "1.10.0";
 
 const PRESETS = [
   ["Personalizzato", null, null],
@@ -333,6 +333,7 @@ class SpettroPanel extends HTMLElement {
         @keyframes blink { 50% { opacity:.3; } }
         .livehead .title { font-size:15px; font-weight:500; flex:1; min-width:180px; }
         .livehead select { width:auto; }
+        img.slide { display:block; max-width:min(100%, 320px); margin:10px 0 0; border-radius:6px; }
         #livewf { height:160px; border-radius:4px; background:#080820; }
         .liveaxis { display:flex; justify-content:space-between; font-size:11px; color:var(--secondary-text-color); }
         #livert div { font-size:13px; padding:2px 0; border-bottom:1px solid var(--divider-color); }
@@ -372,6 +373,7 @@ class SpettroPanel extends HTMLElement {
               </div>
               <canvas id="livewf" style="margin-top:8px"></canvas>
               <div class="liveaxis"><span id="livelo"></span><span id="livelevel"></span><span id="livehi"></span></div>
+              <img id="liveslide" class="slide" style="display:none" alt="Slideshow DAB+">
               <div id="liverds"></div>
             </div>
             <div id="anaout"></div>
@@ -488,7 +490,7 @@ class SpettroPanel extends HTMLElement {
     });
     $("resetzoom").addEventListener("click", () => { this._view = null; this._draw(); });
     $("analyze").addEventListener("click", () => this._analyze());
-    $("fav").addEventListener("click", () => this._toggleFav(this._sel));
+    $("fav").addEventListener("click", () => this._toggleFav());
     $("livebtn").addEventListener("click", () => this._liveStart(this._sel / 1e6));
     $("livestop").addEventListener("click", async () => {
       try { await this._hass.callWS({ type: "spettro/live_stop" }); } catch (err) { this._msg(err.message || String(err), true); }
@@ -941,39 +943,51 @@ class SpettroPanel extends HTMLElement {
 
   // ---------------------------------------------------------------- preferiti
 
-  _favFor(mhz) {
-    return mhz == null ? null : this._favs.find((f) => Math.abs(f.freq_mhz - mhz) <= 0.03) || null;
+  // un preferito è una frequenza, o per il DAB+ una radio (SId) di un multiplex
+  _favFor(mhz, sid = null) {
+    return mhz == null ? null
+      : this._favs.find((f) => Math.abs(f.freq_mhz - mhz) <= 0.03 && (f.sid || null) === (sid || null)) || null;
+  }
+
+  // a cosa si riferisce il cuore: la radio DAB+ in ascolto, altrimenti la frequenza selezionata
+  _favTarget() {
+    const live = this._live;
+    if (live && live.mode === "dab" && live.sid) return { mhz: live.freq_mhz, sid: live.sid, name: live.service || null };
+    return this._sel === null ? null : { mhz: this._sel / 1e6, sid: null, name: null };
   }
 
   _updateFavBtn() {
     const b = this.shadowRoot.getElementById("fav");
     if (!b) return;
-    const on = this._sel !== null && !!this._favFor(this._sel / 1e6);
+    const t = this._favTarget();
+    const on = !!t && !!this._favFor(t.mhz, t.sid);
+    b.disabled = !t;
     b.textContent = on ? "❤" : "♡";
-    b.title = on ? "Togli dai preferiti" : "Aggiungi ai preferiti";
+    b.title = on ? "Togli dai preferiti" : t && t.sid ? "Aggiungi la radio DAB+ ai preferiti" : "Aggiungi ai preferiti";
   }
 
-  async _toggleFav(hz, name = null) {
-    if (hz == null) return;
-    const mhz = hz / 1e6, fav = this._favFor(mhz);
+  async _toggleFav(target = null) {
+    const t = target || this._favTarget();
+    if (!t) return;
+    const fav = this._favFor(t.mhz, t.sid);
+    let name = t.name, source = t.sid ? "dab" : "rds";
     // nome iniziale: quello RDS dell'analisi mostrata, se è di questa frequenza
     const ana = this._ana;
-    if (!name && ana && ana.rds && ana.rds.ps_complete && Math.abs(ana.target_mhz - mhz) <= 0.1) name = ana.rds.ps;
+    if (!name && !t.sid && ana && ana.rds && ana.rds.ps_complete && Math.abs(ana.target_mhz - t.mhz) <= 0.1) name = ana.rds.ps;
     try {
-      if (fav) await this._hass.callWS({ type: "spettro/favorite_remove", freq_mhz: fav.freq_mhz });
-      else await this._hass.callWS({ type: "spettro/favorite_set", freq_mhz: mhz, name, ...(name ? { source: "rds" } : {}) });
+      if (fav) await this._hass.callWS({ type: "spettro/favorite_remove", freq_mhz: fav.freq_mhz, sid: fav.sid || null });
+      else await this._hass.callWS({ type: "spettro/favorite_set", freq_mhz: t.mhz, sid: t.sid, name, ...(name ? { source } : {}) });
     } catch (err) {
       this._msg(err.message || String(err), true);
     }
   }
 
-  async _renameFav(mhz) {
-    const fav = this._favFor(mhz);
+  async _renameFav(fav) {
     if (!fav) return;
     const name = prompt(`Nome per ${fav.freq_mhz.toFixed(4)} MHz (vuoto = nome automatico):`, fav.name || "");
     if (name === null) return;
     try {
-      await this._hass.callWS({ type: "spettro/favorite_set", freq_mhz: fav.freq_mhz, name, source: "user" });
+      await this._hass.callWS({ type: "spettro/favorite_set", freq_mhz: fav.freq_mhz, sid: fav.sid || null, name, source: "user" });
     } catch (err) {
       this._msg(err.message || String(err), true);
     }
@@ -987,12 +1001,13 @@ class SpettroPanel extends HTMLElement {
       return;
     }
     el.className = "";
-    el.innerHTML = `<table><tbody>${this._favs.map((f) => `<tr data-f="${f.freq_mhz}">
-        <td class="name">${esc(f.name || "—")}</td><td>${f.freq_mhz.toFixed(4)} MHz</td>
+    el.innerHTML = `<table><tbody>${this._favs.map((f, i) => `<tr data-i="${i}">
+        <td class="name">${esc(f.name || "—")}</td><td>${f.sid ? `DAB+ ${esc(f.channel || f.freq_mhz.toFixed(3))}` : `${f.freq_mhz.toFixed(4)} MHz`}</td>
         <td class="act"><button class="edit" title="Cambia nome">✏</button><button class="play" title="Analisi continua">▶</button><button class="heart" title="Togli dai preferiti">❤</button></td></tr>`).join("")}
       </tbody></table>`;
-    el.querySelectorAll("tr[data-f]").forEach((tr) => {
-      const mhz = parseFloat(tr.dataset.f);
+    el.querySelectorAll("tr[data-i]").forEach((tr) => {
+      const fav = this._favs[+tr.dataset.i];
+      const mhz = fav.freq_mhz;
       tr.addEventListener("click", (e) => {
         if (e.target.closest("button")) return;
         this._select(mhz * 1e6);
@@ -1006,9 +1021,13 @@ class SpettroPanel extends HTMLElement {
         const e2 = this._archive.filter((a) => Math.abs(a.target_mhz - mhz) <= 0.1).sort((a, b) => b.timestamp - a.timestamp)[0];
         if (e2 && !this._live) this._openArchived(e2.id, true);
       });
-      tr.querySelector("button.play").addEventListener("click", () => { this._select(mhz * 1e6); this._liveStart(mhz); });
-      tr.querySelector("button.heart").addEventListener("click", () => this._toggleFav(mhz * 1e6));
-      tr.querySelector("button.edit").addEventListener("click", () => this._renameFav(mhz));
+      tr.querySelector("button.play").addEventListener("click", () => {
+        this._select(mhz * 1e6);
+        if (fav.sid) this._liveStart(mhz, "dab", fav.sid);
+        else this._liveStart(mhz);
+      });
+      tr.querySelector("button.heart").addEventListener("click", () => this._toggleFav({ mhz, sid: fav.sid || null, name: fav.name }));
+      tr.querySelector("button.edit").addEventListener("click", () => this._renameFav(fav));
     });
   }
 
@@ -1059,6 +1078,7 @@ class SpettroPanel extends HTMLElement {
     $("analyze").disabled = this._sel === null || !!this._analyzing || !!live;
     if (!live) {
       if (was && !this._liveRestart) { this._setListen(false); this._liveRows = null; this._closeDec(); }
+      this._updateFavBtn();
       return;
     }
     if (!was || was.freq_mhz !== live.freq_mhz || was.mode !== live.mode || was.sid !== live.sid) {
@@ -1067,11 +1087,14 @@ class SpettroPanel extends HTMLElement {
       this._liveRds = null;
       this._dabState = null;
       this._dabFallback = false;
+      $("liveslide").style.display = "none";
+      $("liveslide").removeAttribute("src");
       this._closeDec();
       $("liverds").innerHTML = live.mode === "wfm" ? `<div class="hint" style="margin-top:6px">In attesa dei dati RDS…</div>`
         : live.mode === "dab" ? `<div class="hint" style="margin-top:6px">Aggancio del multiplex DAB…</div>` : "";
     }
     $("livemode").style.display = live.mode === "dab" ? "none" : "";
+    this._updateFavBtn();
     if (live.mode !== "dab") $("livemode").value = live.mode;
     this._liveTitle();
   }
@@ -1149,7 +1172,15 @@ class SpettroPanel extends HTMLElement {
       $("livelevel").textContent = `livello ${m.level_db} dBFS`;
       this._drawLiveRow(m.row);
     }
-    if (m.info) st.info = m.info;
+    if (m.info) {
+      st.info = m.info;
+      // il preferito della radio prende il nome trasmesso, se non è stato scritto a mano
+      const fav = this._live && this._favFor(this._live.freq_mhz, this._live.sid);
+      if (fav && fav.source !== "user" && m.info.service && fav.name !== m.info.service) {
+        this._hass.callWS({ type: "spettro/favorite_set", freq_mhz: fav.freq_mhz, sid: fav.sid, name: m.info.service, source: "dab" }).catch(() => {});
+      }
+      if (this._live && m.info.service) { this._live.service = m.info.service; this._updateFavBtn(); }
+    }
     if (m.error) st.error = m.error;
     if (m.stats) st.stats = m.stats;
     if (m.dls !== undefined && m.dls !== null) {
@@ -1160,6 +1191,11 @@ class SpettroPanel extends HTMLElement {
       }
     }
     if (m.aus && m.config) this._dabAudio(m.config, m.aus);
+    if (m.slide) {
+      const img = this.shadowRoot.getElementById("liveslide");
+      img.src = `data:${m.slide.mime};base64,${m.slide.data}`;
+      img.style.display = "";
+    }
     st.synced = m.synced;
     this._liveTitle();
     this._renderDabLive();

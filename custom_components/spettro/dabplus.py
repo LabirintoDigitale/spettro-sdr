@@ -14,6 +14,7 @@ campioni del DAB+.
 
 from __future__ import annotations
 
+import base64
 from collections import deque
 import time
 from typing import Any
@@ -262,7 +263,13 @@ _XPAD_LEN = (4, 6, 8, 12, 16, 24, 32, 48)
 
 
 class DlsReader:
-    """Testo DLS (Dynamic Label) ricostruito dai sottocampi X-PAD (applicazioni 2 e 3)."""
+    """Dati PAD del DAB+: testo DLS (applicazioni X-PAD 2 e 3) e slideshow MOT (1, 12 e 13).
+
+    Il DLS è una serie di segmenti con prefisso e CRC; le immagini della slideshow viaggiano in
+    gruppi di dati MSC (applicazione 12 l'inizio, 13 il seguito) annunciati da un indicatore di
+    lunghezza (applicazione 1): l'intestazione MOT (tipo 3) dice il formato, il corpo (tipo 4) è
+    l'immagine divisa in segmenti numerati.
+    """
 
     def __init__(self) -> None:
         self.text: str | None = None
@@ -271,6 +278,16 @@ class DlsReader:
         self._segments: dict[int, str] = {}
         self._toggle: int | None = None
         self._last_app: int | None = None
+        # slideshow
+        self.image: bytes | None = None
+        self.image_mime: str | None = None
+        self.image_count = 0
+        self._dgli: int | None = None
+        self._mot: bytearray | None = None
+        self._mot_len = 0
+        self._mot_types: dict[int, tuple[int, int]] = {}  # TId → (tipo, sottotipo) dall'intestazione
+        self._bodies: dict[int, dict[int, bytes]] = {}
+        self._body_last: dict[int, int] = {}
 
     def feed(self, pad: bytes) -> None:
         if len(pad) < 2:
@@ -297,10 +314,28 @@ class DlsReader:
                     subfields.append((app, _XPAD_LEN[ci >> 5]))
         elif self._last_app in (2, 3):
             subfields.append((3, len(xpad)))
+        elif self._last_app in (12, 13):
+            subfields.append((13, len(xpad)))
         for app, length in subfields:
             data = xpad[pos : pos + length]
             pos += length
             self._last_app = app
+            if app == 1 and len(data) >= 4:  # lunghezza del prossimo gruppo di dati
+                if crc16(data[:2]) ^ 0xFFFF == int.from_bytes(data[2:4], "big"):
+                    self._dgli = ((data[0] & 0x3F) << 8) | data[1]
+                continue
+            if app == 12:
+                if self._dgli:
+                    self._mot, self._mot_len, self._dgli = bytearray(data), self._dgli, None
+                else:
+                    self._mot = None
+            elif app == 13 and self._mot is not None:
+                self._mot += data
+            if app in (12, 13):
+                if self._mot is not None and len(self._mot) >= self._mot_len:
+                    self._data_group(bytes(self._mot[: self._mot_len]))
+                    self._mot = None
+                continue
             if app == 2:
                 self._group = bytearray(data)
                 self._expect = 0
@@ -309,6 +344,58 @@ class DlsReader:
             else:
                 continue
             self._try_group()
+
+    def _data_group(self, g: bytes) -> None:
+        """Un gruppo di dati MSC della slideshow: segmento di intestazione o di corpo MOT."""
+        if len(g) < 4:
+            return
+        ext, has_crc, has_seg, has_ua, dtype = g[0] >> 7, (g[0] >> 6) & 1, (g[0] >> 5) & 1, (g[0] >> 4) & 1, g[0] & 0x0F
+        end = len(g)
+        if has_crc:
+            if crc16(g[:-2]) ^ 0xFFFF != int.from_bytes(g[-2:], "big"):
+                return
+            end -= 2
+        p = 2 + (2 if ext else 0)
+        last, segno, tid = 0, 0, None
+        if has_seg:
+            last, segno = g[p] >> 7, ((g[p] & 0x7F) << 8) | g[p + 1]
+            p += 2
+        if has_ua:
+            length, has_tid = g[p] & 0x0F, (g[p] >> 4) & 1
+            if has_tid:
+                tid = (g[p + 1] << 8) | g[p + 2]
+            p += 1 + length
+        data = g[p:end]
+        if tid is None or len(data) < 2 or dtype not in (3, 4):
+            return
+        size = ((data[0] & 0x1F) << 8) | data[1]
+        seg = data[2 : 2 + size]
+        if dtype == 3 and segno == 0 and len(seg) >= 7:  # intestazione MOT (di solito in un segmento)
+            self._mot_types[tid] = ((seg[5] >> 1) & 0x3F, ((seg[5] & 1) << 8) | seg[6])
+            return
+        if dtype == 4:
+            parts = self._bodies.setdefault(tid, {})
+            parts[segno] = seg
+            if last:
+                self._body_last[tid] = segno
+            n = self._body_last.get(tid)
+            if n is not None and all(k in parts for k in range(n + 1)):
+                body = b"".join(parts[k] for k in range(n + 1))
+                ctype = self._mot_types.get(tid)
+                if body[:2] == b"\xff\xd8" or ctype == (2, 1):
+                    mime = "image/jpeg"
+                elif body[:4] == b"\x89PNG" or ctype == (2, 3):
+                    mime = "image/png"
+                else:
+                    mime = None
+                if mime:
+                    self.image, self.image_mime = body, mime
+                    self.image_count += 1
+                self._bodies.pop(tid, None)
+                self._body_last.pop(tid, None)
+            # le immagini lasciate a metà non si accumulano
+            while len(self._bodies) > 4:
+                self._bodies.pop(next(iter(self._bodies)))
 
     def _try_group(self) -> None:
         g = self._group
@@ -461,6 +548,7 @@ class DabLiveReceiver:
         self._layout: list[tuple[list[int], int, int]] = []
         self._load: float | None = None
         self._t_feed = 0.0
+        self._slides = 0
 
     def process(self, raw: bytes) -> dict[str, Any]:
         t_feed = time.perf_counter()
@@ -508,6 +596,10 @@ class DabLiveReceiver:
             load = (time.perf_counter() - t0 + self._t_feed) / (len(frames) * 0.096)
             self._load = load if self._load is None else 0.8 * self._load + 0.2 * load
         if self.rx is not None:
+            pad = self.rx.dls
+            if pad.image_count != self._slides and pad.image:
+                self._slides = pad.image_count
+                out["slide"] = {"mime": pad.image_mime, "data": base64.b64encode(pad.image).decode()}
             out["config"] = self.rx.config
             out["dls"] = self.rx.dls.text
             out["stats"] = dict(self.rx.stats, load=round(self._load or 0, 2))

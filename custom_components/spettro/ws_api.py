@@ -287,7 +287,8 @@ async def ws_archive_delete(hass: HomeAssistant, connection: websocket_api.Activ
         vol.Required("type"): "spettro/favorite_set",
         vol.Required("freq_mhz"): vol.All(vol.Coerce(float), vol.Range(min=0.5, max=2200)),
         vol.Optional("name"): vol.Any(None, str),
-        vol.Optional("source", default="user"): vol.In(["user", "rds"]),
+        vol.Optional("source", default="user"): vol.In(["user", "rds", "dab"]),
+        vol.Optional("sid"): vol.Any(None, str),
     }
 )
 @websocket_api.async_response
@@ -296,7 +297,7 @@ async def ws_favorite_set(hass: HomeAssistant, connection: websocket_api.ActiveC
     _entry, scanner = _scanner(hass, connection, msg)
     if scanner is None:
         return
-    await scanner.favorites.async_set(msg["freq_mhz"], msg.get("name"), msg["source"])
+    await scanner.favorites.async_set(msg["freq_mhz"], msg.get("name"), msg["source"], msg.get("sid"))
     scanner.favorites_changed()
     connection.send_result(msg["id"], {"favorites": scanner.favorites.items})
 
@@ -305,6 +306,7 @@ async def ws_favorite_set(hass: HomeAssistant, connection: websocket_api.ActiveC
     {
         vol.Required("type"): "spettro/favorite_remove",
         vol.Required("freq_mhz"): vol.All(vol.Coerce(float), vol.Range(min=0.5, max=2200)),
+        vol.Optional("sid"): vol.Any(None, str),
     }
 )
 @websocket_api.async_response
@@ -312,7 +314,7 @@ async def ws_favorite_remove(hass: HomeAssistant, connection: websocket_api.Acti
     _entry, scanner = _scanner(hass, connection, msg)
     if scanner is None:
         return
-    await scanner.favorites.async_remove(msg["freq_mhz"])
+    await scanner.favorites.async_remove(msg["freq_mhz"], msg.get("sid"))
     scanner.favorites_changed()
     connection.send_result(msg["id"], {"favorites": scanner.favorites.items})
 

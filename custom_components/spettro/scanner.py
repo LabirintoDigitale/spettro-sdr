@@ -216,6 +216,7 @@ class SpectrumScanner:
         self.archive: SpikeArchive | None = None  # impostato dall'integrazione dopo il caricamento
         self.favorites: Any = None  # preferiti (Favorites), impostati dall'integrazione
         self._live_task: asyncio.Task | None = None
+        self.last_slide: dict[str, str] | None = None  # ultima immagine della slideshow DAB+
         self._live_stop_handle: asyncio.TimerHandle | None = None
         self._radio = asyncio.Lock()  # una sola connessione rtl_tcp alla volta
         self._listeners: list[Callable[[dict[str, Any]], None]] = []
@@ -278,6 +279,10 @@ class SpectrumScanner:
             out.append(self.last_spectrum)
         if self.favorites is not None:
             out.append({"kind": "favorites", "favorites": self.favorites.items})
+        live = self.status["live"]
+        if live and live.get("mode") == "dab" and self.last_slide:
+            out.append({"kind": "live_dab", "freq_mhz": live["freq_mhz"], "sid": live["sid"], "synced": True,
+                        "error": None, "slide": self.last_slide})
         return out
 
     def favorites_changed(self) -> None:
@@ -622,6 +627,7 @@ class SpectrumScanner:
         discard = RCV_BUF + 2 * READ_LIMIT + int(dab.RATE * 2 * max(self.settings.settle_ms, 100) / 1000)
         discard -= discard % 2
         rx = DabLiveReceiver(sid)
+        self.last_slide = None
         chunk = dab.FRAME_LEN * 2  # due trame (192 ms) per lettura
         last_stats = 0.0
         try:
@@ -644,6 +650,9 @@ class SpectrumScanner:
                         if out["aus"]:
                             payload["aus"] = [base64.b64encode(a).decode() for a in out["aus"]]
                             payload["config"] = out["config"]
+                        if "slide" in out:
+                            payload["slide"] = out["slide"]
+                            self.last_slide = out["slide"]
                         if "info" in out:
                             payload["info"] = out["info"]
                             if out["info"].get("service") and self.status["live"]:

@@ -16,7 +16,6 @@ Integrazione custom per **Home Assistant** che trasforma una chiavetta RTL-SDR c
 - **Analisi segnale**: tocca un picco sul grafico (o una riga della tabella) e premi **Analizza**. La scansione si sospende per qualche secondo, la chiavetta registra il segnale a frequenza fissa e il pannello mostra una cascata ad alta risoluzione (~1 kHz, ~5 ms per riga) con le misure: frequenza centrale, banda occupata, SNR, toni distinti, trasmissione continua o a burst (durata e ripetizione), frequenza che sale/scende (chirp) o due toni (FSK), più un'ipotesi sul **tipo di segnale** ricavata dalle misure. L'ultima analisi è anche un'entità immagine (**Ultima analisi**).
 - **RDS delle radio FM**: per le stazioni FM broadcast l'analisi decodifica anche i dati digitali RDS trasmessi sulla sottoportante a 57 kHz: nome della stazione (PS), testo (RadioText, di solito titolo e artista), tipo di programma, codice PI, frequenze alternative, ora trasmessa, informazioni sul traffico e se la stazione è stereo (pilota a 19 kHz). Il nome compare anche nel tipo rilevato e nell'archivio. Il nome arriva già con 1 s di registrazione, il testo completo di solito con 2–5 s (*Durata analisi*); con segnale debole i caratteri non ricevuti sono indicati con «·».
 - **DAB / DAB+ (radio digitale)**: i multiplex della banda III (174–240 MHz, canali 5A…13F, in Italia soprattutto il 12) compaiono come blocchi piatti larghi 1,5 MHz e l'analisi li riconosce con il loro canale. Sintonizzandosi al centro del canale decodifica il canale di servizio (FIC: sincronismo sulle trame da 96 ms, demodulazione OFDM/DQPSK, Viterbi, CRC) e mostra **nome del multiplex**, codice EId e l'**elenco delle radio** con il tipo (DAB o DAB+); il nome finisce anche nel tipo rilevato e nell'archivio. Serve il sample rate di 2,048 MS/s (quello predefinito). Per ogni radio si vede anche la velocità (kbit/s).
-- **Ascolto delle radio DAB+**: il ▶ accanto a una radio DAB+ avvia l'analisi continua sul suo multiplex. L'integrazione demodula in Python tutto il multiplex, estrae il sottocanale della radio (de-interleaving temporale, Viterbi, Reed-Solomon) e manda al pannello i pacchetti audio HE-AAC, che **suona il decoder AAC del browser** (WebCodecs: Chrome, Edge, Firefox recenti); nessun programma esterno. Il pannello mostra il **testo DLS** (titolo, artista, programma) con lo storico, e la qualità: pacchetti audio integri e correzioni Reed-Solomon. La chiavetta va a 2,048 MS/s (circa 4 MB/s in rete). Con Home Assistant aperto in **https** l'audio passa da WebCodecs; in **http** (es. `http://192.168.x.x:8123`) i browser non offrono WebCodecs e il pannello decodifica blocchi di mezzo secondo con Web Audio. Se il decoder del browser non applica l'SBR del DAB+ (blocchi da 960 campioni) l'audio viene suonato comunque alla velocità giusta, a qualità ridotta, e il pannello lo segnala. Le radio DAB classiche (MP2) non si ascoltano.
 - **Preferiti**: con il cuoricino ♡ accanto ad *Analizza* la frequenza selezionata (dal grafico o dall'archivio) entra nei preferiti e il cuore diventa ❤. La scheda *Preferiti* li elenca con il nome: quello RDS per le radio FM, altrimenti *NONAME 1*, *NONAME 2*…; con ✏ lo cambi a mano (un nome scritto da te non viene mai sostituito dall'RDS; lasciandolo vuoto torna automatico). Toccando la riga si seleziona la frequenza, ▶ avvia l'analisi continua, ❤ la toglie. I preferiti sono salvati in Home Assistant, quindi uguali su telefono e computer.
 - **Analisi continua (in diretta)**: dal pulsante *▶ Analisi continua* o dai preferiti la chiavetta resta sintonizzata fissa sulla frequenza (la scansione si sospende e alla fine riparte, solo se era attiva) e il pannello mostra in diretta la cascata che scorre, il livello del segnale e l'**audio** (FM larga, FM stretta o AM, con *Ascolta*/*Muto*). Per le radio FM l'**RDS si aggiorna** ogni secondo, con lo storico dei testi ricevuti (titoli, conduttori…). In diretta si usa 1,024 MS/s (circa 2 MB/s in rete); l'elaborazione avviene sul computer di Home Assistant. Se tutti i pannelli vengono chiusi l'analisi continua si ferma da sola dopo 30 s, per liberare la chiavetta.
 - **Ascolto**: la registrazione viene demodulata in FM larga (radio), FM stretta (voce) e AM; il pannello propone la più adatta in un lettore audio e si può passare alle altre.
@@ -90,6 +89,31 @@ Esempio reale: scansione da 600 a 1500 MHz, poi ingrandita sulla banda GSM 900.
 - **Servizi (20)**: le radio contenute nel multiplex con il tipo, **DAB+** (audio HE-AAC) o **DAB** (MP2), più i servizi di **dati** come *EPG-SPI* (la guida ai programmi). I nomi sono quelli trasmessi dalle stazioni, anche quelli con i simboli (*\* RDS \**).
 - *612/612 blocchi informativi integri in 51 trame*: ogni trama dura 96 ms e porta 12 blocchi con controllo CRC; se il segnale è al limite il conteggio scende e il pannello lo segnala.
 - Il nome del multiplex finisce anche nel **Tipo probabile** e quindi nell'Archivio spike. L'audio delle radio DAB+ non viene decodificato: il lettore sotto la cascata, su un segnale digitale, fa sentire solo rumore.
+
+## Ricevitore DAB+
+
+Spettro fa anche da **ricevitore di radio digitale DAB+**, tutto dentro Home Assistant e senza programmi esterni: l'integrazione demodula il multiplex in Python e il pannello suona l'audio con il decoder AAC del browser.
+
+**Come si ascolta una radio**
+
+1. Scansiona la banda III (174–240 MHz; in Italia i multiplex nazionali stanno soprattutto nel canale 12 e in alcuni canali 5–10, come DAB Italia sul 7D).
+2. Tocca il blocco piatto largo 1,5 MHz di un multiplex e premi **Analizza** (o aprilo dall'Archivio spike): compare l'elenco delle radio con tipo e velocità (kbit/s).
+3. Premi **▶** accanto a una radio **DAB+**: parte l'analisi continua sul multiplex (la scansione si sospende) e dopo 2–3 secondi si sente l'audio. **🔇 Ascolta / 🔊 Muto** lo accende e lo spegne, **■ Ferma** torna alla scansione.
+4. Con il **cuore ♡** la radio va nei **Preferiti** con il suo nome e il canale (*DAB+ 7D*): da lì ▶ la fa ripartire con un tocco.
+
+**Cosa mostra la diretta**
+
+- **Slideshow**: le immagini che la stazione trasmette con l'audio (copertine, loghi, programmi), aggiornate man mano.
+- **Testo (DLS)**: il testo scorrevole della radio (titolo, artista, conduttore) e lo storico dei testi ricevuti.
+- **Radio, multiplex e velocità** (kbit/s e protezione del sottocanale).
+- **Pacchetti audio integri** e **correzioni Reed-Solomon**: la qualità di ricezione (vicino al 100% = audio pulito).
+- **Carico su Home Assistant**: quanto calcolo serve rispetto al tempo reale (oltre il 90% l'audio va a scatti) e la **riserva audio**, che cresce da sola fino a 4 s se la rete o il computer rallentano.
+
+**Come funziona**
+
+La chiavetta resta sintonizzata al centro del canale a 2,048 MS/s (circa 4 MB/s in rete dal computer con rtl_tcp a quello di Home Assistant). L'integrazione segue le trame da 96 ms, demodula solo i simboli OFDM della radio scelta, ricostruisce il suo sottocanale (de-interleaving temporale, decodifica di Viterbi, Reed-Solomon, superframe DAB+) e manda al pannello i pacchetti audio HE-AAC, il testo DLS e le immagini della slideshow (MOT). Il browser decodifica l'audio: con Home Assistant in **https** usa WebCodecs, in **http** (es. `http://192.168.x.x:8123`) blocchi di mezzo secondo con Web Audio. Se il decoder del browser non applica l'SBR del DAB+ (blocchi da 960 campioni) l'audio si sente comunque alla velocità giusta, a qualità ridotta, e il pannello lo segnala.
+
+**Limiti**: una radio alla volta; le radio DAB classiche (MP2) non si ascoltano; su iPhone/iPad l'audio dipende dal supporto del browser.
 
 ## Requisiti
 

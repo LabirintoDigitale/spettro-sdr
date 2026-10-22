@@ -43,25 +43,33 @@ class Favorites:
             n += 1
         return f"{NONAME} {n}"
 
-    def find(self, freq_mhz: float) -> dict[str, Any] | None:
-        return next((f for f in self.items if abs(f["freq_mhz"] - freq_mhz) * 1e6 <= MATCH_HZ), None)
+    def find(self, freq_mhz: float, sid: str | None = None) -> dict[str, Any] | None:
+        """Preferito della frequenza; per il DAB+ anche della radio (SId), perché un multiplex ne ha molte."""
+        sid = sid.upper() if sid else None
+        return next((f for f in self.items if abs(f["freq_mhz"] - freq_mhz) * 1e6 <= MATCH_HZ
+                     and f.get("sid") == sid), None)
 
-    async def async_set(self, freq_mhz: float, name: str | None, source: str = "user") -> None:
-        """Aggiunge un preferito, o ne cambia il nome; un nome RDS non sostituisce quello scritto a mano."""
-        fav = self.find(freq_mhz)
+    async def async_set(self, freq_mhz: float, name: str | None, source: str = "user", sid: str | None = None) -> None:
+        """Aggiunge un preferito, o ne cambia il nome; un nome RDS/DAB non sostituisce quello scritto a mano."""
+        fav = self.find(freq_mhz, sid)
         if fav is None:
             fav = {"freq_mhz": round(freq_mhz, 4), "name": None, "source": "auto", "added": time.time()}
+            if sid:
+                from .dab import channel_for  # noqa: PLC0415
+
+                ch = channel_for(freq_mhz)
+                fav.update(sid=sid.upper(), mode="dab", channel=ch[0] if ch else None)
             self.items.append(fav)
             self.items.sort(key=lambda f: f["freq_mhz"])
-        if name is not None and not (source == "rds" and fav.get("source") == "user"):
+        if name is not None and not (source in ("rds", "dab") and fav.get("source") == "user"):
             name = name.strip()[:40]
             fav["name"], fav["source"] = (name, source) if name else (None, "auto")
         if not fav["name"]:
             fav["name"], fav["source"] = self._next_noname(), "auto"
         await self._store.async_save(self.items)
 
-    async def async_remove(self, freq_mhz: float) -> None:
-        fav = self.find(freq_mhz)
+    async def async_remove(self, freq_mhz: float, sid: str | None = None) -> None:
+        fav = self.find(freq_mhz, sid)
         if fav is not None:
             self.items.remove(fav)
             await self._store.async_save(self.items)
