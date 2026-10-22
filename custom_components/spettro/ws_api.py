@@ -51,6 +51,10 @@ def async_setup(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, ws_archive_list)
     websocket_api.async_register_command(hass, ws_archive_get)
     websocket_api.async_register_command(hass, ws_archive_delete)
+    websocket_api.async_register_command(hass, ws_favorite_set)
+    websocket_api.async_register_command(hass, ws_favorite_remove)
+    websocket_api.async_register_command(hass, ws_live_start)
+    websocket_api.async_register_command(hass, ws_live_stop)
 
 
 @callback
@@ -276,3 +280,68 @@ async def ws_archive_delete(hass: HomeAssistant, connection: websocket_api.Activ
     else:
         removed = await hass.async_add_executor_job(scanner.archive.clear)
     connection.send_result(msg["id"], {"removed": removed})
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "spettro/favorite_set",
+        vol.Required("freq_mhz"): vol.All(vol.Coerce(float), vol.Range(min=0.5, max=2200)),
+        vol.Optional("name"): vol.Any(None, str),
+    }
+)
+@websocket_api.async_response
+async def ws_favorite_set(hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]) -> None:
+    """Aggiunge una frequenza ai preferiti (o ne cambia il nome)."""
+    _entry, scanner = _scanner(hass, connection, msg)
+    if scanner is None:
+        return
+    await scanner.favorites.async_set(msg["freq_mhz"], msg.get("name"))
+    scanner.favorites_changed()
+    connection.send_result(msg["id"], {"favorites": scanner.favorites.items})
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "spettro/favorite_remove",
+        vol.Required("freq_mhz"): vol.All(vol.Coerce(float), vol.Range(min=0.5, max=2200)),
+    }
+)
+@websocket_api.async_response
+async def ws_favorite_remove(hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]) -> None:
+    _entry, scanner = _scanner(hass, connection, msg)
+    if scanner is None:
+        return
+    await scanner.favorites.async_remove(msg["freq_mhz"])
+    scanner.favorites_changed()
+    connection.send_result(msg["id"], {"favorites": scanner.favorites.items})
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "spettro/live_start",
+        vol.Required("freq_mhz"): vol.All(vol.Coerce(float), vol.Range(min=24, max=1766)),
+        vol.Optional("mode"): vol.Any(None, vol.In(["wfm", "nfm", "am"])),
+    }
+)
+@websocket_api.async_response
+async def ws_live_start(hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]) -> None:
+    """Analisi continua: chiavetta fissa sulla frequenza, scansione sospesa."""
+    _entry, scanner = _scanner(hass, connection, msg)
+    if scanner is None:
+        return
+    try:
+        live = await scanner.live_start(msg["freq_mhz"] * 1e6, msg.get("mode"))
+    except RuntimeError as err:
+        connection.send_error(msg["id"], "live_failed", str(err))
+        return
+    connection.send_result(msg["id"], live)
+
+
+@websocket_api.websocket_command({vol.Required("type"): "spettro/live_stop"})
+@websocket_api.async_response
+async def ws_live_stop(hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]) -> None:
+    _entry, scanner = _scanner(hass, connection, msg)
+    if scanner is None:
+        return
+    await scanner.live_stop()
+    connection.send_result(msg["id"])

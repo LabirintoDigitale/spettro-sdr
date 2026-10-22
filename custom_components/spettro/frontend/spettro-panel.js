@@ -1,7 +1,7 @@
 // Pannello "Spettro" per Home Assistant: grafico dello spettro, waterfall e picchi.
 
 // deve coincidere con VERSION in const.py: se il backend ne riporta un'altra manca un riavvio
-const PANEL_VERSION = "1.6.2";
+const PANEL_VERSION = "1.7.0";
 
 const PRESETS = [
   ["Personalizzato", null, null],
@@ -73,6 +73,12 @@ class SpettroPanel extends HTMLElement {
     this._archHours = null;
     this._archSort = { key: "timestamp", desc: true }; // colonna e verso dell'ordinamento dell'archivio
     this._archSel = null; // id dell'analisi dell'archivio mostrata
+    this._favs = []; // frequenze preferite
+    this._live = null; // analisi continua in corso: {freq_mhz, mode}
+    this._listen = false; // audio della diretta attivo
+    this._audioCtx = null;
+    this._nextT = 0;
+    this._rtHistory = []; // testi RDS ricevuti in diretta, dal più recente
     try {
       const saved = JSON.parse(localStorage.getItem("spettro.archSort"));
       if (saved && ["timestamp", "target_mhz", "snr_db"].includes(saved.key)) this._archSort = saved;
@@ -98,6 +104,7 @@ class SpettroPanel extends HTMLElement {
 
   disconnectedCallback() {
     this._unsubscribe();
+    if (this._audioCtx) { this._audioCtx.close(); this._audioCtx = null; }
     clearInterval(this._tick);
     this._tick = null;
     if (this._ro) this._ro.disconnect();
@@ -136,6 +143,7 @@ class SpettroPanel extends HTMLElement {
   _onMessage(m) {
     if (m.kind === "status") {
       this._status = m;
+      this._setLive(m.live || null);
       const vw = this.shadowRoot.getElementById("verwarn");
       const mismatch = m.version !== PANEL_VERSION;
       vw.style.display = mismatch ? "block" : "none";
@@ -148,6 +156,10 @@ class SpettroPanel extends HTMLElement {
       this._updateStatus();
       return;
     }
+    if (m.kind === "favorites") { this._favs = m.favorites; this._renderFavs(); this._updateFavBtn(); return; }
+    if (m.kind === "live") { this._onLive(m); return; }
+    if (m.kind === "live_rds") { this._onLiveRds(m.rds); return; }
+    if (m.kind === "live_error") { this._msg(`Analisi continua interrotta: ${m.error}`, true); return; }
     if (m.kind === "analysis") {
       if (m.entry && !this._archive.some((e) => e.id === m.entry.id)) {
         this._archive.unshift(m.entry);
@@ -249,6 +261,22 @@ class SpettroPanel extends HTMLElement {
         #archive tbody.entry.sel td { background:rgba(3,169,244,.16); }
         #archive tbody.entry.sel td:first-child { box-shadow:inset 3px 0 var(--primary-color); }
         .anahead { font-size:12px; color:var(--secondary-text-color); }
+        button.heart { font-size:20px; line-height:1; padding:6px 10px; color:#e53935; }
+        #favs table td { cursor:pointer; }
+        #favs tr:hover td { background:var(--secondary-background-color); }
+        #favs td.name { font-weight:500; }
+        #favs td.act { text-align:right; white-space:nowrap; }
+        #favs td.act button { padding:4px 8px; font-size:13px; }
+        #favs td.act button.heart { font-size:16px; padding:2px 6px; }
+        .livehead { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+        .livehead .dot { color:#e53935; font-weight:600; animation:blink 1.2s infinite; }
+        @keyframes blink { 50% { opacity:.3; } }
+        .livehead .title { font-size:15px; font-weight:500; flex:1; min-width:180px; }
+        .livehead select { width:auto; }
+        #livewf { height:160px; border-radius:4px; background:#080820; }
+        .liveaxis { display:flex; justify-content:space-between; font-size:11px; color:var(--secondary-text-color); }
+        #livert div { font-size:13px; padding:2px 0; border-bottom:1px solid var(--divider-color); }
+        #livert span { color:var(--secondary-text-color); font-size:11px; margin-right:6px; }
       </style>
       <div class="toolbar"><ha-menu-button></ha-menu-button><div class="title"><span>👻 Spettro</span><span class="ver">versione ${PANEL_VERSION}</span></div></div>
       <div id="verwarn" class="err" style="display:none;padding:10px 16px;font-size:14px"></div>
@@ -271,11 +299,29 @@ class SpettroPanel extends HTMLElement {
             <div class="row">
               <div class="hint" id="selinfo" style="flex:1;min-width:200px">Tocca un picco sul grafico o una riga dell'Archivio spike per sceglierlo.</div>
               <button class="primary" id="analyze" disabled>Analizza</button>
+              <button id="livebtn" disabled title="Resta sintonizzato su questa frequenza: audio, cascata e RDS in diretta (la scansione si sospende)">▶ Analisi continua</button>
+              <button class="heart" id="fav" disabled title="Aggiungi ai preferiti">♡</button>
+            </div>
+            <div id="live" style="display:none">
+              <div class="livehead">
+                <span class="dot">● IN DIRETTA</span>
+                <span class="title" id="livetitle"></span>
+                <select id="livemode" title="Demodulazione"><option value="wfm">FM larga (radio)</option><option value="nfm">FM stretta (voce)</option><option value="am">AM</option></select>
+                <button id="livelisten">🔇 Ascolta</button>
+                <button class="primary" id="livestop">■ Ferma</button>
+              </div>
+              <canvas id="livewf" style="margin-top:8px"></canvas>
+              <div class="liveaxis"><span id="livelo"></span><span id="livelevel"></span><span id="livehi"></span></div>
+              <div id="liverds"></div>
             </div>
             <div id="anaout"></div>
           </div>
         </div>
         <div class="side">
+          <div class="card">
+            <h3>Preferiti <span style="color:#e53935">❤</span></h3>
+            <div id="favs" class="hint">Nessun preferito: seleziona una frequenza e tocca ♡ nell'Analisi segnale.</div>
+          </div>
           <div class="card">
             <div class="row" style="justify-content:space-between">
               <h3 style="margin:0">Archivio spike</h3>
@@ -382,6 +428,13 @@ class SpettroPanel extends HTMLElement {
     });
     $("resetzoom").addEventListener("click", () => { this._view = null; this._draw(); });
     $("analyze").addEventListener("click", () => this._analyze());
+    $("fav").addEventListener("click", () => this._toggleFav(this._sel));
+    $("livebtn").addEventListener("click", () => this._liveStart(this._sel / 1e6));
+    $("livestop").addEventListener("click", async () => {
+      try { await this._hass.callWS({ type: "spettro/live_stop" }); } catch (err) { this._msg(err.message || String(err), true); }
+    });
+    $("livelisten").addEventListener("click", () => this._setListen(!this._listen));
+    $("livemode").addEventListener("change", (e) => { if (this._live) this._liveStart(this._live.freq_mhz, e.target.value); });
     $("resume").addEventListener("click", async () => {
       try {
         await this._hass.callWS({ type: "spettro/set_enabled", enabled: true });
@@ -532,6 +585,7 @@ class SpettroPanel extends HTMLElement {
       }
       case "paused":
         text = s.paused === "analysis" ? "Analisi del segnale in corso, scansione sospesa…"
+          : s.paused === "live" ? `Analisi continua su ${s.live ? s.live.freq_mhz.toFixed(4) : "?"} MHz, scansione sospesa`
           : s.paused === "disabled" ? "In pausa (interruttore Scansione spento)" : "In pausa: nessun pannello aperto";
         break;
       case "error": {
@@ -825,13 +879,232 @@ class SpettroPanel extends HTMLElement {
     this._plot = { L, pw, xToF, fToX };
   }
 
+  // ---------------------------------------------------------------- preferiti
+
+  _favFor(mhz) {
+    return mhz == null ? null : this._favs.find((f) => Math.abs(f.freq_mhz - mhz) <= 0.03) || null;
+  }
+
+  _updateFavBtn() {
+    const b = this.shadowRoot.getElementById("fav");
+    if (!b) return;
+    const on = this._sel !== null && !!this._favFor(this._sel / 1e6);
+    b.textContent = on ? "❤" : "♡";
+    b.title = on ? "Togli dai preferiti" : "Aggiungi ai preferiti";
+  }
+
+  async _toggleFav(hz, name = null) {
+    if (hz == null) return;
+    const mhz = hz / 1e6, fav = this._favFor(mhz);
+    // nome iniziale: quello RDS dell'analisi mostrata, se è di questa frequenza
+    const ana = this._ana;
+    if (!name && ana && ana.rds && ana.rds.ps_complete && Math.abs(ana.target_mhz - mhz) <= 0.1) name = ana.rds.ps;
+    try {
+      if (fav) await this._hass.callWS({ type: "spettro/favorite_remove", freq_mhz: fav.freq_mhz });
+      else await this._hass.callWS({ type: "spettro/favorite_set", freq_mhz: mhz, name });
+    } catch (err) {
+      this._msg(err.message || String(err), true);
+    }
+  }
+
+  _renderFavs() {
+    const el = this.shadowRoot.getElementById("favs");
+    if (!this._favs.length) {
+      el.className = "hint";
+      el.textContent = "Nessun preferito: seleziona una frequenza e tocca ♡ nell'Analisi segnale.";
+      return;
+    }
+    el.className = "";
+    el.innerHTML = `<table><tbody>${this._favs.map((f) => `<tr data-f="${f.freq_mhz}">
+        <td class="name">${esc(f.name || "—")}</td><td>${f.freq_mhz.toFixed(4)} MHz</td>
+        <td class="act"><button class="play" title="Analisi continua">▶</button><button class="heart" title="Togli dai preferiti">❤</button></td></tr>`).join("")}
+      </tbody></table>`;
+    el.querySelectorAll("tr[data-f]").forEach((tr) => {
+      const mhz = parseFloat(tr.dataset.f);
+      tr.addEventListener("click", (e) => {
+        if (e.target.closest("button")) return;
+        this._select(mhz * 1e6);
+        const sp = this._spec, f = mhz * 1e6;
+        if (sp && f >= sp.range_start && f <= sp.range_stop) {
+          const half = Math.max(50e3, (sp.range_stop - sp.range_start) * 0.02);
+          this._view = [Math.max(sp.range_start, f - half), Math.min(sp.range_stop, f + half)];
+          this._draw();
+        }
+        // ultima analisi archiviata di questa frequenza, se c'è
+        const e2 = this._archive.filter((a) => Math.abs(a.target_mhz - mhz) <= 0.1).sort((a, b) => b.timestamp - a.timestamp)[0];
+        if (e2 && !this._live) this._openArchived(e2.id, true);
+      });
+      tr.querySelector("button.play").addEventListener("click", () => { this._select(mhz * 1e6); this._liveStart(mhz); });
+      tr.querySelector("button.heart").addEventListener("click", () => this._toggleFav(mhz * 1e6));
+    });
+  }
+
+  // ---------------------------------------------------------------- analisi continua
+
+  _ensureAudio() {
+    // va creato dentro un tocco dell'utente, altrimenti il browser lo tiene muto
+    if (!this._audioCtx) {
+      const AC = window.AudioContext || window.webkitAudioContext;
+      if (!AC) return null;
+      this._audioCtx = new AC();
+    }
+    if (this._audioCtx.state === "suspended") this._audioCtx.resume();
+    return this._audioCtx;
+  }
+
+  _setListen(on) {
+    this._listen = on && !!this._ensureAudio();
+    this._nextT = 0;
+    const b = this.shadowRoot.getElementById("livelisten");
+    b.textContent = this._listen ? "🔊 Muto" : "🔇 Ascolta";
+  }
+
+  async _liveStart(mhz, mode = null) {
+    if (mhz == null) return;
+    this._setListen(true); // il tocco sul pulsante permette di avviare l'audio
+    this._liveRestart = true; // la diretta precedente si ferma: l'audio resta acceso
+    try {
+      await this._hass.callWS({ type: "spettro/live_start", freq_mhz: mhz, ...(mode ? { mode } : {}) });
+      this.shadowRoot.querySelector(".ana").scrollIntoView({ behavior: "smooth", block: "start" });
+    } catch (err) {
+      this._setListen(false);
+      this._msg(err.message || String(err), true);
+    } finally {
+      this._liveRestart = false;
+    }
+  }
+
+  _setLive(live) {
+    const was = this._live;
+    this._live = live;
+    const $ = (id) => this.shadowRoot.getElementById(id);
+    $("live").style.display = live ? "" : "none";
+    $("anaout").style.display = live ? "none" : "";
+    $("analyze").disabled = this._sel === null || !!this._analyzing || !!live;
+    if (!live) {
+      if (was && !this._liveRestart) { this._setListen(false); this._liveRows = null; }
+      return;
+    }
+    if (!was || was.freq_mhz !== live.freq_mhz || was.mode !== live.mode) {
+      this._liveRows = null;
+      this._rtHistory = [];
+      this._liveRds = null;
+      $("liverds").innerHTML = live.mode === "wfm" ? `<div class="hint" style="margin-top:6px">In attesa dei dati RDS…</div>` : "";
+    }
+    $("livemode").value = live.mode;
+    this._liveTitle();
+  }
+
+  _liveTitle() {
+    const live = this._live;
+    if (!live) return;
+    const fav = this._favFor(live.freq_mhz);
+    const name = (this._liveRds && this._liveRds.ps_complete && this._liveRds.ps) || (fav && fav.name) || "";
+    this.shadowRoot.getElementById("livetitle").textContent = `${live.freq_mhz.toFixed(4)} MHz${name ? ` «${name}»` : ""}`;
+  }
+
+  _onLive(m) {
+    if (!this._live) this._setLive({ freq_mhz: m.freq_mhz, mode: m.mode });
+    const $ = (id) => this.shadowRoot.getElementById(id);
+    const half = m.span_hz / 2;
+    $("livelo").textContent = `${((m.freq_mhz * 1e6 - half) / 1e6).toFixed(3)}`;
+    $("livehi").textContent = `${((m.freq_mhz * 1e6 + half) / 1e6).toFixed(3)}`;
+    $("livelevel").textContent = `livello ${m.level_db} dBFS`;
+    this._drawLiveRow(m.row);
+    if (this._listen && this._audioCtx) this._playPcm(m.audio);
+  }
+
+  _playPcm(b64) {
+    const ctx = this._audioCtx;
+    const bin = atob(b64);
+    const n = bin.length >> 1;
+    const buf = ctx.createBuffer(1, n, 32000);
+    const ch = buf.getChannelData(0);
+    for (let i = 0; i < n; i++) {
+      let v = bin.charCodeAt(2 * i) | (bin.charCodeAt(2 * i + 1) << 8);
+      if (v >= 32768) v -= 65536;
+      ch[i] = v / 32768;
+    }
+    const now = ctx.currentTime;
+    // piccola riserva contro i ritardi di rete; se si accumula troppo ritardo si riparte
+    if (this._nextT < now + 0.05 || this._nextT > now + 2) this._nextT = now + 0.4;
+    const src = ctx.createBufferSource();
+    src.buffer = buf;
+    src.connect(ctx.destination);
+    src.start(this._nextT);
+    this._nextT += buf.duration;
+  }
+
+  _drawLiveRow(row) {
+    const c = this.shadowRoot.getElementById("livewf");
+    const dpr = window.devicePixelRatio || 1;
+    const w = Math.max(1, Math.round(c.clientWidth * dpr)), h = Math.max(1, Math.round(c.clientHeight * dpr));
+    if (c.width !== w || c.height !== h) { c.width = w; c.height = h; this._liveRows = null; }
+    const ctx = c.getContext("2d");
+    if (!this._liveRows) { ctx.fillStyle = "#080820"; ctx.fillRect(0, 0, w, h); this._liveRows = 0; this._liveScale = null; }
+    // scala dei colori: dal rumore (mediana) al massimo recente
+    const sorted = row.slice().sort((a, b) => a - b);
+    const lo = sorted[Math.floor(sorted.length / 2)] - 3, hi = sorted[sorted.length - 1] + 3;
+    const sc = this._liveScale;
+    this._liveScale = sc ? [0.9 * sc[0] + 0.1 * lo, Math.max(hi, 0.95 * sc[1] + 0.05 * hi)] : [lo, Math.max(hi, lo + 20)];
+    const [vmin, vmax] = this._liveScale;
+    const rh = Math.max(1, Math.round(3 * dpr)); // 4 righe al secondo: 160 px ≈ 13 s
+    ctx.drawImage(c, 0, 0, w, h - rh, 0, rh, w, h - rh); // la cascata scende di una riga
+    const img = ctx.createImageData(w, 1);
+    for (let x = 0; x < w; x++) {
+      const v = row[Math.min(row.length - 1, Math.floor((x / w) * row.length))];
+      const t = Math.max(0, Math.min(255, Math.round(((v - vmin) / (vmax - vmin)) * 255)));
+      img.data[4 * x] = LUT[3 * t]; img.data[4 * x + 1] = LUT[3 * t + 1]; img.data[4 * x + 2] = LUT[3 * t + 2]; img.data[4 * x + 3] = 255;
+    }
+    for (let y = 0; y < rh; y++) ctx.putImageData(img, 0, y);
+    this._liveRows++;
+  }
+
+  _onLiveRds(d) {
+    if (!this._live) return;
+    const el = this.shadowRoot.getElementById("liverds");
+    if (!d) {
+      if (!this._liveRds) el.innerHTML = `<div class="hint" style="margin-top:6px">Nessun dato RDS ricevuto (stazione senza RDS o segnale debole).</div>`;
+      return;
+    }
+    this._liveRds = d;
+    // storico dei testi: si aggiunge solo un testo completo e diverso dall'ultimo
+    if (d.rt && d.rt_complete && (!this._rtHistory.length || this._rtHistory[0].text !== d.rt)) {
+      this._rtHistory.unshift({ text: d.rt, time: new Date() });
+      this._rtHistory = this._rtHistory.slice(0, 20);
+    }
+    // un preferito senza nome prende il nome RDS della stazione
+    const fav = this._favFor(this._live.freq_mhz);
+    if (fav && !fav.name && d.ps && d.ps_complete) {
+      this._hass.callWS({ type: "spettro/favorite_set", freq_mhz: fav.freq_mhz, name: d.ps }).catch(() => {});
+    }
+    this._liveTitle();
+    const rows = [
+      ["Stazione", d.ps ? d.ps + (d.ps_complete ? "" : " (incompleto)") : "—"],
+      ["Testo", d.rt ? d.rt + (d.rt_complete ? "" : " (incompleto)") : "—"],
+      ["Programma", d.pty],
+      ["Codice PI", d.pi || "—"],
+      ...(d.ct ? [["Ora trasmessa", d.ct]] : []),
+      ...(d.af.length ? [["Altre frequenze", d.af.map((f) => f.toFixed(1)).join(", ") + " MHz"]] : []),
+      ["Stereo", d.stereo ? "sì (pilota 19 kHz)" : "no"],
+      ["Traffico", d.tp ? (d.ta ? "notiziario sul traffico in corso" : "stazione con info traffico") : "—"],
+    ];
+    el.innerHTML = `<h3 style="margin:10px 0 4px">RDS in diretta</h3>
+      <table><tbody>${rows.map(([k, v]) => `<tr><td>${k}</td><td class="num">${esc(v)}</td></tr>`).join("")}</tbody></table>
+      ${this._rtHistory.length ? `<h3 style="margin:10px 0 4px">Testi ricevuti</h3><div id="livert">${this._rtHistory
+        .map((r) => `<div><span>${r.time.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })}</span>${esc(r.text)}</div>`).join("")}</div>` : ""}`;
+  }
+
   // ---------------------------------------------------------------- analisi
 
   _select(f) {
     this._sel = f;
     const $ = (id) => this.shadowRoot.getElementById(id);
     $("selinfo").textContent = `Selezionato: ${(f / 1e6).toFixed(4)} MHz`;
-    $("analyze").disabled = !!this._analyzing;
+    $("analyze").disabled = !!this._analyzing || !!this._live;
+    $("livebtn").disabled = false;
+    $("fav").disabled = false;
+    this._updateFavBtn();
     this._draw();
   }
 
@@ -958,7 +1231,7 @@ class SpettroPanel extends HTMLElement {
     const d = r.rds;
     const rdsRows = d ? [
       ["Stazione", d.ps ? d.ps + (d.ps_complete ? "" : " (incompleto)") : "—"],
-      ["Testo", d.rt || "—"],
+      ["Testo", d.rt ? d.rt + (d.rt_complete === false ? " (incompleto)" : "") : "—"],
       ["Programma", d.pty],
       ["Codice PI", d.pi || "—"],
       ...(d.ct ? [["Ora trasmessa", d.ct]] : []),

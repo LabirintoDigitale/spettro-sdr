@@ -8,6 +8,7 @@ ricompone uno spettro unico su tutto l'intervallo richiesto.
 from __future__ import annotations
 
 import asyncio
+import base64
 from collections import deque
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, fields
@@ -20,8 +21,10 @@ from typing import Any
 
 import numpy as np
 
+from . import rds
 from .analysis import analyze_iq
 from .archive import SpikeArchive
+from .live import CHUNK, LIVE_RATE, LiveDemod
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -57,6 +60,9 @@ PARTIAL_EVERY = 1.5  # secondi tra un aggiornamento parziale e l'altro
 CONNECT_TIMEOUT = 8
 IO_TIMEOUT = 10
 MIN_ERROR_RETRY = 10
+LIVE_RDS_WINDOW_S = 6.0  # multiplex tenuto per decodificare l'RDS in diretta
+LIVE_RDS_EVERY_S = 1.0
+LIVE_NO_VIEWER_STOP_S = 30  # senza pannelli aperti l'analisi continua si ferma da sola
 ANALYSIS_MAX_S = 5  # durata massima di una registrazione per l'analisi
 SPIKE_TOL_HZ = 100e3  # due picchi così vicini sono lo stesso segnale
 
@@ -207,6 +213,9 @@ class SpectrumScanner:
         self.last_analysis_png: bytes | None = None
         self.last_analysis_audio: dict[str, bytes] = {}
         self.archive: SpikeArchive | None = None  # impostato dall'integrazione dopo il caricamento
+        self.favorites: Any = None  # preferiti (Favorites), impostati dall'integrazione
+        self._live_task: asyncio.Task | None = None
+        self._live_stop_handle: asyncio.TimerHandle | None = None
         self._radio = asyncio.Lock()  # una sola connessione rtl_tcp alla volta
         self._listeners: list[Callable[[dict[str, Any]], None]] = []
         self._task: asyncio.Task | None = None
@@ -233,6 +242,7 @@ class SpectrumScanner:
             "auto_mhz": None,  # picco in analisi automatica
             "auto_count": None,  # picchi analizzati in automatico nell'ultima scansione
             "version": None,  # versione dell'integrazione, per accorgersi di un riavvio mancato
+            "live": None,  # analisi continua in corso: {"freq_mhz", "mode"}
         }
         self._update_active(emit=False)
 
@@ -251,6 +261,8 @@ class SpectrumScanner:
                 if viewer:
                     self.viewers -= 1
                     self._update_active()
+                    if self.viewers <= 0 and self._live_task is not None:
+                        self._schedule_live_stop()
 
         return remove
 
@@ -263,7 +275,14 @@ class SpectrumScanner:
         out = [dict(self.status), *self.history]
         if self.last_spectrum is not None and not self.last_spectrum["complete"]:
             out.append(self.last_spectrum)
+        if self.favorites is not None:
+            out.append({"kind": "favorites", "favorites": self.favorites.items})
         return out
+
+    def favorites_changed(self) -> None:
+        """Avvisa i pannelli che i preferiti sono cambiati."""
+        if self.favorites is not None:
+            self._emit({"kind": "favorites", "favorites": self.favorites.items})
 
     def _emit(self, payload: dict[str, Any]) -> None:
         for cb in list(self._listeners):
@@ -281,6 +300,8 @@ class SpectrumScanner:
     def _pause_reason(self) -> str | None:
         if self.analyzing:
             return "analysis"
+        if self.status["live"]:
+            return "live"
         if not self.enabled:
             return "disabled"
         if self.settings.only_when_viewed and self.viewers <= 0:
@@ -314,6 +335,7 @@ class SpectrumScanner:
             self._task = asyncio.get_running_loop().create_task(self._run(), name="spettro_scanner")
 
     async def stop(self) -> None:
+        await self.live_stop()
         if self._task is not None:
             self._task.cancel()
             try:
@@ -339,6 +361,8 @@ class SpectrumScanner:
         """Mette in pausa la scansione, registra il segnale a frequenza fissa e lo misura."""
         if self.analyzing:
             raise RuntimeError("C'è già un'analisi in corso")
+        if self._live_task is not None:
+            raise RuntimeError("Ferma prima l'analisi continua")
         rate = int(self.settings.sample_rate)
         capture_bytes = int(rate * min(duration_s, ANALYSIS_MAX_S)) * 2
         discard_bytes = RCV_BUF + 2 * READ_LIMIT + int(rate * 2 * max(self.settings.settle_ms, 100) / 1000)
@@ -453,6 +477,121 @@ class SpectrumScanner:
             if not chunk:
                 raise ConnectionError("Connessione chiusa dal server")
             remaining -= len(chunk)
+
+    # --- analisi continua (in diretta) --------------------------------------
+
+    @staticmethod
+    def live_mode_for(freq_hz: float) -> str:
+        """Demodulazione predefinita per la frequenza: FM larga per la radio, AM per la banda aerea."""
+        mhz = freq_hz / 1e6
+        if 87.5 <= mhz <= 108:
+            return "wfm"
+        if 118 <= mhz <= 137:
+            return "am"
+        return "nfm"
+
+    async def live_start(self, freq_hz: float, mode: str | None = None) -> dict[str, Any]:
+        """Sintonizza la chiavetta fissa su freq_hz (scansione sospesa) e demodula di continuo."""
+        if self.analyzing:
+            raise RuntimeError("C'è un'analisi in corso, riprova tra qualche secondo")
+        await self.live_stop()
+        mode = mode or self.live_mode_for(freq_hz)
+        self.status["live"] = {"freq_mhz": round(freq_hz / 1e6, 4), "mode": mode}
+        self._update_active()  # la scansione si ferma al passo successivo e libera la chiavetta
+        self._live_task = asyncio.get_running_loop().create_task(self._live_run(freq_hz, mode), name="spettro_live")
+        if self.viewers <= 0:
+            self._schedule_live_stop()
+        return self.status["live"]
+
+    async def live_stop(self) -> None:
+        if self._live_stop_handle is not None:
+            self._live_stop_handle.cancel()
+            self._live_stop_handle = None
+        task, self._live_task = self._live_task, None
+        if task is not None:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+    def _schedule_live_stop(self) -> None:
+        if self._live_stop_handle is not None:
+            self._live_stop_handle.cancel()
+
+        def check() -> None:
+            self._live_stop_handle = None
+            if self.viewers <= 0 and self._live_task is not None:
+                _LOGGER.info("Nessun pannello aperto: analisi continua fermata")
+                asyncio.get_running_loop().create_task(self.live_stop())
+
+        self._live_stop_handle = asyncio.get_running_loop().call_later(LIVE_NO_VIEWER_STOP_S, check)
+
+    async def _live_run(self, freq_hz: float, mode: str) -> None:
+        loop = asyncio.get_running_loop()
+        center = float(round(freq_hz + LIVE_RATE / 8))
+        discard = RCV_BUF + 2 * READ_LIMIT + int(LIVE_RATE * 2 * max(self.settings.settle_ms, 100) / 1000)
+        discard -= discard % 2
+        rds_task: asyncio.Task | None = None
+        try:
+            async with self._radio:
+                reader, writer, tuner = await _open(self.host, self.port)
+                try:
+                    self.status["tuner"] = TUNER_NAMES.get(tuner, f"Tipo {tuner}")
+                    await self._configure(writer, LIVE_RATE)
+                    await self._send(writer, CMD_SET_FREQ, int(center))
+                    async with asyncio.timeout(IO_TIMEOUT):
+                        await self._discard(reader, discard)
+                    demod = LiveDemod(LIVE_RATE, freq_hz - center, mode)
+                    mpx: list[np.ndarray] = []
+                    keep = int(LIVE_RDS_WINDOW_S * demod.mid)
+                    last_rds = loop.time()
+                    while True:
+                        async with asyncio.timeout(IO_TIMEOUT):
+                            raw = await reader.readexactly(CHUNK * 2)
+                        out = await loop.run_in_executor(None, _live_chunk, demod, raw)
+                        self._emit({
+                            "kind": "live",
+                            "freq_mhz": round(freq_hz / 1e6, 4),
+                            "mode": mode,
+                            "audio": base64.b64encode(out["pcm"]).decode(),
+                            "row": out["row"],
+                            "span_hz": out["span_hz"],
+                            "level_db": out["level_db"],
+                        })
+                        if out["mpx"] is None:
+                            continue
+                        mpx.append(out["mpx"])
+                        while sum(len(m) for m in mpx) - len(mpx[0]) >= keep:
+                            mpx.pop(0)
+                        # l'RDS si decodifica a parte, così la lettura dei campioni non si ferma
+                        if loop.time() - last_rds >= LIVE_RDS_EVERY_S and (rds_task is None or rds_task.done()):
+                            last_rds = loop.time()
+                            rds_task = loop.create_task(self._live_rds(np.concatenate(mpx), demod.mid))
+                finally:
+                    writer.close()
+                    try:
+                        await writer.wait_closed()
+                    except OSError:
+                        pass
+        except asyncio.CancelledError:
+            raise
+        except (OSError, TimeoutError, asyncio.IncompleteReadError, RtlTcpError) as err:
+            msg = str(err) or type(err).__name__
+            _LOGGER.warning("Analisi continua interrotta: %s", msg)
+            self._emit({"kind": "live_error", "error": msg})
+        finally:
+            if rds_task is not None:
+                rds_task.cancel()
+            if asyncio.current_task() is self._live_task:
+                self._live_task = None
+            self.status["live"] = None
+            self._update_active()  # riparte la scansione, se è attiva
+
+    async def _live_rds(self, mpx: np.ndarray, fs: float) -> None:
+        result = await asyncio.get_running_loop().run_in_executor(None, rds.decode, mpx, fs)
+        if self.status["live"]:
+            self._emit({"kind": "live_rds", "rds": result})
 
     async def _run(self) -> None:
         while True:
@@ -650,3 +789,9 @@ class SpectrumScanner:
             self.last_complete = payload
             self.history.append(payload)
         self._emit(payload)
+
+
+def _live_chunk(demod: LiveDemod, raw: bytes) -> dict[str, Any]:
+    """Un blocco di byte rtl_tcp elaborato dal demodulatore in diretta (nell'executor)."""
+    a = np.frombuffer(raw, dtype=np.uint8).astype(np.float32) - 127.5
+    return demod.process((a[0::2] + 1j * a[1::2]).astype(np.complex64))

@@ -250,9 +250,12 @@ def decode(mpx: np.ndarray, fs: float) -> dict[str, Any] | None:
 
     ps_text = _vote(ps, 8)
     rt_text = ""
+    rt_complete = False
     if rt_seen:
         flag = rt_seen.most_common(1)[0][0]
         end = min(rt_end[flag], default=64) if rt_end[flag] else 64
+        # completo: tutte le posizioni fino al segno di fine testo (o a 64) sono arrivate
+        rt_complete = all(rt[flag][:end])
         rt_text = _vote(rt[flag], end).rstrip(" " + MISSING)
     pi_code = pi.most_common(1)[0][0] if pi else None
     pty_code = pty.most_common(1)[0][0] if pty else 0
@@ -261,6 +264,7 @@ def decode(mpx: np.ndarray, fs: float) -> dict[str, Any] | None:
         "ps": ps_text.strip() if ps_text.strip(MISSING + " ") else None,
         "ps_complete": all(ps),
         "rt": rt_text or None,
+        "rt_complete": rt_complete,
         "pty": PTY_NAMES[pty_code],
         "tp": tp.most_common(1)[0][0] if tp else False,
         "ta": ta.most_common(1)[0][0] if ta else False,

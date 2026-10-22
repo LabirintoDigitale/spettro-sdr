@@ -24,6 +24,7 @@ from .const import (
     VERSION,
 )
 from .archive import SpikeArchive
+from .favorites import Favorites
 from .scanner import ScanSettings, SpectrumScanner
 
 PLATFORMS = [Platform.IMAGE, Platform.SENSOR, Platform.SWITCH]
@@ -40,6 +41,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: SpettroConfigEntry) -> b
     archive = SpikeArchive(Path(hass.config.path(ARCHIVE_DIR)))
     await hass.async_add_executor_job(archive.load)
     scanner.archive = archive
+    scanner.favorites = Favorites(hass)
+    await scanner.favorites.async_load()
     await scanner.prune_archive()
     scanner.status["version"] = VERSION
     entry.runtime_data = scanner

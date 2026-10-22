@@ -24,8 +24,14 @@ MODES: dict[str, tuple[float, float, float]] = {
 DEEMPHASIS_S = 50e-6  # de-enfasi della FM broadcast in Europa
 
 
-def _channel(iq: np.ndarray, rate: int, offset_hz: float, decim: int, half_bw: float) -> np.ndarray:
-    """Porta il segnale in banda base, lo filtra e lo decima di `decim`."""
+def _channel(
+    iq: np.ndarray, rate: int, offset_hz: float, decim: int, half_bw: float, first_index: int = 0
+) -> np.ndarray:
+    """Porta il segnale in banda base, lo filtra e lo decima di `decim`.
+
+    first_index è la posizione del primo campione nel flusso: in diretta, blocchi successivi
+    restano in fase tra loro.
+    """
     blk, m = BLOCK_OUT * decim, MARGIN_OUT * decim
     length = blk + 2 * m
     n_in = len(iq)
@@ -39,7 +45,7 @@ def _channel(iq: np.ndarray, rate: int, offset_hz: float, decim: int, half_bw: f
         a, b = start - m, start + blk + m
         seg = np.zeros(length, np.complex64)
         s0, s1 = max(a, 0), min(b, n_in)
-        idx = np.arange(s0, s1)
+        idx = np.arange(s0, s1) + first_index
         seg[s0 - a : s1 - a] = iq[s0:s1] * np.exp(-2j * np.pi * offset_hz * idx / rate).astype(np.complex64)
         spec = np.fft.fft(seg)
         z = np.zeros(lo, np.complex64)
