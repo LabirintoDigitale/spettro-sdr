@@ -306,7 +306,7 @@ class SpettroPanel extends HTMLElement {
           <div class="card">
             <div class="row" style="justify-content:space-between">
               <h3 style="margin:0">Archivio spike</h3>
-              <button id="archclear" title="Cancella tutte le analisi archiviate">Svuota</button>
+              <button id="archclear" title="Cancella tutte le analisi archiviate">Svuota archivio</button>
             </div>
             <div class="hint" id="archinfo" style="margin:6px 0"></div>
             <div id="archive" class="hint">Nessuna analisi archiviata.</div>
@@ -841,7 +841,9 @@ class SpettroPanel extends HTMLElement {
     const info = this.shadowRoot.getElementById("archinfo");
     if (!el) return;
     const hours = this._archHours ?? (this._status && this._status.settings && this._status.settings.archive_hours);
-    info.textContent = `${this._archive.length} analisi · cancellate dopo ${hours ?? "?"} ore`;
+    const bytes = this._archive.reduce((t, e) => t + (e.bytes || 0), 0);
+    const size = bytes >= 1e9 ? `${(bytes / 1e9).toFixed(2)} GB` : bytes >= 1e6 ? `${(bytes / 1e6).toFixed(1)} MB` : `${Math.round(bytes / 1e3)} kB`;
+    info.textContent = `${this._archive.length} analisi · ${size} su disco · le più vecchie di ${hours ?? "?"} ore vengono cancellate`;
     if (!this._archive.length) {
       el.className = "hint";
       el.textContent = "Nessuna analisi archiviata. Attiva \"Analizza subito i picchi trovati\" o usa Analizza.";

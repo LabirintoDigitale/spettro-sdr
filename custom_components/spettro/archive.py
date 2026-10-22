@@ -14,8 +14,6 @@ from pathlib import Path
 import time
 from typing import Any
 
-MAX_ENTRIES = 300  # oltre questo numero si cancellano le più vecchie, anche se non scadute
-
 # campi dell'analisi copiati nell'indice (quello che serve a elenchi e tabella dei picchi)
 META_FIELDS = ("target_mhz", "center_mhz", "kind", "snr_db", "peak_db", "obw_99_khz", "duty_cycle", "audio_mode")
 
@@ -31,15 +29,25 @@ class SpikeArchive:
         for f in self.path.glob("*.json"):
             try:
                 result = json.loads(f.read_text())
-                entries.append(self._meta(f.stem, result))
+                entries.append(self._meta(f.stem, result, self._size(f.stem)))
             except (OSError, ValueError, KeyError):
                 continue
         entries.sort(key=lambda e: e["timestamp"], reverse=True)
         self.entries = entries
 
+    def _files(self, entry_id: str) -> list[Path]:
+        return [f for f in self.path.glob(f"{entry_id}.*") if f.name.split(".")[0] == entry_id]
+
+    def _size(self, entry_id: str) -> int:
+        return sum(f.stat().st_size for f in self._files(entry_id))
+
+    @property
+    def total_bytes(self) -> int:
+        return sum(e["bytes"] for e in self.entries)
+
     @staticmethod
-    def _meta(entry_id: str, result: dict[str, Any]) -> dict[str, Any]:
-        meta = {"id": entry_id, "timestamp": result["timestamp"], "auto": bool(result.get("auto"))}
+    def _meta(entry_id: str, result: dict[str, Any], size: int) -> dict[str, Any]:
+        meta = {"id": entry_id, "timestamp": result["timestamp"], "auto": bool(result.get("auto")), "bytes": size}
         meta.update({k: result.get(k) for k in META_FIELDS})
         return meta
 
@@ -55,7 +63,7 @@ class SpikeArchive:
         for mode, wav in audio.items():
             (self.path / f"{entry_id}.{mode}.wav").write_bytes(wav)
         (self.path / f"{entry_id}.json").write_text(json.dumps(result))
-        meta = self._meta(entry_id, result)
+        meta = self._meta(entry_id, result, self._size(entry_id))
         self.entries.insert(0, meta)
         return meta
 
@@ -73,9 +81,8 @@ class SpikeArchive:
         return result, png, audio
 
     def _remove_files(self, entry_id: str) -> None:
-        for f in self.path.glob(f"{entry_id}.*"):
-            if f.name.split(".")[0] == entry_id:
-                f.unlink(missing_ok=True)
+        for f in self._files(entry_id):
+            f.unlink(missing_ok=True)
 
     def delete(self, entry_id: str) -> bool:
         if not any(e["id"] == entry_id for e in self.entries):
@@ -92,11 +99,11 @@ class SpikeArchive:
         return count
 
     def prune(self, max_age_s: float) -> int:
-        """Cancella le analisi più vecchie di max_age_s e quelle oltre MAX_ENTRIES."""
+        """Cancella le analisi più vecchie di max_age_s."""
         limit = time.time() - max_age_s
         keep, drop = [], []
         for e in self.entries:
-            (keep if e["timestamp"] >= limit and len(keep) < MAX_ENTRIES else drop).append(e)
+            (keep if e["timestamp"] >= limit else drop).append(e)
         for e in drop:
             self._remove_files(e["id"])
         self.entries = keep
