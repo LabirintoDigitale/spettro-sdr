@@ -28,9 +28,9 @@ Integrazione custom per **Home Assistant** che trasforma una chiavetta RTL-SDR c
 Esempio reale: scansione da 600 a 1500 MHz, poi ingrandita sulla banda GSM 900.
 
 <p align="center">
-  <a href="docs/images/screenshots/complete/spettro.jpg"><img src="docs/images/screenshots/spettro.jpg" width="260" alt="Grafico dello spettro"></a>
-  <a href="docs/images/screenshots/complete/analisi.jpg"><img src="docs/images/screenshots/analisi.jpg" width="260" alt="Analisi di un segnale"></a>
-  <a href="docs/images/screenshots/complete/impostazioni-segnali.jpg"><img src="docs/images/screenshots/impostazioni-segnali.jpg" width="260" alt="Impostazioni e segnali rilevati"></a>
+  <a href="https://raw.githubusercontent.com/LabirintoDigitale/spettro-sdr/main/docs/images/screenshots/complete/spettro.jpg"><img src="https://raw.githubusercontent.com/LabirintoDigitale/spettro-sdr/main/docs/images/screenshots/spettro.jpg" width="260" alt="Grafico dello spettro"></a>
+  <a href="https://raw.githubusercontent.com/LabirintoDigitale/spettro-sdr/main/docs/images/screenshots/complete/analisi.jpg"><img src="https://raw.githubusercontent.com/LabirintoDigitale/spettro-sdr/main/docs/images/screenshots/analisi.jpg" width="260" alt="Analisi di un segnale"></a>
+  <a href="https://raw.githubusercontent.com/LabirintoDigitale/spettro-sdr/main/docs/images/screenshots/complete/impostazioni-segnali.jpg"><img src="https://raw.githubusercontent.com/LabirintoDigitale/spettro-sdr/main/docs/images/screenshots/impostazioni-segnali.jpg" width="260" alt="Impostazioni e segnali rilevati"></a>
 </p>
 
 <sub>Tocca un'immagine per vederla intera, a piena risoluzione (schermate originali dal telefono in <code>docs/images/screenshots/complete/</code>).</sub>
