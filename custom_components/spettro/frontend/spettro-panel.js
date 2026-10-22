@@ -1,7 +1,7 @@
 // Pannello "Spettro" per Home Assistant: grafico dello spettro, waterfall e picchi.
 
 // deve coincidere con VERSION in const.py: se il backend ne riporta un'altra manca un riavvio
-const PANEL_VERSION = "1.4.4";
+const PANEL_VERSION = "1.4.5";
 
 const PRESETS = [
   ["Personalizzato", null, null],
@@ -71,6 +71,11 @@ class SpettroPanel extends HTMLElement {
     this._ana = null; // risultato dell'ultima analisi
     this._archive = []; // analisi archiviate (solo indice), dalla più recente
     this._archHours = null;
+    this._archSort = { key: "timestamp", desc: true }; // colonna e verso dell'ordinamento dell'archivio
+    try {
+      const saved = JSON.parse(localStorage.getItem("spettro.archSort"));
+      if (saved && ["timestamp", "target_mhz", "snr_db"].includes(saved.key)) this._archSort = saved;
+    } catch (e) { /* memoria del browser non disponibile */ }
   }
 
   set hass(hass) {
@@ -166,7 +171,6 @@ class SpettroPanel extends HTMLElement {
         : m.values.slice();
       this._lastComplete = m;
       this._spec = { ...m, cursor: null };
-      this._renderPeaks(m);
     } else {
       // scansione in corso: si mostra la parte nuova + il resto della scansione precedente
       let values = m.values, peaks = m.peaks;
@@ -175,7 +179,6 @@ class SpettroPanel extends HTMLElement {
         peaks = this._lastComplete.peaks;
       }
       this._spec = { ...m, values, peaks, cursor: m.f_start + m.values.length * m.bin_hz };
-      if (!this._lastComplete) this._renderPeaks(m);
     }
     if (this._view && (this._view[1] < m.range_start || this._view[0] > m.range_stop)) this._view = null;
     this._draw();
@@ -221,8 +224,6 @@ class SpettroPanel extends HTMLElement {
         th { text-align:left; font-weight:500; color:var(--secondary-text-color); padding:4px; border-bottom:1px solid var(--divider-color); }
         td { padding:4px; border-bottom:1px solid var(--divider-color); }
         td.num, th.num { text-align:right; }
-        tr.pk { cursor:pointer; }
-        tr.pk:hover td { background:var(--secondary-background-color); }
         .hint { font-size:12px; color:var(--secondary-text-color); }
         .chk { flex-direction:row; align-items:center; gap:6px; font-size:13px; }
         .chk input { width:auto; }
@@ -237,8 +238,9 @@ class SpettroPanel extends HTMLElement {
         .answer { white-space:pre-wrap; font-size:14px; line-height:1.45; background:var(--secondary-background-color);
                   border-radius:6px; padding:10px; }
         .err { color:var(--error-color,#db4437); }
-        td.an { text-align:center; color:var(--primary-color); }
         #archive table td { cursor:pointer; }
+        #archive th.sort { cursor:pointer; user-select:none; white-space:nowrap; }
+        #archive th.sort:hover { color:var(--primary-text-color); }
         #archive tr:hover td { background:var(--secondary-background-color); }
         #archive td.kind { color:var(--secondary-text-color); font-size:12px; }
         .anahead { font-size:12px; color:var(--secondary-text-color); }
@@ -261,7 +263,7 @@ class SpettroPanel extends HTMLElement {
           <div class="ana">
             <h3 style="margin:0">Analisi segnale</h3>
             <div class="row">
-              <div class="hint" id="selinfo" style="flex:1;min-width:200px">Tocca un picco sul grafico o una riga di "Segnali rilevati" per sceglierlo.</div>
+              <div class="hint" id="selinfo" style="flex:1;min-width:200px">Tocca un picco sul grafico o una riga dell'Archivio spike per sceglierlo.</div>
               <select id="anadur" title="Durata della registrazione">
                 <option value="1">1 s</option><option value="2" selected>2 s</option><option value="5">5 s</option>
               </select>
@@ -318,10 +320,6 @@ class SpettroPanel extends HTMLElement {
               <button id="scannow">Scansiona ora</button>
             </div>
             <div class="msg" id="msg"></div>
-          </div>
-          <div class="card">
-            <h3>Segnali rilevati</h3>
-            <div id="peaks" class="hint">Nessun dato ancora.</div>
           </div>
           <div class="card">
             <div class="row" style="justify-content:space-between">
@@ -530,33 +528,6 @@ class SpettroPanel extends HTMLElement {
     bar.style.width = `${Math.round(prog * 100)}%`;
   }
 
-  _renderPeaks(m) {
-    const el = this.shadowRoot.getElementById("peaks");
-    if (!m.peaks.length) {
-      el.className = "hint";
-      el.textContent = `Nessun segnale sopra la soglia (rumore di fondo ${m.floor_db} dBFS).`;
-      return;
-    }
-    el.className = "";
-    el.innerHTML = `
-      <div class="hint" style="margin-bottom:6px">Rumore di fondo ${m.floor_db} dBFS${m.complete ? "" : " · parziale"}</div>
-      <table><thead><tr><th>MHz</th><th class="num">dBFS</th><th class="num">sopra rumore</th><th title="Analisi archiviata">an.</th></tr></thead><tbody>
-      ${m.peaks.map((p) => `<tr class="pk" data-f="${p.freq_mhz}" data-aid="${esc(p.aid || "")}"><td>${p.freq_mhz.toFixed(4)}</td>
-        <td class="num">${p.db.toFixed(1)}</td><td class="num">+${p.snr.toFixed(1)} dB</td>
-        <td class="an" title="${esc(p.kind || "")}">${p.aid ? "●" : ""}</td></tr>`).join("")}
-      </tbody></table>
-      <div class="hint" style="margin-top:6px">● = già analizzato: tocca la riga per vedere l'analisi.</div>`;
-    el.querySelectorAll("tr.pk").forEach((tr) => tr.addEventListener("click", () => {
-      const f = parseFloat(tr.dataset.f) * 1e6;
-      this._select(f);
-      if (tr.dataset.aid) this._openArchived(tr.dataset.aid);
-      const full = this._spec.range_stop - this._spec.range_start;
-      const half = Math.max(50e3, full * 0.02);
-      this._view = [Math.max(this._spec.range_start, f - half), Math.min(this._spec.range_stop, f + half)];
-      this._draw();
-    }));
-  }
-
   // ---------------------------------------------------------------- grafico
 
   _bindChart() {
@@ -588,6 +559,7 @@ class SpettroPanel extends HTMLElement {
           if (dx < bestDx) { best = p; bestDx = dx; }
         }
         this._select(best ? best.freq_mhz * 1e6 : xToF(d.x0));
+        if (best && best.aid) this._openArchived(best.aid);
       }
       this._draw();
     });
@@ -894,16 +866,36 @@ class SpettroPanel extends HTMLElement {
       return (today ? "" : d.toLocaleDateString([], { day: "2-digit", month: "2-digit" }) + " ")
         + d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
     };
+    const { key, desc } = this._archSort;
+    const rows = this._archive.slice().sort((a, b) => (desc ? b[key] - a[key] : a[key] - b[key]));
+    const th = (k, label, cls = "") => `<th class="sort ${cls}" data-key="${k}">${label}${k === key ? (desc ? " ▼" : " ▲") : ""}</th>`;
     el.className = "";
-    el.innerHTML = `<table><thead><tr><th>Ora</th><th>MHz</th><th class="num">SNR</th></tr></thead><tbody>
-      ${this._archive.map((e) => `<tr data-id="${esc(e.id)}">
+    el.innerHTML = `<table><thead><tr>${th("timestamp", "Ora")}${th("target_mhz", "MHz")}${th("snr_db", "SNR", "num")}</tr></thead><tbody>
+      ${rows.map((e) => `<tr data-id="${esc(e.id)}">
         <td>${fmt(e.timestamp)}${e.auto ? "" : " ✋"}</td><td>${e.target_mhz.toFixed(4)}</td><td class="num">${e.snr_db} dB</td></tr>
         <tr data-id="${esc(e.id)}"><td colspan="3" class="kind">${esc(e.kind)}</td></tr>`).join("")}
       </tbody></table>
       <div class="hint" style="margin-top:6px">✋ = analisi avviata a mano.</div>`;
+    el.querySelectorAll("th.sort").forEach((h) => h.addEventListener("click", () => {
+      const k = h.dataset.key;
+      // primo tocco: data dalla più recente, frequenza crescente, SNR dal più forte; secondo tocco: al contrario
+      this._archSort = k === this._archSort.key ? { key: k, desc: !this._archSort.desc } : { key: k, desc: k !== "target_mhz" };
+      try { localStorage.setItem("spettro.archSort", JSON.stringify(this._archSort)); } catch (e) { /* non disponibile */ }
+      this._renderArchive();
+    }));
     el.querySelectorAll("tr[data-id]").forEach((tr) => tr.addEventListener("click", () => {
       const e = this._archive.find((x) => x.id === tr.dataset.id);
-      if (e) this._select(e.target_mhz * 1e6);
+      if (e) {
+        const f = e.target_mhz * 1e6;
+        this._select(f);
+        // ingrandisce il grafico sul segnale, se è nell'intervallo scansionato
+        const sp = this._spec;
+        if (sp && f >= sp.range_start && f <= sp.range_stop) {
+          const half = Math.max(50e3, (sp.range_stop - sp.range_start) * 0.02);
+          this._view = [Math.max(sp.range_start, f - half), Math.min(sp.range_stop, f + half)];
+          this._draw();
+        }
+      }
       this._openArchived(tr.dataset.id, true);
     }));
   }
