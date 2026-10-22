@@ -1,7 +1,7 @@
 // Pannello "Spettro" per Home Assistant: grafico dello spettro, waterfall e picchi.
 
 // deve coincidere con VERSION in const.py: se il backend ne riporta un'altra manca un riavvio
-const PANEL_VERSION = "1.4.8";
+const PANEL_VERSION = "1.4.9";
 
 const PRESETS = [
   ["Personalizzato", null, null],
@@ -226,7 +226,7 @@ class SpettroPanel extends HTMLElement {
         td { padding:4px; border-bottom:1px solid var(--divider-color); }
         td.num, th.num { text-align:right; }
         .hint { font-size:12px; color:var(--secondary-text-color); }
-        .chk { flex-direction:row; align-items:center; gap:6px; font-size:13px; }
+        .chk { flex-direction:row; align-items:center; gap:6px; font-size:13px; width:fit-content; max-width:100%; }
         .chk input { width:auto; }
         .msg { font-size:12px; min-height:16px; }
         .msg.err { color:var(--error-color,#db4437); }
@@ -256,6 +256,7 @@ class SpettroPanel extends HTMLElement {
         <div class="card charts">
           <div class="row">
             <div class="status" id="status">Collegamento…</div>
+            <button class="primary" id="resume" style="display:none">Riattiva scansione</button>
             <label class="chk"><input type="checkbox" id="showmax" checked> Max hold</label>
             <button id="clearmax">Azzera max</button>
             <button id="zoomscan" disabled title="Usa la zona ingrandita come nuovo intervallo di scansione">Scansiona zona</button>
@@ -275,6 +276,14 @@ class SpettroPanel extends HTMLElement {
           </div>
         </div>
         <div class="side">
+          <div class="card">
+            <div class="row" style="justify-content:space-between">
+              <h3 style="margin:0">Archivio spike</h3>
+              <button id="archclear" title="Cancella tutte le analisi archiviate">Svuota archivio</button>
+            </div>
+            <div class="hint" id="archinfo" style="margin:6px 0"></div>
+            <div id="archive" class="hint">Nessuna analisi archiviata.</div>
+          </div>
           <div class="card">
             <h3>Scansione</h3>
             <label class="chk" style="margin-bottom:8px"><input type="checkbox" id="enabled" checked> Scansione attiva</label>
@@ -326,14 +335,6 @@ class SpettroPanel extends HTMLElement {
             </div>
             <div class="msg" id="msg"></div>
           </div>
-          <div class="card">
-            <div class="row" style="justify-content:space-between">
-              <h3 style="margin:0">Archivio spike</h3>
-              <button id="archclear" title="Cancella tutte le analisi archiviate">Svuota archivio</button>
-            </div>
-            <div class="hint" id="archinfo" style="margin:6px 0"></div>
-            <div id="archive" class="hint">Nessuna analisi archiviata.</div>
-          </div>
         </div>
       </div>`;
 
@@ -360,6 +361,8 @@ class SpettroPanel extends HTMLElement {
     $("apply").addEventListener("click", () => this._apply());
     $("enabled").addEventListener("change", async (e) => {
       const enabled = e.target.checked;
+      // spegnerla per sbaglio (un tocco mentre la pagina scorre) ferma tutto: si chiede conferma
+      if (!enabled && !confirm("Mettere in pausa la scansione?")) { e.target.checked = true; return; }
       try {
         await this._hass.callWS({ type: "spettro/set_enabled", enabled });
         this._msg(enabled ? "Scansione riattivata." : "Scansione in pausa.");
@@ -379,6 +382,14 @@ class SpettroPanel extends HTMLElement {
     });
     $("resetzoom").addEventListener("click", () => { this._view = null; this._draw(); });
     $("analyze").addEventListener("click", () => this._analyze());
+    $("resume").addEventListener("click", async () => {
+      try {
+        await this._hass.callWS({ type: "spettro/set_enabled", enabled: true });
+        this._msg("Scansione riattivata.");
+      } catch (err) {
+        this._msg(err.message || String(err), true);
+      }
+    });
     for (const id of ["autoana", "limstep", "limsweep"]) $(id).addEventListener("change", () => this._syncLimits());
     $("archclear").addEventListener("click", async () => {
       if (!this._archive.length || !confirm("Cancellare tutte le analisi archiviate?")) return;
@@ -532,6 +543,7 @@ class SpettroPanel extends HTMLElement {
       default: text = "Avvio…";
     }
     this._setStatusText(text + tail, err);
+    this.shadowRoot.getElementById("resume").style.display = s.state === "paused" && s.paused === "disabled" ? "" : "none";
     bar.style.width = `${Math.round(prog * 100)}%`;
   }
 
