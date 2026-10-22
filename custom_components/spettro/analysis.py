@@ -13,7 +13,7 @@ import zlib
 
 import numpy as np
 
-from . import rds
+from . import dab, rds
 from .demod import MODES, demodulate, fm_multiplex, wfm_audio
 
 FFT_SIZE = 2048  # ~1 kHz di risoluzione e ~1 ms per riga a 2 MS/s
@@ -167,8 +167,11 @@ def analyze_iq(
     mean_db = 10 * np.log10(lin.mean(axis=0) + 1e-20)
     # "quasi massimo" nel tempo: vede anche i segnali a impulsi, che nella media spariscono
     hold_db = np.percentile(db, 98, axis=0)
-    floor = float(np.median(hold_db[lo_u:hi_u]))
-    floor_mean = float(np.median(mean_db[lo_u:hi_u]))
+    # rumore di fondo: mediana della banda utile, ma un segnale largo (DAB, 1,5 MHz) la occupa quasi
+    # tutta; allora vale il 20° percentile dell'intera banda ricevuta, dove ai lati resta rumore
+    side = np.r_[0 : c - 3, c + 4 : n]
+    floor = float(min(np.median(hold_db[lo_u:hi_u]), np.percentile(hold_db[side], 20)))
+    floor_mean = float(min(np.median(mean_db[lo_u:hi_u]), np.percentile(mean_db[side], 20)))
 
     # picco più forte vicino alla frequenza scelta (entro 2% della banda o 25 kHz)
     t_bin = int(round((target_hz - center_hz) / bin_hz)) + c
@@ -328,6 +331,22 @@ def analyze_iq(
     result["rds"] = rds.decode(mpx, fs_mpx) if result["audio_mode"] == "wfm" else None
     if result["rds"] and result["rds"]["ps"] and result["rds"]["ps_complete"]:
         result["kind"] = "FM a banda larga: radio broadcast «" + result["rds"]["ps"] + "»"
+
+    # DAB: blocco largo ~1,5 MHz in un canale della banda III
+    ch = dab.channel_for(result["center_mhz"]) or dab.channel_for(target_hz / 1e6)
+    result["dab_channel"] = result["dab"] = None
+    if ch and detected and result["obw_99_khz"] >= 600:
+        result["dab_channel"] = ch[0]
+        result["audio_mode"] = None
+        dab_offset = ch[1] * 1e6 - center_hz
+        if abs(dab_offset) < 20e3:
+            result["dab"] = dab.decode(iq, rate, dab_offset)
+        else:
+            result["dab"] = {"error": "registrazione non centrata sul canale"}
+        info = result["dab"] or {}
+        name, services = info.get("ensemble"), info.get("services") or []
+        result["kind"] = f"DAB/DAB+ canale {ch[0]}: multiplex di radio digitali" + (
+            f" «{name}» ({len(services)} servizi)" if name else "")
     return result, png, audio
 
 
@@ -350,6 +369,10 @@ def describe(result: dict[str, Any]) -> str:
     if r["freq_track"]:
         lines.append(f"Andamento della frequenza di picco durante la trasmissione: {r['freq_track']}.")
     lines.append(f"Ipotesi automatica dalle misure: {r['kind']}.")
+    m = r.get("dab")
+    if m and m.get("ensemble"):
+        lines.append(f"DAB canale {r['dab_channel']} decodificato: multiplex «{m['ensemble']}» (EId {m['eid']}), servizi: "
+                     + ", ".join(f"{s['name']} ({s['type']})" for s in m["services"]) + ".")
     d = r.get("rds")
     if d:
         info = [f"{k} {v}" for k, v in (("PI", d["pi"]), ("nome (PS)", d["ps"]), ("testo (RT)", d["rt"]),

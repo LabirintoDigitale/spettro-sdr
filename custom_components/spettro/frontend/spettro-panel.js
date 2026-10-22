@@ -1,7 +1,7 @@
 // Pannello "Spettro" per Home Assistant: grafico dello spettro, waterfall e picchi.
 
 // deve coincidere con VERSION in const.py: se il backend ne riporta un'altra manca un riavvio
-const PANEL_VERSION = "1.7.2";
+const PANEL_VERSION = "1.8.0";
 
 const PRESETS = [
   ["Personalizzato", null, null],
@@ -1257,6 +1257,25 @@ class SpettroPanel extends HTMLElement {
         <table><tbody>${rdsRows.map(([k, v]) => `<tr><td>${k}</td><td class="num">${esc(v)}</td></tr>`).join("")}</tbody></table>
         <div class="hint" style="margin-top:4px">${d.groups} gruppi RDS ricevuti${d.ps_complete && d.rt ? "" : " · con «Durata analisi» più lunga arrivano più dati"}</div></div>`
       : r.audio_mode === "wfm" ? `<div class="hint" style="margin-top:6px">Nessun dato RDS ricevuto (stazione senza RDS o segnale troppo debole).</div>` : "";
+    // DAB: nome del multiplex e radio che contiene
+    const m = r.dab;
+    let dabHtml = "";
+    if (r.dab_channel) {
+      const head = `<h3 style="margin:8px 0 4px">DAB · canale ${esc(r.dab_channel)}</h3>`;
+      if (!m) dabHtml = head + `<div class="hint">Nessuna trama DAB riconosciuta (segnale debole o non DAB).</div>`;
+      else if (m.error) dabHtml = head + `<div class="hint">${esc(m.error)}</div>`;
+      else if (!m.fib_ok) dabHtml = head + `<div class="hint">Trame DAB trovate ma dati illeggibili (segnale debole o disturbato).</div>`;
+      else {
+        dabHtml = head + `<table><tbody>
+            <tr><td>Multiplex</td><td class="num">${esc(m.ensemble || "—")}</td></tr>
+            <tr><td>Codice EId</td><td class="num">${esc(m.eid || "—")}</td></tr>
+            <tr><td>Scarto di frequenza</td><td class="num">${(m.freq_offset_hz / 1000).toFixed(1)} kHz</td></tr>
+          </tbody></table>
+          ${m.services.length ? `<h3 style="margin:8px 0 4px">Servizi (${m.services.length})</h3>
+          <table><tbody>${m.services.map((x) => `<tr><td>${esc(x.name)}</td><td class="num">${esc(x.type)}</td></tr>`).join("")}</tbody></table>` : ""}
+          <div class="hint" style="margin-top:4px">${m.fib_ok}/${m.fib_total} blocchi informativi integri in ${m.frames} trame${m.fib_ok < m.fib_total * 0.7 ? " · segnale al limite" : ""}</div>`;
+      }
+    }
     const states = this._hass.states;
     const ais = Object.keys(states).filter((e) => e.startsWith("ai_task.")).sort();
     const aiCtl = ais.length
@@ -1282,6 +1301,7 @@ class SpettroPanel extends HTMLElement {
           <table><tbody>${rows.map(([k, v]) => `<tr><td>${k}</td><td class="num">${esc(v)}</td></tr>`).join("")}</tbody></table>
           <div class="hint" style="margin-top:6px">${r.bands.length ? esc(r.bands.join(" · ")) : "Frequenza non presente nella tabella delle bande."}</div>
           ${rdsHtml}
+          ${dabHtml}
         </div>
       </div>
       ${r.audio ? `<div class="row">

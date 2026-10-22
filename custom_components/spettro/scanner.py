@@ -21,7 +21,7 @@ from typing import Any
 
 import numpy as np
 
-from . import rds
+from . import dab, rds
 from .analysis import analyze_iq
 from .archive import SpikeArchive
 from .live import CHUNK, LIVE_RATE, LiveDemod
@@ -367,8 +367,7 @@ class SpectrumScanner:
         capture_bytes = int(rate * min(duration_s, ANALYSIS_MAX_S)) * 2
         discard_bytes = RCV_BUF + 2 * READ_LIMIT + int(rate * 2 * max(self.settings.settle_ms, 100) / 1000)
         discard_bytes -= discard_bytes % 2
-        # sintonia spostata: il segnale non deve cadere sul picco DC al centro della banda
-        center = float(round(freq_hz + rate / 8))
+        center = self._tune_center(freq_hz, rate)
         self.analyzing = True
         self._update_active()  # la scansione in corso si ferma al passo successivo e libera la chiavetta
         try:
@@ -423,6 +422,19 @@ class SpectrumScanner:
         if removed:
             self._emit({"kind": "archive_pruned", "removed": removed})
 
+    @staticmethod
+    def _tune_center(freq_hz: float, rate: int) -> float:
+        """Frequenza a cui sintonizzare la chiavetta per analizzare freq_hz.
+
+        Di solito spostata di 1/8 della banda, perché il segnale non cada sul picco DC al centro;
+        un multiplex DAB (1,5 MHz) invece va centrato sul canale, o finirebbe sul bordo della banda
+        (la sua portante centrale è comunque vuota).
+        """
+        ch = dab.channel_for(freq_hz / 1e6)
+        if ch and rate == dab.RATE:
+            return ch[1] * 1e6
+        return float(round(freq_hz + rate / 8))
+
     def _spike_candidates(self, seg: np.ndarray, f0: float, bin_hz: float, level: float) -> list[float]:
         """Picchi di un passo della scansione sopra `level`, dal più forte, non ancora analizzati di recente."""
         if self.archive is None or len(seg) < 3:
@@ -433,6 +445,10 @@ class SpectrumScanner:
         recent = time.time() - self.settings.reanalyze_min * 60
         for i in idx[np.argsort(seg[idx])[::-1]]:
             f = f0 + int(i) * bin_hz
+            # un multiplex DAB è un blocco piatto con più "picchi": conta una volta, al centro del canale
+            ch = dab.channel_for(f / 1e6)
+            if ch:
+                f = ch[1] * 1e6
             if any(abs(f - g) <= SPIKE_TOL_HZ for g in out):
                 continue
             if self.archive.find(f, SPIKE_TOL_HZ, newer_than=recent):
@@ -446,7 +462,7 @@ class SpectrumScanner:
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, rate: int, freq_hz: float, discard: int
     ) -> None:
         """Analisi di un picco a metà scansione, sulla stessa connessione e con le stesse impostazioni."""
-        center = float(round(freq_hz + rate / 8))
+        center = self._tune_center(freq_hz, rate)
         self._set_status(auto_mhz=round(freq_hz / 1e6, 4))
         try:
             await self._send(writer, CMD_SET_FREQ, int(center))
