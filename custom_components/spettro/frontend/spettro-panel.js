@@ -1,7 +1,7 @@
 // Pannello "Spettro" per Home Assistant: grafico dello spettro, waterfall e picchi.
 
 // deve coincidere con VERSION in const.py: se il backend ne riporta un'altra manca un riavvio
-const PANEL_VERSION = "1.9.0";
+const PANEL_VERSION = "1.9.1";
 
 const PRESETS = [
   ["Personalizzato", null, null],
@@ -1419,8 +1419,9 @@ class SpettroPanel extends HTMLElement {
           ${m.services.length ? `<h3 style="margin:8px 0 4px">Servizi (${m.services.length})</h3>
           <table><tbody>${m.services.map((x) => `<tr><td>${esc(x.name)}</td>
             <td class="num">${esc(x.type)}${x.bitrate ? ` · ${x.bitrate} kbit/s` : ""}</td>
-            <td class="num">${x.type === "DAB+" && x.bitrate && r.dab_channel_mhz
-              ? `<button class="dabplay" data-sid="${esc(x.sid)}" title="Ascolta in diretta">▶</button>` : ""}</td></tr>`).join("")}</tbody></table>` : ""}
+            <td class="num">${x.type === "DAB+"
+              ? `<button class="dabplay" data-sid="${esc(x.sid)}" title="Ascolta in diretta">▶</button>` : ""}</td></tr>`).join("")}</tbody></table>
+          <div class="hint" style="margin-top:4px">▶ ascolta una radio DAB+ in diretta (scansione sospesa).</div>` : ""}
           <div class="hint" style="margin-top:4px">${m.fib_ok}/${m.fib_total} blocchi informativi integri in ${m.frames} trame${m.fib_ok < m.fib_total * 0.7 ? " · segnale al limite" : ""}</div>`;
       }
     }
@@ -1474,7 +1475,9 @@ class SpettroPanel extends HTMLElement {
       load();
     }
     out.querySelectorAll("button.dabplay").forEach((b) => b.addEventListener("click", () =>
-      this._liveStart(r.dab_channel_mhz, "dab", b.dataset.sid)));
+      // le analisi delle versioni precedenti non hanno il centro del canale: va bene qualsiasi
+      // frequenza del blocco, il backend risale al canale
+      this._liveStart(r.dab_channel_mhz || r.center_mhz, "dab", b.dataset.sid)));
     const btn = this.shadowRoot.getElementById("askai");
     if (btn) btn.addEventListener("click", () => this._askAi());
   }

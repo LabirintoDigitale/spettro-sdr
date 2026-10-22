@@ -1,7 +1,7 @@
 """Costanti dell'integrazione Spettro."""
 
 DOMAIN = "spettro"
-VERSION = "1.9.0"
+VERSION = "1.9.1"
 
 DEFAULT_PORT = 1234
 
