@@ -1,5 +1,8 @@
 // Pannello "Spettro" per Home Assistant: grafico dello spettro, waterfall e picchi.
 
+// deve coincidere con VERSION in const.py: se il backend ne riporta un'altra manca un riavvio
+const PANEL_VERSION = "1.4.3";
+
 const PRESETS = [
   ["Personalizzato", null, null],
   ["Radio FM (87.5–108)", 87.5, 108],
@@ -127,6 +130,13 @@ class SpettroPanel extends HTMLElement {
   _onMessage(m) {
     if (m.kind === "status") {
       this._status = m;
+      const vw = this.shadowRoot.getElementById("verwarn");
+      const mismatch = m.version !== PANEL_VERSION;
+      vw.style.display = mismatch ? "block" : "none";
+      if (mismatch) {
+        vw.textContent = `Aggiornamento non completato: il pannello è la versione ${PANEL_VERSION} ma l'integrazione è `
+          + `${m.version || "precedente alla 1.4.3"}. Riavvia Home Assistant (Impostazioni → Sistema → Riavvia), poi ricarica la pagina.`;
+      }
       this.shadowRoot.getElementById("enabled").checked = m.enabled !== false;
       if (!this._formDirty) this._fillForm(m.settings);
       this._updateStatus();
@@ -233,6 +243,7 @@ class SpettroPanel extends HTMLElement {
         .anahead { font-size:12px; color:var(--secondary-text-color); }
       </style>
       <div class="toolbar"><ha-menu-button></ha-menu-button><div class="title">Spettro</div></div>
+      <div id="verwarn" class="err" style="display:none;padding:10px 16px;font-size:14px"></div>
       <div class="content">
         <div class="card charts">
           <div class="row">
@@ -279,8 +290,14 @@ class SpettroPanel extends HTMLElement {
             <div class="grid2" style="margin-top:8px">
               <label title="Un picco già analizzato non viene rianalizzato in automatico prima di questo tempo (0 = ogni volta)">Rianalizza dopo (min)<input id="reana" type="number" step="1" min="0"></label>
               <label title="Le analisi archiviate più vecchie vengono cancellate">Archivio: cancella dopo (h)<input id="archhours" type="number" step="1" min="1"></label>
-              <label title="Picchi analizzati al massimo in ogni passo della scansione (0 = nessun limite)">Max picchi per passo<input id="maxstep" type="number" step="1" min="0" placeholder="0 = nessuno"></label>
-              <label title="Picchi analizzati al massimo in una scansione completa (0 = nessun limite)">Max per scansione<input id="maxsweep" type="number" step="1" min="0" placeholder="0 = nessuno"></label>
+            </div>
+            <div class="grid2" style="margin-top:8px">
+              <label title="Se spuntato, in ogni passo della scansione si analizzano al massimo questi picchi">
+                <span class="chk" style="display:flex"><input type="checkbox" id="limstep"> Max picchi per passo</span>
+                <input id="maxstep" type="number" step="1" min="1"></label>
+              <label title="Se spuntato, in una scansione completa si analizzano al massimo questi picchi">
+                <span class="chk" style="display:flex"><input type="checkbox" id="limsweep"> Max per scansione</span>
+                <input id="maxsweep" type="number" step="1" min="1"></label>
             </div>
             <details>
               <summary>Avanzate</summary>
@@ -323,7 +340,7 @@ class SpettroPanel extends HTMLElement {
     this._menu.hass = this._hass;
     this._menu.narrow = this._narrow;
 
-    const form = ["start", "stop", "interval", "gain", "threshold", "viewonly", "autoana", "reana", "archhours", "maxstep", "maxsweep",
+    const form = ["start", "stop", "interval", "gain", "threshold", "viewonly", "autoana", "reana", "archhours", "limstep", "maxstep", "limsweep", "maxsweep",
       "rate", "fft", "settle", "ppm"];
     for (const id of form) $(id).addEventListener("input", () => {
       this._formDirty = true;
@@ -358,6 +375,7 @@ class SpettroPanel extends HTMLElement {
     });
     $("resetzoom").addEventListener("click", () => { this._view = null; this._draw(); });
     $("analyze").addEventListener("click", () => this._analyze());
+    for (const id of ["autoana", "limstep", "limsweep"]) $(id).addEventListener("change", () => this._syncLimits());
     $("archclear").addEventListener("click", async () => {
       if (!this._archive.length || !confirm("Cancellare tutte le analisi archiviate?")) return;
       try {
@@ -398,8 +416,11 @@ class SpettroPanel extends HTMLElement {
     $("autoana").checked = !!s.auto_analyze;
     $("reana").value = s.reanalyze_min ?? 30;
     $("archhours").value = s.archive_hours ?? 24;
-    $("maxstep").value = s.auto_max_per_step ?? 0;
-    $("maxsweep").value = s.auto_max_per_sweep ?? 0;
+    $("limstep").checked = !!s.auto_limit_step;
+    $("maxstep").value = s.auto_max_per_step || 3;
+    $("limsweep").checked = !!s.auto_limit_sweep;
+    $("maxsweep").value = s.auto_max_per_sweep || 20;
+    this._syncLimits();
     const idx = PRESETS.findIndex((p) => p[1] === s.start_mhz && p[2] === s.stop_mhz);
     $("preset").value = String(idx > 0 ? idx : 0);
   }
@@ -426,8 +447,10 @@ class SpettroPanel extends HTMLElement {
       auto_analyze: $("autoana").checked,
       reanalyze_min: Math.max(0, parseFloat($("reana").value) || 0),
       archive_hours: Math.max(1, parseFloat($("archhours").value) || 24),
-      auto_max_per_step: Math.max(0, parseInt($("maxstep").value, 10) || 0),
-      auto_max_per_sweep: Math.max(0, parseInt($("maxsweep").value, 10) || 0),
+      auto_limit_step: $("limstep").checked,
+      auto_max_per_step: Math.max(1, parseInt($("maxstep").value, 10) || 3),
+      auto_limit_sweep: $("limsweep").checked,
+      auto_max_per_sweep: Math.max(1, parseInt($("maxsweep").value, 10) || 20),
     };
     $("apply").disabled = true;
     try {
@@ -442,12 +465,21 @@ class SpettroPanel extends HTMLElement {
     }
   }
 
+  // i valori dei limiti si modificano solo se il loro checkbox è spuntato
+  _syncLimits() {
+    const $ = (id) => this.shadowRoot.getElementById(id);
+    const auto = $("autoana").checked;
+    for (const id of ["reana", "limstep", "limsweep"]) $(id).disabled = !auto;
+    $("maxstep").disabled = !auto || !$("limstep").checked;
+    $("maxsweep").disabled = !auto || !$("limsweep").checked;
+  }
+
   _msg(text, err = false) {
     const el = this.shadowRoot.getElementById("msg");
     el.textContent = text;
     el.className = "msg" + (err ? " err" : "");
     clearTimeout(this._msgT);
-    this._msgT = setTimeout(() => { el.textContent = ""; }, 6000);
+    this._msgT = setTimeout(() => { el.textContent = ""; }, err ? 20000 : 6000);
   }
 
   _setStatusText(text, err) {
@@ -464,6 +496,7 @@ class SpettroPanel extends HTMLElement {
     const extra = [];
     if (s.tuner) extra.push(`tuner ${s.tuner}`);
     if (s.sweep_s != null) extra.push(`ultima scansione ${s.sweep_s} s`);
+    if (s.auto_count != null) extra.push(`${s.auto_count} picchi analizzati`);
     if (s.last_scan) extra.push(new Date(s.last_scan * 1000).toLocaleTimeString());
     const tail = extra.length ? ` · ${extra.join(" · ")}` : "";
     let text, err = false, prog = 0;

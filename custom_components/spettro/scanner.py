@@ -79,13 +79,22 @@ class ScanSettings:
     auto_analyze: bool = False  # analizza subito i picchi trovati durante la scansione
     archive_hours: float = 24.0  # dopo quante ore si cancellano le analisi archiviate
     reanalyze_min: float = 30.0  # la stessa frequenza non si rianalizza in automatico prima di così
-    auto_max_per_step: int = 0  # picchi analizzati al massimo per passo della scansione (0 = nessun limite)
-    auto_max_per_sweep: int = 0  # e per scansione completa (0 = nessun limite)
+    auto_limit_step: bool = False  # limita i picchi analizzati per passo della scansione
+    auto_max_per_step: int = 3
+    auto_limit_sweep: bool = False  # limita i picchi analizzati per scansione completa
+    auto_max_per_sweep: int = 20
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> ScanSettings:
         known = {f.name for f in fields(cls)}
-        return cls(**{k: v for k, v in data.items() if k in known})
+        s = cls(**{k: v for k, v in data.items() if k in known})
+        # nella 1.4.2 lo 0 voleva dire "nessun limite": si torna ai valori predefiniti
+        defaults = cls()
+        if s.auto_max_per_step < 1:
+            s.auto_max_per_step = defaults.auto_max_per_step
+        if s.auto_max_per_sweep < 1:
+            s.auto_max_per_sweep = defaults.auto_max_per_sweep
+        return s
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -222,6 +231,8 @@ class SpectrumScanner:
             "enabled": enabled,
             "paused": None,
             "auto_mhz": None,  # picco in analisi automatica
+            "auto_count": None,  # picchi analizzati in automatico nell'ultima scansione
+            "version": None,  # versione dell'integrazione, per accorgersi di un riavvio mancato
         }
         self._update_active(emit=False)
 
@@ -403,7 +414,7 @@ class SpectrumScanner:
             if self.archive.find(f, SPIKE_TOL_HZ, newer_than=recent):
                 continue
             out.append(f)
-            if 0 < self.settings.auto_max_per_step <= len(out):
+            if self.settings.auto_limit_step and len(out) >= self.settings.auto_max_per_step:
                 break
         return out
 
@@ -541,7 +552,8 @@ class SpectrumScanner:
 
             t0 = time.monotonic()
             last_partial = t0
-            auto_left = s.auto_max_per_sweep or math.inf
+            auto_left = s.auto_max_per_sweep if s.auto_limit_sweep else math.inf
+            auto_done = 0
             for i in range(steps):
                 if not self._active.is_set():
                     raise ScanPaused
@@ -565,6 +577,7 @@ class SpectrumScanner:
                         if not self._active.is_set():
                             raise ScanPaused
                         auto_left -= 1
+                        auto_done += 1
                         await self._auto_analyze(reader, writer, rate, f, discard_bytes)
 
                 now = time.monotonic()
@@ -583,7 +596,8 @@ class SpectrumScanner:
                 pass
 
         sweep_s = round(time.monotonic() - t0, 1)
-        self.status.update(last_scan=time.time(), sweep_s=sweep_s, progress=1.0)
+        self.status.update(last_scan=time.time(), sweep_s=sweep_s, progress=1.0,
+                           auto_count=auto_done if s.auto_analyze else None)
         self._publish(spectrum, total_bins, total_bins, f_start, f_stop,
                       bin_hz, pool, min_sep_hz, sweep_id, True, 1.0, sweep_s)
 

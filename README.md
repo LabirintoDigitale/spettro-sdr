@@ -16,7 +16,7 @@ Integrazione custom per **Home Assistant** che trasforma una chiavetta RTL-SDR c
 - Tabella dei **segnali rilevati** (frequenza, livello, dB sopra il rumore): un clic ingrandisce il segnale e lo sceglie per l'analisi.
 - **Analisi segnale**: tocca un picco sul grafico (o una riga della tabella) e premi **Analizza**. La scansione si sospende per qualche secondo, la chiavetta registra il segnale a frequenza fissa e il pannello mostra una cascata ad alta risoluzione (~1 kHz, ~5 ms per riga) con le misure: frequenza centrale, banda occupata, SNR, toni distinti, trasmissione continua o a burst (durata e ripetizione), frequenza che sale/scende (chirp) o due toni (FSK), più un'ipotesi sul **tipo di segnale** ricavata dalle misure. L'ultima analisi è anche un'entità immagine (**Ultima analisi**).
 - **Ascolto**: la registrazione viene demodulata in FM larga (radio), FM stretta (voce) e AM; il pannello propone la più adatta in un lettore audio e si può passare alle altre.
-- **Analisi automatica dei picchi** (opzione *Analizza subito i picchi trovati*): con le stesse impostazioni della scansione, quando un passo trova un picco sopra la soglia la ricerca si interrompe, il picco viene registrato per 1 s e analizzato, poi la scansione riprende da dove era rimasta. Una frequenza già analizzata non viene rianalizzata prima di *Rianalizza dopo (min)* (predefinito 30, 0 = ogni volta). Facoltativi *Max picchi per passo* e *Max per scansione* limitano quante analisi si fanno per non rallentare troppo la ricerca (predefinito 0 = nessun limite).
+- **Analisi automatica dei picchi** (opzione *Analizza subito i picchi trovati*): con le stesse impostazioni della scansione, quando un passo trova un picco sopra la soglia la ricerca si interrompe, il picco viene registrato per 1 s e analizzato, poi la scansione riprende da dove era rimasta. Una frequenza già analizzata non viene rianalizzata prima di *Rianalizza dopo (min)* (predefinito 30, 0 = ogni volta). Facoltativi, con il loro checkbox, *Max picchi per passo* (3) e *Max per scansione* (20) limitano quante analisi si fanno per non rallentare troppo la ricerca; di default sono spenti, cioè nessun limite.
 - **Archivio spike**: ogni analisi, automatica o manuale, viene salvata con misure, cascata e audio nella cartella `spettro_archivio` della configurazione di Home Assistant, e cancellata quando diventa più vecchia di *Archivio: cancella dopo (h)* ore (predefinito 24). La scheda mostra quante analisi ci sono e quanto spazio occupano su disco, e ha il pulsante **Svuota archivio**. Nella tabella dei segnali un **●** indica i picchi già analizzati: toccando la riga compare subito l'analisi. Nella scheda *Archivio spike* si riaprono le analisi passate (✋ = avviata a mano).
 - **Chiedi all'AI**: invia misure e cascata all'entità **AI Task** di Home Assistant (Anthropic, OpenAI, Google Gemini, Ollama…) per un'ipotesi su che segnale è e, se è pubblico e in chiaro, con quale programma decodificarlo. Serve Home Assistant 2025.8 o successivo e un utente amministratore; se il modello non accetta immagini riceve solo le misure.
 - Durante le scansioni lunghe il grafico si aggiorna man mano, con la barra di avanzamento.
@@ -88,6 +88,8 @@ Copia la cartella `custom_components/spettro` dentro `config/custom_components/`
 
 ## Note
 
+- Dopo un aggiornamento da HACS **riavvia Home Assistant**: finché non lo fai il pannello è già nuovo ma l'integrazione no, e il pannello lo segnala con un avviso rosso in alto.
+
 - rtl_tcp accetta **un solo client alla volta**. L'integrazione si collega solo durante la scansione e poi si stacca, quindi tra una scansione e l'altra puoi usare SDR#, SDR++ o altri programmi. Se un altro client resta collegato, la scansione va in errore e riprova dopo almeno 10 secondi.
 - Tempi indicativi a 2,048 MS/s: banda FM (20 MHz) circa 2 s, tutto 24–1766 MHz circa 2–3 minuti.
 - Mentre è collegata, la chiavetta invia dati in continuo: a 2,048 MS/s sono circa 4 MB/s (33 Mbit/s) e un po' di carico CPU/USB sul server. Se il server ospita anche altri servizi e li rallenta, usa l'interruttore **Scansione**, l'opzione *solo con il pannello aperto* o un intervallo più lungo.
@@ -98,7 +100,7 @@ Copia la cartella `custom_components/spettro` dentro `config/custom_components/`
 
 ## Rilasci
 
-HACS mostra come versione l'ultima **release** GitHub. Per pubblicarne una basta aumentare `version` in `custom_components/spettro/manifest.json` e `VERSION` in `custom_components/spettro/const.py` (devono coincidere) e fare push su `main`: il workflow *Release* crea il tag `vX.Y.Z` e la release se non esistono già.
+HACS mostra come versione l'ultima **release** GitHub. Per pubblicarne una basta aumentare `version` in `custom_components/spettro/manifest.json`, `VERSION` in `custom_components/spettro/const.py` e `PANEL_VERSION` in `custom_components/spettro/frontend/spettro-panel.js` (devono coincidere) e fare push su `main`: il workflow *Release* crea il tag `vX.Y.Z` e la release se non esistono già.
 
 ## Licenza
 

@@ -41,6 +41,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: SpettroConfigEntry) -> b
     await hass.async_add_executor_job(archive.load)
     scanner.archive = archive
     await scanner.prune_archive()
+    scanner.status["version"] = VERSION
     entry.runtime_data = scanner
     hass.data[DOMAIN] = entry
 

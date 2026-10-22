@@ -103,8 +103,10 @@ def ws_subscribe(hass: HomeAssistant, connection: websocket_api.ActiveConnection
         vol.Optional("auto_analyze"): bool,
         vol.Optional("archive_hours"): vol.All(vol.Coerce(float), vol.Range(min=1, max=24 * 90)),
         vol.Optional("reanalyze_min"): vol.All(vol.Coerce(float), vol.Range(min=0, max=7 * 24 * 60)),
-        vol.Optional("auto_max_per_step"): vol.All(vol.Coerce(int), vol.Range(min=0, max=1000)),
-        vol.Optional("auto_max_per_sweep"): vol.All(vol.Coerce(int), vol.Range(min=0, max=100000)),
+        vol.Optional("auto_limit_step"): bool,
+        vol.Optional("auto_max_per_step"): vol.All(vol.Coerce(int), vol.Range(min=1, max=1000)),
+        vol.Optional("auto_limit_sweep"): bool,
+        vol.Optional("auto_max_per_sweep"): vol.All(vol.Coerce(int), vol.Range(min=1, max=100000)),
     }
 )
 @websocket_api.require_admin
