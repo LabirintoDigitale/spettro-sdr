@@ -279,6 +279,8 @@ class SpettroPanel extends HTMLElement {
             <div class="grid2" style="margin-top:8px">
               <label title="Un picco già analizzato non viene rianalizzato in automatico prima di questo tempo (0 = ogni volta)">Rianalizza dopo (min)<input id="reana" type="number" step="1" min="0"></label>
               <label title="Le analisi archiviate più vecchie vengono cancellate">Archivio: cancella dopo (h)<input id="archhours" type="number" step="1" min="1"></label>
+              <label title="Picchi analizzati al massimo in ogni passo della scansione (0 = nessun limite)">Max picchi per passo<input id="maxstep" type="number" step="1" min="0" placeholder="0 = nessuno"></label>
+              <label title="Picchi analizzati al massimo in una scansione completa (0 = nessun limite)">Max per scansione<input id="maxsweep" type="number" step="1" min="0" placeholder="0 = nessuno"></label>
             </div>
             <details>
               <summary>Avanzate</summary>
@@ -321,7 +323,7 @@ class SpettroPanel extends HTMLElement {
     this._menu.hass = this._hass;
     this._menu.narrow = this._narrow;
 
-    const form = ["start", "stop", "interval", "gain", "threshold", "viewonly", "autoana", "reana", "archhours",
+    const form = ["start", "stop", "interval", "gain", "threshold", "viewonly", "autoana", "reana", "archhours", "maxstep", "maxsweep",
       "rate", "fft", "settle", "ppm"];
     for (const id of form) $(id).addEventListener("input", () => {
       this._formDirty = true;
@@ -396,6 +398,8 @@ class SpettroPanel extends HTMLElement {
     $("autoana").checked = !!s.auto_analyze;
     $("reana").value = s.reanalyze_min ?? 30;
     $("archhours").value = s.archive_hours ?? 24;
+    $("maxstep").value = s.auto_max_per_step ?? 0;
+    $("maxsweep").value = s.auto_max_per_sweep ?? 0;
     const idx = PRESETS.findIndex((p) => p[1] === s.start_mhz && p[2] === s.stop_mhz);
     $("preset").value = String(idx > 0 ? idx : 0);
   }
@@ -422,6 +426,8 @@ class SpettroPanel extends HTMLElement {
       auto_analyze: $("autoana").checked,
       reanalyze_min: Math.max(0, parseFloat($("reana").value) || 0),
       archive_hours: Math.max(1, parseFloat($("archhours").value) || 24),
+      auto_max_per_step: Math.max(0, parseInt($("maxstep").value, 10) || 0),
+      auto_max_per_sweep: Math.max(0, parseInt($("maxsweep").value, 10) || 0),
     };
     $("apply").disabled = true;
     try {

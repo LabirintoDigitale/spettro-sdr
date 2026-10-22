@@ -59,8 +59,6 @@ IO_TIMEOUT = 10
 MIN_ERROR_RETRY = 10
 ANALYSIS_MAX_S = 5  # durata massima di una registrazione per l'analisi
 AUTO_ANALYSIS_S = 1.0  # registrazione dell'analisi automatica di un picco
-AUTO_MAX_PER_STEP = 3  # picchi analizzati al massimo per ogni passo della scansione
-AUTO_MAX_PER_SWEEP = 20  # e per ogni scansione completa
 SPIKE_TOL_HZ = 100e3  # due picchi così vicini sono lo stesso segnale
 
 
@@ -81,6 +79,8 @@ class ScanSettings:
     auto_analyze: bool = False  # analizza subito i picchi trovati durante la scansione
     archive_hours: float = 24.0  # dopo quante ore si cancellano le analisi archiviate
     reanalyze_min: float = 30.0  # la stessa frequenza non si rianalizza in automatico prima di così
+    auto_max_per_step: int = 0  # picchi analizzati al massimo per passo della scansione (0 = nessun limite)
+    auto_max_per_sweep: int = 0  # e per scansione completa (0 = nessun limite)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> ScanSettings:
@@ -403,7 +403,7 @@ class SpectrumScanner:
             if self.archive.find(f, SPIKE_TOL_HZ, newer_than=recent):
                 continue
             out.append(f)
-            if len(out) >= AUTO_MAX_PER_STEP:
+            if 0 < self.settings.auto_max_per_step <= len(out):
                 break
         return out
 
@@ -541,7 +541,7 @@ class SpectrumScanner:
 
             t0 = time.monotonic()
             last_partial = t0
-            auto_left = AUTO_MAX_PER_SWEEP
+            auto_left = s.auto_max_per_sweep or math.inf
             for i in range(steps):
                 if not self._active.is_set():
                     raise ScanPaused
@@ -559,7 +559,9 @@ class SpectrumScanner:
                 if s.auto_analyze and auto_left > 0:
                     level = float(np.median(spectrum[: (i + 1) * keep])) + s.threshold_db
                     f0 = f_start + i * keep * bin_hz
-                    for f in self._spike_candidates(psd[lo : lo + keep], f0, bin_hz, level)[:auto_left]:
+                    for f in self._spike_candidates(psd[lo : lo + keep], f0, bin_hz, level):
+                        if auto_left <= 0:
+                            break
                         if not self._active.is_set():
                             raise ScanPaused
                         auto_left -= 1
