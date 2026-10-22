@@ -1,7 +1,7 @@
 // Pannello "Spettro" per Home Assistant: grafico dello spettro, waterfall e picchi.
 
 // deve coincidere con VERSION in const.py: se il backend ne riporta un'altra manca un riavvio
-const PANEL_VERSION = "1.9.2";
+const PANEL_VERSION = "1.9.3";
 
 const PRESETS = [
   ["Personalizzato", null, null],
@@ -1028,6 +1028,8 @@ class SpettroPanel extends HTMLElement {
   _setListen(on) {
     this._listen = on && !!this._ensureAudio();
     this._nextT = 0;
+    this._lead = 0;
+    this._underruns = 0;
     const b = this.shadowRoot.getElementById("livelisten");
     b.textContent = this._listen ? "🔊 Muto" : "🔇 Ascolta";
 
@@ -1117,8 +1119,16 @@ class SpettroPanel extends HTMLElement {
   _schedule(buf, offset = 0, speed = 1) {
     const ctx = this._audioCtx;
     const now = ctx.currentTime;
-    // piccola riserva contro i ritardi di rete; se si accumula troppo ritardo si riparte
-    if (this._nextT < now + 0.05 || this._nextT > now + 3) this._nextT = now + 0.5;
+    // riserva contro i ritardi di rete e di calcolo: se l'audio resta senza dati la riserva cresce
+    // (fino a 4 s); se il ritardo accumulato è troppo si torna alla riserva scelta
+    const live = this._live;
+    if (!this._lead) this._lead = live && live.mode === "dab" ? 1.5 : 0.5;
+    if (this._nextT < now + 0.02) {
+      if (this._nextT > 0) { this._lead = Math.min(this._lead + 0.5, 4); this._underruns = (this._underruns || 0) + 1; }
+      this._nextT = now + this._lead;
+    } else if (this._nextT > now + this._lead + 2.5) {
+      this._nextT = now + this._lead;
+    }
     const src = ctx.createBufferSource();
     src.playbackRate.value = speed;
     src.buffer = buf;
@@ -1170,6 +1180,8 @@ class SpettroPanel extends HTMLElement {
       ["Testo (DLS)", st.dls || "—"],
       ["Pacchetti audio integri", tot ? `${s.au_ok}/${tot} (${Math.round((100 * s.au_ok) / tot)}%)` : "in attesa…"],
       ["Correzioni Reed-Solomon", s ? `${s.rs_fixed} byte${s.rs_failed ? ` · ${s.rs_failed} blocchi persi` : ""}` : "—"],
+      ["Carico su Home Assistant", s && s.load ? `${Math.round(s.load * 100)}% del tempo reale${s.load > 0.9 ? " (al limite: audio a scatti)" : ""}` : "—"],
+      ["Riserva audio", this._listen ? `${(this._lead || 1.5).toFixed(1)} s${this._underruns ? ` · ${this._underruns} interruzioni` : ""}` : "—"],
     ];
     el.innerHTML = `<h3 style="margin:10px 0 4px">DAB+ in diretta</h3>
       <table><tbody>${rows.map(([k, v]) => `<tr><td>${k}</td><td class="num">${esc(v)}</td></tr>`).join("")}</tbody></table>

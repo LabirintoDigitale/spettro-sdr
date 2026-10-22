@@ -108,6 +108,11 @@ def _trellis() -> tuple[np.ndarray, np.ndarray, np.ndarray]:
 
 
 _PREV, _SIGNS, _INPUT = _trellis()
+# le uscite possibili sono 16 combinazioni di 4 bit: per ogni ramo, quale combinazione
+_PATTERN = ((_SIGNS < 0).astype(np.int64) * np.array([8, 4, 2, 1])).sum(axis=-1)  # 64 x 2
+_SIGNS16 = np.array([[1 - 2 * ((p >> (3 - k)) & 1) for k in range(4)] for p in range(16)], np.float32)
+_PREV0, _PREV1 = _PREV[:, 0], _PREV[:, 1]
+_PAT0, _PAT1 = _PATTERN[:, 0], _PATTERN[:, 1]
 
 
 def viterbi(soft: np.ndarray) -> np.ndarray:
@@ -116,17 +121,20 @@ def viterbi(soft: np.ndarray) -> np.ndarray:
     soft = np.atleast_2d(soft)
     nb, steps = soft.shape[0], soft.shape[1] // 4
     s = soft[:, : steps * 4].reshape(nb, steps, 4).astype(np.float32)
+    # metriche dei 16 gruppi di 4 bit per tutti i passi in una volta: nel ciclo restano somme e confronti
+    bm = np.ascontiguousarray((s @ _SIGNS16.T).transpose(1, 0, 2))  # passi x nb x 16
     metric = np.full((nb, 64), -1e9, np.float32)
     metric[:, 0] = 0
     choice = np.empty((steps, nb, 64), np.int8)
-    rows = np.arange(nb)[:, None]
-    cols = np.arange(64)[None, :]
     for i in range(steps):
-        cand = metric[:, _PREV] + np.einsum("sbk,nk->nsb", _SIGNS, s[:, i])  # nb x 64 x 2
-        c = np.argmax(cand, axis=2)
-        choice[i] = c
-        metric = cand[rows, cols, c]
-        metric -= metric.max(axis=1, keepdims=True)
+        b = bm[i]
+        c0 = metric[:, _PREV0] + b[:, _PAT0]
+        c1 = metric[:, _PREV1] + b[:, _PAT1]
+        pick = c1 > c0
+        choice[i] = pick
+        metric = np.where(pick, c1, c0)
+        if i % 32 == 31:
+            metric -= metric.max(axis=1, keepdims=True)
     bits = np.empty((nb, steps), np.int8)
     state = np.zeros(nb, np.int64)
     for i in range(steps - 1, -1, -1):
@@ -431,11 +439,13 @@ class DabStream:
         self.lost = 0
         self.fic: FicState | None = None
         self._fic_pending: list[np.ndarray] = []
+        self.fic_every = 10  # trame tra due letture del FIC
+        self.need: list[int] = []  # simboli MSC (indici 4…75) da demodulare oltre al FIC
         k = np.arange(FFT_LEN)
         self._win = k + GUARD - WINDOW_BACKOFF
 
     def feed(self, x: np.ndarray) -> list[dict[str, Any]]:
-        """Aggiunge campioni; restituisce le trame elaborate ({"fic": 9216 bit, "msc": 4 x 55296, …})."""
+        """Aggiunge campioni; restituisce le trame elaborate ({"fic": 9216 bit, "rows": simbolo → 3072 bit, …})."""
         self.buf = np.concatenate((self.buf, x.astype(np.complex64)))
         if self.next_start is None:
             if len(self.buf) < self.ACQUIRE:
@@ -474,27 +484,34 @@ class DabStream:
         win = c[NULL_LEN:] - c[:-NULL_LEN]
         rel += int(np.argmin(win)) - self.TRACK
         start = self.base + rel
-        # finestre FFT dei 76 simboli corrette per lo scarto fine (fase continua nel flusso)
-        t0 = rel + NULL_LEN + np.arange(76) * SYM_LEN
+        # solo i simboli che servono: riferimento e FIC (0…3), quelli della radio e i loro precedenti
+        # (la demodulazione è differenziale)
+        wanted = sorted({0, 1, 2, 3} | set(self.need) | {k - 1 for k in self.need})
+        t0 = rel + NULL_LEN + np.array(wanted) * SYM_LEN
         idx = t0[:, None] + self._win
         phase = np.exp(-2j * np.pi * ((self.fine * (start - rel + idx) / RATE) % 1.0)).astype(np.complex64)
         spectra = np.fft.fft(self.buf[idx] * phase, axis=1)
-        # scarto residuo dal prefisso ciclico (sui campioni già corretti) e aggiornamento lento
-        pre = (t0[:, None] + np.arange(GUARD))
+        pos = {k: i for i, k in enumerate(wanted)}
+        # scarto residuo dal prefisso ciclico dei primi simboli (già corretti) e aggiornamento lento
+        pre = (t0[:4, None] + np.arange(GUARD))
         a = self.buf[pre] * np.exp(-2j * np.pi * ((self.fine * (start - rel + pre) / RATE) % 1.0))
         b = self.buf[pre + FFT_LEN] * np.exp(-2j * np.pi * ((self.fine * (start - rel + pre + FFT_LEN) / RATE) % 1.0))
         resid = float(-np.angle(np.vdot(b.ravel(), a.ravel())) * RATE / (2 * np.pi * FFT_LEN))
         self.fine += 0.3 * resid
-        soft = soft_bits(spectra, self.offset, self.variant)  # 75 x 3072
-        # il FIC si continua a leggere (nomi e sottocanali arrivano a turno): Viterbi ogni 10 trame
-        self._fic_pending.append(soft[:FIC_SYMBOLS].reshape(4, BLOCK_BITS))
-        if len(self._fic_pending) >= 10 and self.fic is not None:
+        fic = soft_bits(spectra[:4], self.offset, self.variant)  # 3 x 3072
+        rows = {}
+        for k in self.need:
+            pair = spectra[[pos[k - 1], pos[k]]]
+            rows[k] = soft_bits(pair, self.offset, self.variant)[0]
+        # il FIC si continua a leggere (nomi e sottocanali arrivano a turno), a gruppi di trame
+        self._fic_pending.append(fic.reshape(4, BLOCK_BITS))
+        if len(self._fic_pending) >= self.fic_every and self.fic is not None:
             self.fic.add(_fic_blocks(np.concatenate(self._fic_pending)))
             self._fic_pending = []
-        power = np.mean(np.abs(spectra) ** 2, axis=0)
+        power = np.mean(np.abs(spectra[:4]) ** 2, axis=0)
         self.next_start = start + FRAME_LEN
         return {
-            "fic": soft[:FIC_SYMBOLS].reshape(-1),
-            "msc": soft[FIC_SYMBOLS:].reshape(4, -1),
+            "fic": fic.reshape(-1),
+            "rows": rows,
             "power": np.fft.fftshift(power),
         }

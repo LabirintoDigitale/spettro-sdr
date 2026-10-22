@@ -15,6 +15,7 @@ campioni del DAB+.
 from __future__ import annotations
 
 from collections import deque
+import time
 from typing import Any
 
 import numpy as np
@@ -431,6 +432,19 @@ class DabPlusAudio:
         return aus
 
 
+def _subchannel_layout(start_cu: int, size_cu: int) -> list[tuple[list[int], int, int]]:
+    """Per ognuno dei 4 CIF di una trama: simboli (indici 4…75) che contengono il sottocanale
+    e posizione dei suoi bit nella loro concatenazione."""
+    sym_bits = 3072
+    lo, hi = start_cu * CU_BITS, (start_cu + size_cu) * CU_BITS
+    first, last = lo // sym_bits, (hi - 1) // sym_bits
+    out = []
+    for c in range(4):
+        syms = [4 + c * 18 + k for k in range(first, last + 1)]
+        out.append((syms, lo - first * sym_bits, hi - first * sym_bits))
+    return out
+
+
 class DabLiveReceiver:
     """Analisi continua di una radio DAB+: byte rtl_tcp in ingresso, AU AAC, DLS e qualità in uscita."""
 
@@ -444,10 +458,15 @@ class DabLiveReceiver:
         self.error: str | None = None
         self._frames_seen = 0
         self._sent_info: tuple | None = None
+        self._layout: list[tuple[list[int], int, int]] = []
+        self._load: float | None = None
+        self._t_feed = 0.0
 
     def process(self, raw: bytes) -> dict[str, Any]:
+        t_feed = time.perf_counter()
         a = np.frombuffer(raw, dtype=np.uint8).astype(np.float32) - 127.5
         frames = self.stream.feed((a[0::2] + 1j * a[1::2]).astype(np.complex64))
+        self._t_feed = time.perf_counter() - t_feed
         out: dict[str, Any] = {"aus": [], "row": None, "level_db": None}
         self._frames_seen += len(frames)
         fic = self.stream.fic
@@ -463,24 +482,35 @@ class DabLiveReceiver:
                     else:
                         self.service = svc
                         self.rx = DabPlusAudio(svc["option"], svc["level"], svc["bitrate"])
+                        # da qui si demodulano solo i simboli della radio, e il FIC più di rado
+                        self._layout = _subchannel_layout(svc["start"], svc["size"])
+                        self.stream.need = sorted({k for c in self._layout for k in c[0]})
+                        self.stream.fic_every = 40
                 elif self._frames_seen > 160:  # ~15 s
                     self.error = "radio non trovata nel multiplex"
             info = (fic.ensemble, svc["name"], svc.get("bitrate"), svc.get("protection"))
             if info != self._sent_info:
                 self._sent_info = info
                 out["info"] = {"ensemble": info[0], "service": info[1], "bitrate": info[2], "protection": info[3]}
+        t0 = time.perf_counter()
         for fr in frames:
-            if self.rx is not None and self.service is not None:
-                lo = self.service["start"] * CU_BITS
-                hi = lo + self.service["size"] * CU_BITS
-                out["aus"] += self.rx.push_cifs([fr["msc"][c][lo:hi] for c in range(4)])
+            if self.rx is not None and self.service is not None and all(k in fr["rows"] for k in self.stream.need):
+                cifs = []
+                for syms, lo, hi in self._layout:
+                    bits = np.concatenate([fr["rows"][k] for k in syms])
+                    cifs.append(bits[lo:hi])
+                out["aus"] += self.rx.push_cifs(cifs)
             p = fr["power"].reshape(256, -1).mean(axis=1)
             out["row"] = np.round(10 * np.log10(p / (127.5 * 2048) ** 2 + 1e-20), 1).tolist()
             out["level_db"] = round(float(10 * np.log10(np.mean(fr["power"]) / (127.5 * 2048) ** 2 + 1e-20)), 1)
+        if frames:
+            # carico: tempo di calcolo rispetto alla durata del segnale (media mobile)
+            load = (time.perf_counter() - t0 + self._t_feed) / (len(frames) * 0.096)
+            self._load = load if self._load is None else 0.8 * self._load + 0.2 * load
         if self.rx is not None:
             out["config"] = self.rx.config
             out["dls"] = self.rx.dls.text
-            out["stats"] = dict(self.rx.stats)
+            out["stats"] = dict(self.rx.stats, load=round(self._load or 0, 2))
         out["error"] = self.error
         out["synced"] = self.stream.next_start is not None
         return out
