@@ -206,7 +206,16 @@ def audio_config(dac_rate: int, sbr: bool, stereo: bool, ps: bool) -> dict[str, 
             bits += f"{0x548:011b}1"
     bits += "0" * (-len(bits) % 8)
     asc = int(bits, 2).to_bytes(len(bits) // 8, "big")
+    # piano B per i decoder senza SBR a 960 campioni: solo il nucleo AAC (meno acuti, senza stereo PS)
+    core_bits = f"{2:05b}{_SR_INDEX[core]:04b}{(2 if stereo else 1):04b}" + "100"
+    core_bits += "0" * (-len(core_bits) % 8)
+    fallback = {
+        "asc": int(core_bits, 2).to_bytes(len(core_bits) // 8, "big").hex(),
+        "codec": "mp4a.40.2", "sample_rate": core, "channels": 2 if stereo else 1,
+        "sbr": False, "ps": False, "samples_per_au": 960,
+    } if sbr else None
     return {
+        "fallback": fallback,
         "asc": asc.hex(),
         "codec": "mp4a.40.29" if ps else "mp4a.40.5" if sbr else "mp4a.40.2",
         "sample_rate": dac_rate,
@@ -433,25 +442,33 @@ class DabLiveReceiver:
         self.rx: DabPlusAudio | None = None
         self.service: dict[str, Any] | None = None
         self.error: str | None = None
+        self._frames_seen = 0
+        self._sent_info: tuple | None = None
 
     def process(self, raw: bytes) -> dict[str, Any]:
         a = np.frombuffer(raw, dtype=np.uint8).astype(np.float32) - 127.5
         frames = self.stream.feed((a[0::2] + 1j * a[1::2]).astype(np.complex64))
         out: dict[str, Any] = {"aus": [], "row": None, "level_db": None}
-        if self.rx is None and self.error is None and self.stream.info:
-            info = self.stream.info
-            svc = next((s for s in info.get("services", []) if s["sid"] == self.sid), None)
-            if svc is None:
-                self.error = "radio non trovata nel multiplex"
-            elif svc.get("type") != "DAB+":
-                self.error = f"la radio è {svc.get('type')}: si possono ascoltare solo le radio DAB+"
-            elif not svc.get("bitrate"):
-                self.error = "protezione del sottocanale non supportata"
-            else:
-                self.service = svc
-                self.rx = DabPlusAudio(svc["option"], svc["level"], svc["bitrate"])
-            out["info"] = {"ensemble": info.get("ensemble"), "service": svc and svc["name"],
-                           "bitrate": svc and svc.get("bitrate"), "protection": svc and svc.get("protection")}
+        self._frames_seen += len(frames)
+        fic = self.stream.fic
+        if fic is not None:
+            svc = fic.service(int(self.sid, 16))
+            # nomi e sottocanali arrivano a turno: si aspetta finché il sottocanale della radio è noto
+            if self.rx is None and self.error is None:
+                if svc["type"] not in ("DAB+", "audio"):
+                    self.error = f"la radio è {svc['type']}: si possono ascoltare solo le radio DAB+"
+                elif "start" in svc:
+                    if not svc.get("bitrate"):
+                        self.error = "protezione del sottocanale non supportata"
+                    else:
+                        self.service = svc
+                        self.rx = DabPlusAudio(svc["option"], svc["level"], svc["bitrate"])
+                elif self._frames_seen > 160:  # ~15 s
+                    self.error = "radio non trovata nel multiplex"
+            info = (fic.ensemble, svc["name"], svc.get("bitrate"), svc.get("protection"))
+            if info != self._sent_info:
+                self._sent_info = info
+                out["info"] = {"ensemble": info[0], "service": info[1], "bitrate": info[2], "protection": info[3]}
         for fr in frames:
             if self.rx is not None and self.service is not None:
                 lo = self.service["start"] * CU_BITS

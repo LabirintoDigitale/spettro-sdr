@@ -1,7 +1,7 @@
 // Pannello "Spettro" per Home Assistant: grafico dello spettro, waterfall e picchi.
 
 // deve coincidere con VERSION in const.py: se il backend ne riporta un'altra manca un riavvio
-const PANEL_VERSION = "1.9.1";
+const PANEL_VERSION = "1.9.2";
 
 const PRESETS = [
   ["Personalizzato", null, null],
@@ -40,6 +40,65 @@ const LUT = (() => {
 function fmtMHz(hz, span) {
   const d = span < 2e5 ? 4 : span < 5e6 ? 3 : span < 5e7 ? 2 : 1;
   return (hz / 1e6).toFixed(d);
+}
+
+// --- MP4 frammentato per suonare l'AAC del DAB+ con Media Source (anche su pagine http) ---
+function box(type, ...parts) {
+  const len = 8 + parts.reduce((t, p) => t + p.length, 0);
+  const out = new Uint8Array(len);
+  new DataView(out.buffer).setUint32(0, len);
+  for (let i = 0; i < 4; i++) out[4 + i] = type.charCodeAt(i);
+  let o = 8;
+  for (const p of parts) { out.set(p, o); o += p.length; }
+  return out;
+}
+function u8(...v) { return new Uint8Array(v); }
+function u32(v) { const b = new Uint8Array(4); new DataView(b.buffer).setUint32(0, v >>> 0); return b; }
+function u16(v) { const b = new Uint8Array(2); new DataView(b.buffer).setUint16(0, v); return b; }
+function zeros(n) { return new Uint8Array(n); }
+const MATRIX = new Uint8Array([0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x40, 0, 0, 0]);
+
+function mp4Init(asc, rate, channels) {
+  const desc = (tag, body) => new Uint8Array([tag, body.length, ...body]);
+  const dsi = desc(0x05, asc);
+  const dcd = desc(0x04, [0x40, 0x15, 0, 0, 0, ...u32(0), ...u32(0), ...dsi]);
+  const es = desc(0x03, [0, 1, 0, ...dcd, ...desc(0x06, [0x02])]);
+  const esds = box("esds", zeros(4), es);
+  const mp4a = box("mp4a", zeros(6), u16(1), zeros(8), u16(channels), u16(16), zeros(4), u32(rate * 65536), esds);
+  const stbl = box("stbl", box("stsd", zeros(4), u32(1), mp4a), box("stts", zeros(8)), box("stsc", zeros(8)),
+    box("stsz", zeros(12)), box("stco", zeros(8)));
+  const minf = box("minf", box("smhd", zeros(8)), box("dinf", box("dref", zeros(4), u32(1), box("url ", u8(0, 0, 0, 1)))), stbl);
+  const mdia = box("mdia", box("mdhd", zeros(12), u32(rate), zeros(4), u16(0x55c4), zeros(2)),
+    box("hdlr", zeros(8), new TextEncoder().encode("soun"), zeros(12), new TextEncoder().encode("Spettro\0")), minf);
+  const trak = box("trak", box("tkhd", u8(0, 0, 0, 7), zeros(8), u32(1), zeros(4), zeros(4), zeros(8), zeros(4), u16(0x0100), zeros(2), MATRIX, zeros(8)), mdia);
+  const mvhd = box("mvhd", zeros(12), u32(1000), zeros(4), u32(0x00010000), u16(0x0100), zeros(10), MATRIX, zeros(24), u32(2));
+  const mvex = box("mvex", box("trex", zeros(4), u32(1), u32(1), zeros(12)));
+  return concatU8([box("ftyp", new TextEncoder().encode("iso6"), zeros(4), new TextEncoder().encode("iso6mp41")),
+    box("moov", mvhd, trak, mvex)]);
+}
+
+function mp4Fragment(seq, baseTime, aus, duration) {
+  const n = aus.length;
+  const entries = new Uint8Array(8 * n);
+  const dv = new DataView(entries.buffer);
+  aus.forEach((a, i) => { dv.setUint32(8 * i, duration); dv.setUint32(8 * i + 4, a.length); });
+  const tfdt = new Uint8Array(12);
+  const tv = new DataView(tfdt.buffer);
+  tv.setUint32(0, 0x01000000);
+  tv.setUint32(4, Math.floor(baseTime / 2 ** 32));
+  tv.setUint32(8, baseTime >>> 0);
+  const build = (offset) => box("moof", box("mfhd", zeros(4), u32(seq)),
+    box("traf", box("tfhd", u8(0, 2, 0, 0), u32(1)), box("tfdt", tfdt),
+      box("trun", u8(0, 0, 3, 1), u32(n), u32(offset), entries)));
+  const moof = build(build(0).length + 8);
+  return concatU8([moof, box("mdat", concatU8(aus))]);
+}
+
+function concatU8(parts) {
+  const out = new Uint8Array(parts.reduce((t, p) => t + p.length, 0));
+  let o = 0;
+  for (const p of parts) { out.set(p, o); o += p.length; }
+  return out;
 }
 
 function esc(t) {
@@ -971,6 +1030,7 @@ class SpettroPanel extends HTMLElement {
     this._nextT = 0;
     const b = this.shadowRoot.getElementById("livelisten");
     b.textContent = this._listen ? "🔊 Muto" : "🔇 Ascolta";
+
   }
 
   async _liveStart(mhz, mode = null, sid = null) {
@@ -1004,6 +1064,7 @@ class SpettroPanel extends HTMLElement {
       this._rtHistory = [];
       this._liveRds = null;
       this._dabState = null;
+      this._dabFallback = false;
       this._closeDec();
       $("liverds").innerHTML = live.mode === "wfm" ? `<div class="hint" style="margin-top:6px">In attesa dei dati RDS…</div>`
         : live.mode === "dab" ? `<div class="hint" style="margin-top:6px">Aggancio del multiplex DAB…</div>` : "";
@@ -1053,16 +1114,17 @@ class SpettroPanel extends HTMLElement {
     this._schedule(buf);
   }
 
-  _schedule(buf) {
+  _schedule(buf, offset = 0, speed = 1) {
     const ctx = this._audioCtx;
     const now = ctx.currentTime;
     // piccola riserva contro i ritardi di rete; se si accumula troppo ritardo si riparte
     if (this._nextT < now + 0.05 || this._nextT > now + 3) this._nextT = now + 0.5;
     const src = ctx.createBufferSource();
+    src.playbackRate.value = speed;
     src.buffer = buf;
     src.connect(ctx.destination);
-    src.start(this._nextT);
-    this._nextT += buf.duration;
+    src.start(this._nextT, offset);
+    this._nextT += (buf.duration - offset) / speed;
   }
 
   // ---------------------------------------------------------------- DAB+ in diretta
@@ -1112,19 +1174,25 @@ class SpettroPanel extends HTMLElement {
     el.innerHTML = `<h3 style="margin:10px 0 4px">DAB+ in diretta</h3>
       <table><tbody>${rows.map(([k, v]) => `<tr><td>${k}</td><td class="num">${esc(v)}</td></tr>`).join("")}</tbody></table>
       ${st.audioErr ? `<div class="err" style="margin-top:6px">${esc(st.audioErr)}</div>` : ""}
+      ${st.audioNote && !st.audioErr ? `<div class="hint" style="margin-top:6px">${esc(st.audioNote)}</div>` : ""}
       ${st.dlsHistory.length ? `<h3 style="margin:10px 0 4px">Testi ricevuti</h3><div id="livert">${st.dlsHistory
         .map((r) => `<div><span>${r.time.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })}</span>${esc(r.text)}</div>`).join("")}</div>` : ""}`;
   }
 
   _closeDec() {
     if (this._dec) { try { this._dec.close(); } catch (e) { /* già chiuso */ } }
+    this._wa = null;
+    this._decMode = null;
     this._dec = null;
     this._decKey = null;
     this._decQueue = [];
   }
 
   async _dabAudio(cfg, aus) {
-    // il decoder AAC del browser (WebCodecs): AAC con blocchi da 960 campioni, SBR e PS dalla configurazione
+    // il decoder AAC del browser (WebCodecs): AAC con blocchi da 960 campioni, SBR e PS dalla configurazione;
+    // se il browser rifiuta l'SBR a 960 campioni si passa al solo nucleo AAC (piano B)
+    if (this._dabFallback && cfg.fallback) cfg = cfg.fallback;
+    this._dabCfg = cfg;
     const key = cfg.asc + cfg.codec;
     if (this._decKey !== key) {
       this._closeDec();
@@ -1140,7 +1208,9 @@ class SpettroPanel extends HTMLElement {
   async _setupDec(cfg) {
     const st = this._dabState;
     if (!("AudioDecoder" in window)) {
-      if (st) st.audioErr = "Questo browser non ha WebCodecs: per l'audio DAB+ usa Chrome, Edge o un Firefox recente.";
+      // WebCodecs c'è solo su pagine sicure (https): con http si decodifica con decodeAudioData
+      if (this._setupWebAudio(cfg)) return;
+      if (st) st.audioErr = "Questo browser non può suonare l'audio DAB+.";
       return;
     }
     const desc = new Uint8Array(cfg.asc.match(/../g).map((h) => parseInt(h, 16)));
@@ -1150,14 +1220,17 @@ class SpettroPanel extends HTMLElement {
       try { if ((await AudioDecoder.isConfigSupported(c)).supported) { conf = c; break; } } catch (e) { /* prova il prossimo */ }
     }
     if (!conf) {
+      if (this._setupWebAudio(cfg)) return;
+      if (this._dabTryFallback()) return;
       if (st) st.audioErr = "Il browser non sa decodificare questo audio HE-AAC del DAB+.";
       return;
     }
     this._dec = new AudioDecoder({
       output: (ad) => this._playAudioData(ad),
       error: (e) => {
-        if (this._dabState) this._dabState.audioErr = `Errore del decoder audio del browser: ${e.message}`;
         this._dec = null; this._decKey = null;
+        if (this._dabTryFallback()) return;
+        if (this._dabState) this._dabState.audioErr = `Errore del decoder audio del browser: ${e.message}`;
       },
     });
     this._dec.configure(conf);
@@ -1168,7 +1241,77 @@ class SpettroPanel extends HTMLElement {
     for (const a of q) this._decodeAu(a);
   }
 
+  // piano B: il prossimo pacchetto riconfigura il decoder con il solo nucleo AAC
+  _dabTryFallback() {
+    const cfg = this._dabCfg;
+    if (this._dabFallback || !cfg || !cfg.sbr) return false;
+    this._dabFallback = true;
+    this._closeDec();
+    if (this._dabState) this._dabState.audioNote = "Audio a qualità ridotta: il browser non supporta l'SBR del DAB+ (acuti fino a ~12 kHz, mono).";
+    return true;
+  }
+
+  // senza WebCodecs (pagine http): blocchi di ~0,5 s impacchettati in MP4 e decodificati con decodeAudioData,
+  // sovrapposti di 2 pacchetti per non avere stacchi tra un blocco e l'altro
+  _setupWebAudio(cfg) {
+    if (!window.AudioContext && !window.webkitAudioContext) return false;
+    const asc = new Uint8Array(cfg.asc.match(/../g).map((h) => parseInt(h, 16)));
+    this._wa = { cfg, init: mp4Init(asc, cfg.sample_rate, cfg.channels), prev: [], pending: [], busy: false };
+    this._decMode = "webaudio";
+    this._decReady = true;
+    const q = this._decQueue; this._decQueue = [];
+    for (const a of q) this._decodeAu(a);
+    return true;
+  }
+
+  async _waDecode() {
+    const w = this._wa;
+    if (!w || w.busy || w.pending.length < 12) return;
+    if (!this._listen || !this._audioCtx) { w.pending = []; w.prev = []; return; }
+    w.busy = true;
+    const take = w.pending.splice(0);
+    const overlap = w.prev;
+    w.prev = take.slice(-2);
+    const aus = overlap.concat(take);
+    const file = concatU8([w.init, mp4Fragment(1, 0, aus, w.cfg.samples_per_au)]);
+    try {
+      const buf = await this._audioCtx.decodeAudioData(file.buffer);
+      if (this._wa === w) this._playDecoded(buf, aus.length, overlap.length, w.cfg);
+    } catch (e) {
+      if (this._wa === w && !this._dabTryFallback() && this._dabState) {
+        this._dabState.audioErr = "Il browser non riesce a decodificare l'audio DAB+.";
+      }
+    }
+    w.busy = false;
+    this._waDecode();
+  }
+
+  // ogni pacchetto dura sempre samples_per_au / sample_rate (40 ms con SBR): se il decoder salta l'SBR
+  // restituisce metà dei campioni e si suona a metà velocità, che è quella giusta
+  _speedFor(decodedSeconds, aus, cfg) {
+    const ratio = decodedSeconds / (aus * cfg.samples_per_au / cfg.sample_rate);
+    if (ratio < 0.75 && this._dabState && !this._dabState.audioNote) {
+      this._dabState.audioNote = "Audio a qualità ridotta: il browser non applica l'SBR del DAB+ (acuti fino a ~12 kHz).";
+    }
+    return ratio < 0.75 ? 0.5 : 1;
+  }
+
+  _playDecoded(buf, aus, skipAus, cfg) {
+    const speed = this._speedFor(buf.duration, aus, cfg);
+    const skip = (skipAus / aus) * buf.duration;
+    this._schedule(buf, skip, speed);
+  }
+
   _decodeAu(b64) {
+    if (this._decMode === "webaudio") {
+      if (!this._wa) return;
+      const bin = atob(b64);
+      const data = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) data[i] = bin.charCodeAt(i);
+      this._wa.pending.push(data);
+      this._waDecode();
+      return;
+    }
     if (!this._dec || this._dec.state !== "configured") return;
     const bin = atob(b64);
     const data = new Uint8Array(bin.length);
@@ -1184,7 +1327,9 @@ class SpettroPanel extends HTMLElement {
   _playAudioData(ad) {
     if (!this._listen || !this._audioCtx) { ad.close(); return; }
     const n = ad.numberOfFrames, chs = ad.numberOfChannels;
-    const buf = this._audioCtx.createBuffer(chs, n, ad.sampleRate);
+    const cfg = this._dabCfg;
+    const speed = cfg ? this._speedFor(n / ad.sampleRate, 1, cfg) : 1;
+    const buf = this._audioCtx.createBuffer(chs, n, ad.sampleRate * speed);
     for (let c = 0; c < chs; c++) {
       const arr = new Float32Array(n);
       ad.copyTo(arr, { planeIndex: c, format: "f32-planar" });

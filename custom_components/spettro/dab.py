@@ -316,7 +316,55 @@ def _parse_fib(fib: bytes, out: dict[str, Any]) -> None:
                             out["subch_of"][sid] = comps[k + 1] >> 2
 
 
-def decode(iq: np.ndarray, rate: int, offset_hz: float = 0.0) -> dict[str, Any] | None:
+class FicState:
+    """Informazioni del canale di servizio raccolte dai FIB integri (nomi, servizi, sottocanali)."""
+
+    def __init__(self) -> None:
+        self.out: dict[str, Any] = {"eid": Counter(), "ensemble": Counter(), "labels": {}, "data_labels": {},
+                                    "audio_type": {}, "subch_of": {}, "subch": {}}
+        self.ok = self.total = 0
+
+    def add(self, blocks: list[list[bytes | None]]) -> None:
+        for fibs in blocks:
+            for fib in fibs:
+                self.total += 1
+                if fib is not None:
+                    self.ok += 1
+                    _parse_fib(fib, self.out)
+
+    @property
+    def ensemble(self) -> str | None:
+        return self.out["ensemble"].most_common(1)[0][0] if self.out["ensemble"] else None
+
+    @property
+    def eid(self) -> str | None:
+        return f"{self.out['eid'].most_common(1)[0][0]:04X}" if self.out["eid"] else None
+
+    def service(self, sid: int) -> dict[str, Any]:
+        """Quello che si sa di un servizio audio (nome, tipo, sottocanale), anche se incompleto."""
+        out = self.out
+        names = out["labels"].get(sid)
+        svc: dict[str, Any] = {"sid": f"{sid:04X}", "name": names.most_common(1)[0][0] if names else None,
+                               "type": out["audio_type"].get(sid, "audio")}
+        sc = out["subch"].get(out["subch_of"].get(sid, -1))
+        if sc and "size" in sc:
+            from .dabplus import eep_bitrate  # noqa: PLC0415
+
+            svc.update(subch=out["subch_of"][sid], start=sc["start"], size=sc["size"], option=sc["option"],
+                       level=sc["level"], bitrate=eep_bitrate(sc["option"], sc["level"], sc["size"]),
+                       protection=f"EEP {sc['level'] + 1}-{'AB'[sc['option']] if sc['option'] < 2 else '?'}")
+        return svc
+
+    def services(self) -> list[dict[str, Any]]:
+        out = self.out
+        services = [self.service(sid) for sid in out["labels"]]
+        for sid, names in out["data_labels"].items():
+            services.append({"sid": f"{sid:08X}", "name": names.most_common(1)[0][0], "type": "dati"})
+        services.sort(key=lambda s: s["name"].lower())
+        return services
+
+
+def decode(iq: np.ndarray, rate: int, offset_hz: float = 0.0, keep_state: bool = False) -> dict[str, Any] | None:
     """Nome del multiplex e servizi da una registrazione centrata sul canale (offset_hz = centro DAB − centro)."""
     if rate != RATE:
         return {"error": "serve la frequenza di campionamento 2,048 MS/s (Avanzate → Sample rate)"}
@@ -342,39 +390,18 @@ def decode(iq: np.ndarray, rate: int, offset_hz: float = 0.0) -> dict[str, Any] 
         return {"frames": len(starts), "fib_ok": 0, "fib_total": 0, "freq_offset_hz": round(coarse * 1000 + fine)}
 
     e, variant = best
-    out: dict[str, Any] = {"eid": Counter(), "ensemble": Counter(), "labels": {}, "data_labels": {},
-                           "audio_type": {}, "subch_of": {}, "subch": {}}
-    ok = total = 0
+    fic = FicState()
     soft = np.concatenate([_fic_soft(_symbols(x, s, 1 + FIC_SYMBOLS), e, variant).reshape(4, BLOCK_BITS)
                            for s in starts])
-    for fibs in _fic_blocks(soft):
-        for fib in fibs:
-            total += 1
-            if fib is not None:
-                ok += 1
-                _parse_fib(fib, out)
-    services = []
-    for sid, names in out["labels"].items():
-        svc = {"sid": f"{sid:04X}", "name": names.most_common(1)[0][0], "type": out["audio_type"].get(sid, "audio")}
-        sc = out["subch"].get(out["subch_of"].get(sid, -1))
-        if sc and "size" in sc:
-            from .dabplus import eep_bitrate  # noqa: PLC0415
-
-            svc.update(subch=out["subch_of"][sid], start=sc["start"], size=sc["size"], option=sc["option"],
-                       level=sc["level"], bitrate=eep_bitrate(sc["option"], sc["level"], sc["size"]),
-                       protection=f"EEP {sc['level'] + 1}-{'AB'[sc['option']] if sc['option'] < 2 else '?'}")
-        services.append(svc)
-    for sid, names in out["data_labels"].items():
-        services.append({"sid": f"{sid:08X}", "name": names.most_common(1)[0][0], "type": "dati"})
-    services.sort(key=lambda s: s["name"].lower())
-    eid = out["eid"].most_common(1)[0][0] if out["eid"] else None
+    fic.add(_fic_blocks(soft))
     return {
-        "ensemble": out["ensemble"].most_common(1)[0][0] if out["ensemble"] else None,
-        "eid": f"{eid:04X}" if eid is not None else None,
-        "services": services,
+        "ensemble": fic.ensemble,
+        "eid": fic.eid,
+        "services": fic.services(),
+        **({"fic_state": fic} if keep_state else {}),
         "frames": len(starts),
-        "fib_ok": ok,
-        "fib_total": total,
+        "fib_ok": fic.ok,
+        "fib_total": fic.total,
         "freq_offset_hz": round(e * 1000 + fine),
         "sync": {"offset": e, "variant": list(variant)},
     }
@@ -402,6 +429,8 @@ class DabStream:
         self.offset = 0
         self.variant: tuple[bool, bool, bool] = (False, False, False)
         self.lost = 0
+        self.fic: FicState | None = None
+        self._fic_pending: list[np.ndarray] = []
         k = np.arange(FFT_LEN)
         self._win = k + GUARD - WINDOW_BACKOFF
 
@@ -426,11 +455,12 @@ class DabStream:
         return frames
 
     def _acquire(self) -> None:
-        info = decode(self.buf, RATE)
+        info = decode(self.buf, RATE, keep_state=True)
         if not info or "sync" not in info:
             return
         starts = _frame_starts(self.buf)
         self.info = info
+        self.fic = info.pop("fic_state", None) or FicState()
         self.offset, self.variant = info["sync"]["offset"], tuple(info["sync"]["variant"])
         self.fine = _fine_offset(self.buf, starts)
         self.next_start = self.base + starts[-1]
@@ -456,6 +486,11 @@ class DabStream:
         resid = float(-np.angle(np.vdot(b.ravel(), a.ravel())) * RATE / (2 * np.pi * FFT_LEN))
         self.fine += 0.3 * resid
         soft = soft_bits(spectra, self.offset, self.variant)  # 75 x 3072
+        # il FIC si continua a leggere (nomi e sottocanali arrivano a turno): Viterbi ogni 10 trame
+        self._fic_pending.append(soft[:FIC_SYMBOLS].reshape(4, BLOCK_BITS))
+        if len(self._fic_pending) >= 10 and self.fic is not None:
+            self.fic.add(_fic_blocks(np.concatenate(self._fic_pending)))
+            self._fic_pending = []
         power = np.mean(np.abs(spectra) ** 2, axis=0)
         self.next_start = start + FRAME_LEN
         return {
