@@ -217,6 +217,7 @@ class SpectrumScanner:
         self.favorites: Any = None  # preferiti (Favorites), impostati dall'integrazione
         self._live_task: asyncio.Task | None = None
         self.last_slide: dict[str, str] | None = None  # ultima immagine della slideshow DAB+
+        self.last_dab: dict[str, Any] = {}  # ultimi dati della radio DAB+ (nome, testo, statistiche)
         self._live_stop_handle: asyncio.TimerHandle | None = None
         self._radio = asyncio.Lock()  # una sola connessione rtl_tcp alla volta
         self._listeners: list[Callable[[dict[str, Any]], None]] = []
@@ -280,9 +281,13 @@ class SpectrumScanner:
         if self.favorites is not None:
             out.append({"kind": "favorites", "favorites": self.favorites.items})
         live = self.status["live"]
-        if live and live.get("mode") == "dab" and self.last_slide:
-            out.append({"kind": "live_dab", "freq_mhz": live["freq_mhz"], "sid": live["sid"], "synced": True,
-                        "error": None, "slide": self.last_slide})
+        if live and live.get("mode") == "dab" and (self.last_slide or self.last_dab):
+            # un pannello aperto a diretta già avviata riceve subito nome, testo e immagine
+            ev = {"kind": "live_dab", "freq_mhz": live["freq_mhz"], "sid": live["sid"],
+                  "synced": "info" in self.last_dab, "error": None, **self.last_dab}
+            if self.last_slide:
+                ev["slide"] = self.last_slide
+            out.append(ev)
         return out
 
     def favorites_changed(self) -> None:
@@ -628,6 +633,7 @@ class SpectrumScanner:
         discard -= discard % 2
         rx = DabLiveReceiver(sid)
         self.last_slide = None
+        self.last_dab = {}
         chunk = dab.FRAME_LEN * 2  # due trame (192 ms) per lettura
         last_stats = 0.0
         try:
@@ -654,13 +660,15 @@ class SpectrumScanner:
                             payload["slide"] = out["slide"]
                             self.last_slide = out["slide"]
                         if "info" in out:
-                            payload["info"] = out["info"]
+                            payload["info"] = self.last_dab["info"] = out["info"]
                             if out["info"].get("service") and self.status["live"]:
                                 self.status["live"]["service"] = out["info"]["service"]
                                 self._emit(dict(self.status))
                         if loop.time() - last_stats >= 1 and "stats" in out:
                             last_stats = loop.time()
-                            payload.update(stats=out["stats"], dls=out["dls"])
+                            self.last_dab.update(stats=out["stats"], dls=out["dls"])
+                            # il nome della radio va ripetuto: un pannello aperto dopo l'aggancio non l'ha ricevuto
+                            payload.update(self.last_dab)
                         self._emit(payload)
                 finally:
                     writer.close()
