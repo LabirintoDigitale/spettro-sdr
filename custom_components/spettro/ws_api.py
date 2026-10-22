@@ -321,7 +321,8 @@ async def ws_favorite_remove(hass: HomeAssistant, connection: websocket_api.Acti
     {
         vol.Required("type"): "spettro/live_start",
         vol.Required("freq_mhz"): vol.All(vol.Coerce(float), vol.Range(min=24, max=1766)),
-        vol.Optional("mode"): vol.Any(None, vol.In(["wfm", "nfm", "am"])),
+        vol.Optional("mode"): vol.Any(None, vol.In(["wfm", "nfm", "am", "dab"])),
+        vol.Optional("sid"): vol.Any(None, str),
     }
 )
 @websocket_api.async_response
@@ -331,7 +332,7 @@ async def ws_live_start(hass: HomeAssistant, connection: websocket_api.ActiveCon
     if scanner is None:
         return
     try:
-        live = await scanner.live_start(msg["freq_mhz"] * 1e6, msg.get("mode"))
+        live = await scanner.live_start(msg["freq_mhz"] * 1e6, msg.get("mode"), msg.get("sid"))
     except RuntimeError as err:
         connection.send_error(msg["id"], "live_failed", str(err))
         return

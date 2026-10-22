@@ -334,9 +334,9 @@ def analyze_iq(
 
     # DAB: blocco largo ~1,5 MHz in un canale della banda III
     ch = dab.channel_for(result["center_mhz"]) or dab.channel_for(target_hz / 1e6)
-    result["dab_channel"] = result["dab"] = None
+    result["dab_channel"] = result["dab"] = result["dab_channel_mhz"] = None
     if ch and detected and result["obw_99_khz"] >= 600:
-        result["dab_channel"] = ch[0]
+        result["dab_channel"], result["dab_channel_mhz"] = ch
         result["audio_mode"] = None
         dab_offset = ch[1] * 1e6 - center_hz
         if abs(dab_offset) < 20e3:

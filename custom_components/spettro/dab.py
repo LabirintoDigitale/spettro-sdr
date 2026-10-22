@@ -214,8 +214,8 @@ def _coarse_offset(spectra: np.ndarray) -> int:
     return best
 
 
-def _fic_soft(spectra: np.ndarray, offset: int, variant: tuple[bool, bool, bool]) -> np.ndarray:
-    """9216 bit morbidi del FIC (3 simboli) dati i 4 spettri (riferimento + FIC)."""
+def soft_bits(spectra: np.ndarray, offset: int, variant: tuple[bool, bool, bool]) -> np.ndarray:
+    """Bit morbidi (3072 per simbolo) di ogni simbolo rispetto al precedente: righe = simboli 2…n."""
     conj, flip_re, flip_im = variant
     # I e Q scambiati: spettro specchiato (portante k nel bin −k) e coniugato
     bins = ((-CARRIER_OF if conj else CARRIER_OF) + offset) % FFT_LEN
@@ -233,7 +233,12 @@ def _fic_soft(spectra: np.ndarray, offset: int, variant: tuple[bool, bool, bool]
         re = -re
     if flip_im:
         im = -im
-    return np.concatenate([np.concatenate((re[k], im[k])) for k in range(FIC_SYMBOLS)]).astype(np.float32)
+    return np.concatenate((re, im), axis=1).astype(np.float32)
+
+
+def _fic_soft(spectra: np.ndarray, offset: int, variant: tuple[bool, bool, bool]) -> np.ndarray:
+    """9216 bit morbidi del FIC (3 simboli) dati i 4 spettri (riferimento + FIC)."""
+    return soft_bits(spectra[: 1 + FIC_SYMBOLS], offset, variant).reshape(-1)
 
 
 def _fic_blocks(soft: np.ndarray) -> list[list[bytes | None]]:
@@ -281,6 +286,21 @@ def _parse_fib(fib: bytes, out: dict[str, Any]) -> None:
         elif ftype == 0:
             ext = data[0] & 0x1F
             pd = (data[0] >> 5) & 1
+            if ext == 1:  # organizzazione dei sottocanali
+                j = 1
+                while j + 3 <= len(data):
+                    subch = data[j] >> 2
+                    start = ((data[j] & 0x03) << 8) | data[j + 1]
+                    if data[j + 2] & 0x80:  # forma lunga: protezione EEP
+                        if j + 4 > len(data):
+                            break
+                        option, level = (data[j + 2] >> 4) & 0x07, (data[j + 2] >> 2) & 0x03
+                        size = ((data[j + 2] & 0x03) << 8) | data[j + 3]
+                        out["subch"][subch] = {"start": start, "size": size, "option": option, "level": level}
+                        j += 4
+                    else:  # forma corta: protezione UEP (DAB classico)
+                        out["subch"][subch] = {"start": start, "uep": data[j + 2] & 0x3F}
+                        j += 3
             if ext == 2 and pd == 0:
                 j = 1
                 while j + 3 <= len(data):
@@ -293,6 +313,7 @@ def _parse_fib(fib: bytes, out: dict[str, Any]) -> None:
                         primary = (comps[k + 1] >> 1) & 1
                         if tmid == 0 and primary:
                             out["audio_type"][sid] = "DAB+" if ascty == 63 else "DAB" if ascty == 0 else f"audio {ascty}"
+                            out["subch_of"][sid] = comps[k + 1] >> 2
 
 
 def decode(iq: np.ndarray, rate: int, offset_hz: float = 0.0) -> dict[str, Any] | None:
@@ -321,7 +342,8 @@ def decode(iq: np.ndarray, rate: int, offset_hz: float = 0.0) -> dict[str, Any] 
         return {"frames": len(starts), "fib_ok": 0, "fib_total": 0, "freq_offset_hz": round(coarse * 1000 + fine)}
 
     e, variant = best
-    out: dict[str, Any] = {"eid": Counter(), "ensemble": Counter(), "labels": {}, "data_labels": {}, "audio_type": {}}
+    out: dict[str, Any] = {"eid": Counter(), "ensemble": Counter(), "labels": {}, "data_labels": {},
+                           "audio_type": {}, "subch_of": {}, "subch": {}}
     ok = total = 0
     soft = np.concatenate([_fic_soft(_symbols(x, s, 1 + FIC_SYMBOLS), e, variant).reshape(4, BLOCK_BITS)
                            for s in starts])
@@ -333,8 +355,15 @@ def decode(iq: np.ndarray, rate: int, offset_hz: float = 0.0) -> dict[str, Any] 
                 _parse_fib(fib, out)
     services = []
     for sid, names in out["labels"].items():
-        services.append({"sid": f"{sid:04X}", "name": names.most_common(1)[0][0],
-                         "type": out["audio_type"].get(sid, "audio")})
+        svc = {"sid": f"{sid:04X}", "name": names.most_common(1)[0][0], "type": out["audio_type"].get(sid, "audio")}
+        sc = out["subch"].get(out["subch_of"].get(sid, -1))
+        if sc and "size" in sc:
+            from .dabplus import eep_bitrate  # noqa: PLC0415
+
+            svc.update(subch=out["subch_of"][sid], start=sc["start"], size=sc["size"], option=sc["option"],
+                       level=sc["level"], bitrate=eep_bitrate(sc["option"], sc["level"], sc["size"]),
+                       protection=f"EEP {sc['level'] + 1}-{'AB'[sc['option']] if sc['option'] < 2 else '?'}")
+        services.append(svc)
     for sid, names in out["data_labels"].items():
         services.append({"sid": f"{sid:08X}", "name": names.most_common(1)[0][0], "type": "dati"})
     services.sort(key=lambda s: s["name"].lower())
@@ -347,4 +376,90 @@ def decode(iq: np.ndarray, rate: int, offset_hz: float = 0.0) -> dict[str, Any] 
         "fib_ok": ok,
         "fib_total": total,
         "freq_offset_hz": round(e * 1000 + fine),
+        "sync": {"offset": e, "variant": list(variant)},
     }
+
+
+# --- ricezione continua (analisi in diretta) ---------------------------------------
+
+
+class DabStream:
+    """Ricevitore DAB in streaming: blocchi IQ in ingresso, bit morbidi di FIC e CIF per ogni trama.
+
+    All'avvio si sincronizza con decode() sui primi ~0,6 s; poi segue l'inizio delle trame (simbolo
+    nullo) in una finestra stretta e lo scarto fine di frequenza dal prefisso ciclico, trama per trama.
+    """
+
+    ACQUIRE = FRAME_LEN * 6
+    TRACK = 64  # campioni di ricerca del simbolo nullo attorno alla posizione attesa
+
+    def __init__(self) -> None:
+        self.buf = np.empty(0, np.complex64)
+        self.base = 0  # posizione nel flusso di buf[0]
+        self.info: dict[str, Any] | None = None  # risultato di decode() all'aggancio
+        self.next_start: int | None = None
+        self.fine = 0.0
+        self.offset = 0
+        self.variant: tuple[bool, bool, bool] = (False, False, False)
+        self.lost = 0
+        k = np.arange(FFT_LEN)
+        self._win = k + GUARD - WINDOW_BACKOFF
+
+    def feed(self, x: np.ndarray) -> list[dict[str, Any]]:
+        """Aggiunge campioni; restituisce le trame elaborate ({"fic": 9216 bit, "msc": 4 x 55296, …})."""
+        self.buf = np.concatenate((self.buf, x.astype(np.complex64)))
+        if self.next_start is None:
+            if len(self.buf) < self.ACQUIRE:
+                return []
+            self._acquire()
+            if self.next_start is None:
+                self.buf = self.buf[-FRAME_LEN:]
+                self.base += self.ACQUIRE - FRAME_LEN
+                return []
+        frames = []
+        while self.next_start is not None and self.next_start + FRAME_LEN + self.TRACK <= self.base + len(self.buf):
+            frames.append(self._frame())
+        keep_from = (self.next_start - self.TRACK - self.base) if self.next_start is not None else len(self.buf) - FRAME_LEN
+        if keep_from > 0:
+            self.buf = self.buf[keep_from:]
+            self.base += keep_from
+        return frames
+
+    def _acquire(self) -> None:
+        info = decode(self.buf, RATE)
+        if not info or "sync" not in info:
+            return
+        starts = _frame_starts(self.buf)
+        self.info = info
+        self.offset, self.variant = info["sync"]["offset"], tuple(info["sync"]["variant"])
+        self.fine = _fine_offset(self.buf, starts)
+        self.next_start = self.base + starts[-1]
+        self.lost = 0
+
+    def _frame(self) -> dict[str, Any]:
+        rel = self.next_start - self.base
+        # simbolo nullo: dove l'energia è minima vicino alla posizione attesa
+        seg = self.buf[rel - self.TRACK : rel + NULL_LEN + self.TRACK]
+        c = np.concatenate(([0.0], np.cumsum(np.abs(seg) ** 2)))
+        win = c[NULL_LEN:] - c[:-NULL_LEN]
+        rel += int(np.argmin(win)) - self.TRACK
+        start = self.base + rel
+        # finestre FFT dei 76 simboli corrette per lo scarto fine (fase continua nel flusso)
+        t0 = rel + NULL_LEN + np.arange(76) * SYM_LEN
+        idx = t0[:, None] + self._win
+        phase = np.exp(-2j * np.pi * ((self.fine * (start - rel + idx) / RATE) % 1.0)).astype(np.complex64)
+        spectra = np.fft.fft(self.buf[idx] * phase, axis=1)
+        # scarto residuo dal prefisso ciclico (sui campioni già corretti) e aggiornamento lento
+        pre = (t0[:, None] + np.arange(GUARD))
+        a = self.buf[pre] * np.exp(-2j * np.pi * ((self.fine * (start - rel + pre) / RATE) % 1.0))
+        b = self.buf[pre + FFT_LEN] * np.exp(-2j * np.pi * ((self.fine * (start - rel + pre + FFT_LEN) / RATE) % 1.0))
+        resid = float(-np.angle(np.vdot(b.ravel(), a.ravel())) * RATE / (2 * np.pi * FFT_LEN))
+        self.fine += 0.3 * resid
+        soft = soft_bits(spectra, self.offset, self.variant)  # 75 x 3072
+        power = np.mean(np.abs(spectra) ** 2, axis=0)
+        self.next_start = start + FRAME_LEN
+        return {
+            "fic": soft[:FIC_SYMBOLS].reshape(-1),
+            "msc": soft[FIC_SYMBOLS:].reshape(4, -1),
+            "power": np.fft.fftshift(power),
+        }

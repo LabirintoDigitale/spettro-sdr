@@ -23,6 +23,7 @@ import numpy as np
 
 from . import dab, rds
 from .analysis import analyze_iq
+from .dabplus import DabLiveReceiver
 from .archive import SpikeArchive
 from .live import CHUNK, LIVE_RATE, LiveDemod
 
@@ -506,15 +507,24 @@ class SpectrumScanner:
             return "am"
         return "nfm"
 
-    async def live_start(self, freq_hz: float, mode: str | None = None) -> dict[str, Any]:
-        """Sintonizza la chiavetta fissa su freq_hz (scansione sospesa) e demodula di continuo."""
+    async def live_start(self, freq_hz: float, mode: str | None = None, sid: str | None = None) -> dict[str, Any]:
+        """Sintonizza la chiavetta fissa su freq_hz (scansione sospesa) e demodula di continuo.
+
+        mode "dab" con sid: una radio DAB+ del multiplex (freq_hz = centro del canale).
+        """
         if self.analyzing:
             raise RuntimeError("C'è un'analisi in corso, riprova tra qualche secondo")
+        if mode == "dab" and not sid:
+            raise RuntimeError("Scegli una radio del multiplex")
         await self.live_stop()
         mode = mode or self.live_mode_for(freq_hz)
-        self.status["live"] = {"freq_mhz": round(freq_hz / 1e6, 4), "mode": mode}
+        self.status["live"] = {"freq_mhz": round(freq_hz / 1e6, 4), "mode": mode, "sid": sid}
+        if mode == "dab":
+            ch = dab.channel_for(freq_hz / 1e6)
+            self.status["live"]["channel"] = ch[0] if ch else None
         self._update_active()  # la scansione si ferma al passo successivo e libera la chiavetta
-        self._live_task = asyncio.get_running_loop().create_task(self._live_run(freq_hz, mode), name="spettro_live")
+        run = self._live_dab_run(freq_hz, sid) if mode == "dab" else self._live_run(freq_hz, mode)
+        self._live_task = asyncio.get_running_loop().create_task(run, name="spettro_live")
         if self.viewers <= 0:
             self._schedule_live_stop()
         return self.status["live"]
@@ -603,6 +613,63 @@ class SpectrumScanner:
                 self._live_task = None
             self.status["live"] = None
             self._update_active()  # riparte la scansione, se è attiva
+
+    async def _live_dab_run(self, freq_hz: float, sid: str) -> None:
+        """Radio DAB+ in diretta: chiavetta al centro del canale a 2,048 MS/s, AU AAC al pannello."""
+        loop = asyncio.get_running_loop()
+        ch = dab.channel_for(freq_hz / 1e6)
+        center = ch[1] * 1e6 if ch else freq_hz
+        discard = RCV_BUF + 2 * READ_LIMIT + int(dab.RATE * 2 * max(self.settings.settle_ms, 100) / 1000)
+        discard -= discard % 2
+        rx = DabLiveReceiver(sid)
+        chunk = dab.FRAME_LEN * 2  # due trame (192 ms) per lettura
+        last_stats = 0.0
+        try:
+            async with self._radio:
+                reader, writer, tuner = await _open(self.host, self.port)
+                try:
+                    self.status["tuner"] = TUNER_NAMES.get(tuner, f"Tipo {tuner}")
+                    await self._configure(writer, dab.RATE)
+                    await self._send(writer, CMD_SET_FREQ, int(round(center)))
+                    async with asyncio.timeout(IO_TIMEOUT):
+                        await self._discard(reader, discard)
+                    while True:
+                        async with asyncio.timeout(IO_TIMEOUT):
+                            raw = await reader.readexactly(chunk * 2)
+                        out = await loop.run_in_executor(None, rx.process, raw)
+                        payload: dict[str, Any] = {"kind": "live_dab", "freq_mhz": round(center / 1e6, 4), "sid": sid,
+                                                   "synced": out["synced"], "error": out["error"]}
+                        if out["row"] is not None:
+                            payload.update(row=out["row"], span_hz=dab.RATE, level_db=out["level_db"])
+                        if out["aus"]:
+                            payload["aus"] = [base64.b64encode(a).decode() for a in out["aus"]]
+                            payload["config"] = out["config"]
+                        if "info" in out:
+                            payload["info"] = out["info"]
+                            if out["info"].get("service") and self.status["live"]:
+                                self.status["live"]["service"] = out["info"]["service"]
+                                self._emit(dict(self.status))
+                        if loop.time() - last_stats >= 1 and "stats" in out:
+                            last_stats = loop.time()
+                            payload.update(stats=out["stats"], dls=out["dls"])
+                        self._emit(payload)
+                finally:
+                    writer.close()
+                    try:
+                        await writer.wait_closed()
+                    except OSError:
+                        pass
+        except asyncio.CancelledError:
+            raise
+        except (OSError, TimeoutError, asyncio.IncompleteReadError, RtlTcpError) as err:
+            msg = str(err) or type(err).__name__
+            _LOGGER.warning("Analisi continua DAB interrotta: %s", msg)
+            self._emit({"kind": "live_error", "error": msg})
+        finally:
+            if asyncio.current_task() is self._live_task:
+                self._live_task = None
+            self.status["live"] = None
+            self._update_active()
 
     async def _live_rds(self, mpx: np.ndarray, fs: float) -> None:
         result = await asyncio.get_running_loop().run_in_executor(None, rds.decode, mpx, fs)

@@ -1,7 +1,7 @@
 // Pannello "Spettro" per Home Assistant: grafico dello spettro, waterfall e picchi.
 
 // deve coincidere con VERSION in const.py: se il backend ne riporta un'altra manca un riavvio
-const PANEL_VERSION = "1.8.1";
+const PANEL_VERSION = "1.9.0";
 
 const PRESETS = [
   ["Personalizzato", null, null],
@@ -159,6 +159,7 @@ class SpettroPanel extends HTMLElement {
     if (m.kind === "favorites") { this._favs = m.favorites; this._renderFavs(); this._updateFavBtn(); return; }
     if (m.kind === "live") { this._onLive(m); return; }
     if (m.kind === "live_rds") { this._onLiveRds(m.rds); return; }
+    if (m.kind === "live_dab") { this._onLiveDab(m); return; }
     if (m.kind === "live_error") { this._msg(`Analisi continua interrotta: ${m.error}`, true); return; }
     if (m.kind === "analysis") {
       if (m.entry && !this._archive.some((e) => e.id === m.entry.id)) {
@@ -972,12 +973,12 @@ class SpettroPanel extends HTMLElement {
     b.textContent = this._listen ? "🔊 Muto" : "🔇 Ascolta";
   }
 
-  async _liveStart(mhz, mode = null) {
+  async _liveStart(mhz, mode = null, sid = null) {
     if (mhz == null) return;
     this._setListen(true); // il tocco sul pulsante permette di avviare l'audio
     this._liveRestart = true; // la diretta precedente si ferma: l'audio resta acceso
     try {
-      await this._hass.callWS({ type: "spettro/live_start", freq_mhz: mhz, ...(mode ? { mode } : {}) });
+      await this._hass.callWS({ type: "spettro/live_start", freq_mhz: mhz, ...(mode ? { mode } : {}), ...(sid ? { sid } : {}) });
       this.shadowRoot.querySelector(".ana").scrollIntoView({ behavior: "smooth", block: "start" });
     } catch (err) {
       this._setListen(false);
@@ -995,22 +996,32 @@ class SpettroPanel extends HTMLElement {
     $("anaout").style.display = live ? "none" : "";
     $("analyze").disabled = this._sel === null || !!this._analyzing || !!live;
     if (!live) {
-      if (was && !this._liveRestart) { this._setListen(false); this._liveRows = null; }
+      if (was && !this._liveRestart) { this._setListen(false); this._liveRows = null; this._closeDec(); }
       return;
     }
-    if (!was || was.freq_mhz !== live.freq_mhz || was.mode !== live.mode) {
+    if (!was || was.freq_mhz !== live.freq_mhz || was.mode !== live.mode || was.sid !== live.sid) {
       this._liveRows = null;
       this._rtHistory = [];
       this._liveRds = null;
-      $("liverds").innerHTML = live.mode === "wfm" ? `<div class="hint" style="margin-top:6px">In attesa dei dati RDS…</div>` : "";
+      this._dabState = null;
+      this._closeDec();
+      $("liverds").innerHTML = live.mode === "wfm" ? `<div class="hint" style="margin-top:6px">In attesa dei dati RDS…</div>`
+        : live.mode === "dab" ? `<div class="hint" style="margin-top:6px">Aggancio del multiplex DAB…</div>` : "";
     }
-    $("livemode").value = live.mode;
+    $("livemode").style.display = live.mode === "dab" ? "none" : "";
+    if (live.mode !== "dab") $("livemode").value = live.mode;
     this._liveTitle();
   }
 
   _liveTitle() {
     const live = this._live;
     if (!live) return;
+    if (live.mode === "dab") {
+      const ens = this._dabState && this._dabState.info && this._dabState.info.ensemble;
+      this.shadowRoot.getElementById("livetitle").textContent =
+        `DAB ${live.channel || ""} · «${live.service || live.sid}»${ens ? ` (${ens})` : ""}`;
+      return;
+    }
     const fav = this._favFor(live.freq_mhz);
     const name = (fav && fav.source === "user" && fav.name)
       || (this._liveRds && this._liveRds.ps_complete && this._liveRds.ps) || (fav && fav.name) || "";
@@ -1039,14 +1050,148 @@ class SpettroPanel extends HTMLElement {
       if (v >= 32768) v -= 65536;
       ch[i] = v / 32768;
     }
+    this._schedule(buf);
+  }
+
+  _schedule(buf) {
+    const ctx = this._audioCtx;
     const now = ctx.currentTime;
     // piccola riserva contro i ritardi di rete; se si accumula troppo ritardo si riparte
-    if (this._nextT < now + 0.05 || this._nextT > now + 2) this._nextT = now + 0.4;
+    if (this._nextT < now + 0.05 || this._nextT > now + 3) this._nextT = now + 0.5;
     const src = ctx.createBufferSource();
     src.buffer = buf;
     src.connect(ctx.destination);
     src.start(this._nextT);
     this._nextT += buf.duration;
+  }
+
+  // ---------------------------------------------------------------- DAB+ in diretta
+
+  _onLiveDab(m) {
+    if (!this._live) this._setLive({ freq_mhz: m.freq_mhz, mode: "dab", sid: m.sid });
+    const st = this._dabState || (this._dabState = { info: null, stats: null, dls: null, error: null, audioErr: null, dlsHistory: [] });
+    const $ = (id) => this.shadowRoot.getElementById(id);
+    if (m.row) {
+      $("livelo").textContent = ((m.freq_mhz * 1e6 - 1.024e6) / 1e6).toFixed(3);
+      $("livehi").textContent = ((m.freq_mhz * 1e6 + 1.024e6) / 1e6).toFixed(3);
+      $("livelevel").textContent = `livello ${m.level_db} dBFS`;
+      this._drawLiveRow(m.row);
+    }
+    if (m.info) st.info = m.info;
+    if (m.error) st.error = m.error;
+    if (m.stats) st.stats = m.stats;
+    if (m.dls !== undefined && m.dls !== null) {
+      st.dls = m.dls;
+      if (!st.dlsHistory.length || st.dlsHistory[0].text !== m.dls) {
+        st.dlsHistory.unshift({ text: m.dls, time: new Date() });
+        st.dlsHistory = st.dlsHistory.slice(0, 20);
+      }
+    }
+    if (m.aus && m.config) this._dabAudio(m.config, m.aus);
+    st.synced = m.synced;
+    this._liveTitle();
+    this._renderDabLive();
+  }
+
+  _renderDabLive() {
+    const st = this._dabState;
+    const el = this.shadowRoot.getElementById("liverds");
+    if (!st) return;
+    if (st.error) { el.innerHTML = `<div class="err" style="margin-top:6px">${esc(st.error)}</div>`; return; }
+    if (!st.synced || !st.info) { el.innerHTML = `<div class="hint" style="margin-top:6px">Aggancio del multiplex DAB…</div>`; return; }
+    const s = st.stats;
+    const tot = s ? s.au_ok + s.au_bad : 0;
+    const rows = [
+      ["Radio", st.info.service || "—"],
+      ["Multiplex", st.info.ensemble || "—"],
+      ["Velocità", st.info.bitrate ? `${st.info.bitrate} kbit/s · ${st.info.protection || ""}` : "—"],
+      ["Testo (DLS)", st.dls || "—"],
+      ["Pacchetti audio integri", tot ? `${s.au_ok}/${tot} (${Math.round((100 * s.au_ok) / tot)}%)` : "in attesa…"],
+      ["Correzioni Reed-Solomon", s ? `${s.rs_fixed} byte${s.rs_failed ? ` · ${s.rs_failed} blocchi persi` : ""}` : "—"],
+    ];
+    el.innerHTML = `<h3 style="margin:10px 0 4px">DAB+ in diretta</h3>
+      <table><tbody>${rows.map(([k, v]) => `<tr><td>${k}</td><td class="num">${esc(v)}</td></tr>`).join("")}</tbody></table>
+      ${st.audioErr ? `<div class="err" style="margin-top:6px">${esc(st.audioErr)}</div>` : ""}
+      ${st.dlsHistory.length ? `<h3 style="margin:10px 0 4px">Testi ricevuti</h3><div id="livert">${st.dlsHistory
+        .map((r) => `<div><span>${r.time.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })}</span>${esc(r.text)}</div>`).join("")}</div>` : ""}`;
+  }
+
+  _closeDec() {
+    if (this._dec) { try { this._dec.close(); } catch (e) { /* già chiuso */ } }
+    this._dec = null;
+    this._decKey = null;
+    this._decQueue = [];
+  }
+
+  async _dabAudio(cfg, aus) {
+    // il decoder AAC del browser (WebCodecs): AAC con blocchi da 960 campioni, SBR e PS dalla configurazione
+    const key = cfg.asc + cfg.codec;
+    if (this._decKey !== key) {
+      this._closeDec();
+      this._decKey = key;
+      this._decQueue = [];
+      this._decReady = false;
+      this._setupDec(cfg);
+    }
+    if (!this._decReady) { this._decQueue.push(...aus); this._decQueue = this._decQueue.slice(-100); return; }
+    for (const a of aus) this._decodeAu(a);
+  }
+
+  async _setupDec(cfg) {
+    const st = this._dabState;
+    if (!("AudioDecoder" in window)) {
+      if (st) st.audioErr = "Questo browser non ha WebCodecs: per l'audio DAB+ usa Chrome, Edge o un Firefox recente.";
+      return;
+    }
+    const desc = new Uint8Array(cfg.asc.match(/../g).map((h) => parseInt(h, 16)));
+    let conf = null;
+    for (const codec of [...new Set([cfg.codec, "mp4a.40.5", "mp4a.40.2"])]) {
+      const c = { codec, sampleRate: cfg.sample_rate, numberOfChannels: cfg.channels, description: desc };
+      try { if ((await AudioDecoder.isConfigSupported(c)).supported) { conf = c; break; } } catch (e) { /* prova il prossimo */ }
+    }
+    if (!conf) {
+      if (st) st.audioErr = "Il browser non sa decodificare questo audio HE-AAC del DAB+.";
+      return;
+    }
+    this._dec = new AudioDecoder({
+      output: (ad) => this._playAudioData(ad),
+      error: (e) => {
+        if (this._dabState) this._dabState.audioErr = `Errore del decoder audio del browser: ${e.message}`;
+        this._dec = null; this._decKey = null;
+      },
+    });
+    this._dec.configure(conf);
+    this._decTs = 0;
+    this._decUs = (cfg.samples_per_au / cfg.sample_rate) * 1e6;
+    this._decReady = true;
+    const q = this._decQueue; this._decQueue = [];
+    for (const a of q) this._decodeAu(a);
+  }
+
+  _decodeAu(b64) {
+    if (!this._dec || this._dec.state !== "configured") return;
+    const bin = atob(b64);
+    const data = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) data[i] = bin.charCodeAt(i);
+    try {
+      this._dec.decode(new EncodedAudioChunk({ type: "key", timestamp: this._decTs, data }));
+    } catch (e) {
+      if (this._dabState) this._dabState.audioErr = `Errore del decoder audio del browser: ${e.message}`;
+    }
+    this._decTs += this._decUs;
+  }
+
+  _playAudioData(ad) {
+    if (!this._listen || !this._audioCtx) { ad.close(); return; }
+    const n = ad.numberOfFrames, chs = ad.numberOfChannels;
+    const buf = this._audioCtx.createBuffer(chs, n, ad.sampleRate);
+    for (let c = 0; c < chs; c++) {
+      const arr = new Float32Array(n);
+      ad.copyTo(arr, { planeIndex: c, format: "f32-planar" });
+      buf.copyToChannel(arr, c);
+    }
+    ad.close();
+    this._schedule(buf);
   }
 
   _drawLiveRow(row) {
@@ -1272,7 +1417,10 @@ class SpettroPanel extends HTMLElement {
             <tr><td>Scarto di frequenza</td><td class="num">${(m.freq_offset_hz / 1000).toFixed(1)} kHz</td></tr>
           </tbody></table>
           ${m.services.length ? `<h3 style="margin:8px 0 4px">Servizi (${m.services.length})</h3>
-          <table><tbody>${m.services.map((x) => `<tr><td>${esc(x.name)}</td><td class="num">${esc(x.type)}</td></tr>`).join("")}</tbody></table>` : ""}
+          <table><tbody>${m.services.map((x) => `<tr><td>${esc(x.name)}</td>
+            <td class="num">${esc(x.type)}${x.bitrate ? ` · ${x.bitrate} kbit/s` : ""}</td>
+            <td class="num">${x.type === "DAB+" && x.bitrate && r.dab_channel_mhz
+              ? `<button class="dabplay" data-sid="${esc(x.sid)}" title="Ascolta in diretta">▶</button>` : ""}</td></tr>`).join("")}</tbody></table>` : ""}
           <div class="hint" style="margin-top:4px">${m.fib_ok}/${m.fib_total} blocchi informativi integri in ${m.frames} trame${m.fib_ok < m.fib_total * 0.7 ? " · segnale al limite" : ""}</div>`;
       }
     }
@@ -1325,6 +1473,8 @@ class SpettroPanel extends HTMLElement {
       sel.addEventListener("change", () => { load(); player.play().catch(() => {}); });
       load();
     }
+    out.querySelectorAll("button.dabplay").forEach((b) => b.addEventListener("click", () =>
+      this._liveStart(r.dab_channel_mhz, "dab", b.dataset.sid)));
     const btn = this.shadowRoot.getElementById("askai");
     if (btn) btn.addEventListener("click", () => this._askAi());
   }
