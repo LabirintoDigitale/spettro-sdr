@@ -20,7 +20,15 @@ MODES: dict[str, tuple[float, float, float]] = {
     "wfm": (256e3, 125e3, 15e3),  # radio FM broadcast (canale largo: serve anche la sottoportante RDS)
     "nfm": (32e3, 7.5e3, 4e3),  # FM a banda stretta: radioamatori, PMR, marina
     "am": (32e3, 5e3, 4.5e3),  # banda aerea, onde medie/corte
+    "usb": (32e3, 1.5e3, 3e3),  # banda laterale superiore: radioamatori in onde corte, radiofax, SSTV
+    "lsb": (32e3, 1.5e3, 3e3),  # banda laterale inferiore (radioamatori sotto i 10 MHz)
 }
+SSB_MODES = ("usb", "lsb")
+
+
+def ssb_shift(mode: str) -> float:
+    """SSB: il canale (0–3 kHz audio) è centrato 1,5 kHz sopra (USB) o sotto (LSB) la portante."""
+    return 1500.0 if mode == "usb" else -1500.0
 DEEMPHASIS_S = 50e-6  # de-enfasi della FM broadcast in Europa
 
 
@@ -88,8 +96,13 @@ def demodulate(iq: np.ndarray, rate: int, offset_hz: float, mode: str) -> bytes:
         return wfm_audio(*fm_multiplex(iq, rate, offset_hz))
     target, half_bw, audio_bw = MODES[mode]
     decim = max(1, int(round(rate / target)))
-    z = _channel(iq, rate, offset_hz, decim, half_bw)
     mid_rate = rate / decim
+    if mode in SSB_MODES:
+        shift = ssb_shift(mode)
+        z = _channel(iq, rate, offset_hz + shift, decim, half_bw)
+        x = (z * np.exp(2j * np.pi * shift * np.arange(len(z)) / mid_rate)).real.astype(np.float64)
+        return _wav(_to_audio(x, mid_rate, audio_bw, deemph=False))
+    z = _channel(iq, rate, offset_hz, decim, half_bw)
     if mode == "am":
         x = np.abs(z).astype(np.float64)
     else:

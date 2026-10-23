@@ -19,6 +19,7 @@ Integrazione custom per **Home Assistant** che trasforma una chiavetta RTL-SDR c
 - **TV digitale (DVB-T/T2)**: riconosce i multiplex TV dei canali UHF 21–48 dalla struttura dei simboli OFDM e ne misura standard, modalità, intervallo di guardia e qualità (MER stimato), con una scheda dei canali trovati e un misuratore continuo per puntare l'antenna. Vedi [Misuratore di campo TV](#misuratore-di-campo-tv).
 - **TV satellitare**: con la chiavetta sul cavo della parabola riconosce il satellite (Hotbird, Astra…) dalla posizione dei transponder e misura il livello per puntare la parabola. Vedi [Satellite](#satellite-parabola-con-lnb).
 - **Satelliti meteo**: calcola i passaggi dei Meteor-M, li riceve da solo e ricostruisce le foto della Terra (LRPT), con anteprima in diretta e archivio. Vedi [Satelliti meteo](#satelliti-meteo-meteor-m).
+- **SSTV e radiofax**: immagini dalla ISS e dai radioamatori (SSTV) e carte del tempo in onde corte (radiofax DWD), con ascolto continuo e galleria. Onde corte con il direct sampling della chiavetta. Vedi [Immagini dalla radio](#immagini-dalla-radio-sstv-e-radiofax).
 - **Preferiti**: con il cuoricino ♡ accanto ad *Analizza* la frequenza selezionata (dal grafico o dall'archivio) entra nei preferiti e il cuore diventa ❤. La scheda *Preferiti* li elenca con il nome: quello RDS per le radio FM, altrimenti *NONAME 1*, *NONAME 2*…; con ✏ lo cambi a mano (un nome scritto da te non viene mai sostituito dall'RDS; lasciandolo vuoto torna automatico). Toccando la riga si seleziona la frequenza, ▶ avvia l'analisi continua, ❤ la toglie. I preferiti sono salvati in Home Assistant, quindi uguali su telefono e computer.
 - **Analisi continua (in diretta)**: dal pulsante *▶ Analisi continua* o dai preferiti la chiavetta resta sintonizzata fissa sulla frequenza (la scansione si sospende e alla fine riparte, solo se era attiva) e il pannello mostra in diretta la cascata che scorre, il livello del segnale e l'**audio** (FM larga, FM stretta o AM, con *Ascolta*/*Muto*). Per le radio FM l'**RDS si aggiorna** ogni secondo, con lo storico dei testi ricevuti (titoli, conduttori…). In diretta si usa 1,024 MS/s (circa 2 MB/s in rete); l'elaborazione avviene sul computer di Home Assistant. Se tutti i pannelli vengono chiusi l'analisi continua si ferma da sola dopo 30 s, per liberare la chiavetta.
 - **Ascolto**: la registrazione viene demodulata in FM larga (radio), FM stretta (voce) e AM; il pannello propone la più adatta in un lettore audio e si può passare alle altre.
@@ -193,6 +194,18 @@ Spettro riceve le **foto della Terra** trasmesse dai satelliti meteo russi **Met
 - Sui segnali di prova la ricezione funziona fino a un rapporto segnale/rumore di circa 2 dB e richiede circa metà del tempo reale di calcolo.
 
 I satelliti geostazionari **Meteosat** non si possono ricevere con la chiavetta: trasmettono a 3,75 Msym/s, oltre la sua banda, e servirebbe una parabola da 1,5–2 m.
+
+## Immagini dalla radio: SSTV e radiofax
+
+Oltre ai Meteor, Spettro decodifica le immagini trasmesse come suoni:
+
+- **SSTV della Stazione spaziale (ISS)**: durante gli eventi ARISS, più volte l'anno, la ISS trasmette serie di immagini su **145,800 MHz in FM**. Con **Ricevi l'SSTV della ISS ai passaggi** Spettro si sintonizza a ogni passaggio, calcolato come per i Meteor, e salva le immagini. Va bene la stessa antenna dei 137 MHz.
+- **SSTV dei radioamatori** in onde corte, per esempio 14,230 MHz (USB) o 7,171 e 3,730 MHz (LSB). Modi riconosciuti dal codice VIS: **PD50…PD290, Martin 1/2, Scottie 1/2/DX, Robot 36/72**. L'inclinazione dovuta all'orologio di chi trasmette viene corretta con gli impulsi di sincronismo.
+- **Radiofax meteo**: carte del tempo trasmesse ogni giorno dal servizio meteorologico tedesco **DWD** (3855, 7880, 13882,5 kHz) e da **Northwood**, Regno Unito (4610, 8040 kHz). Spettro riconosce il tono di avvio, allinea le righe con la fasatura e chiude la carta al tono di stop: 120 righe al minuto, 1810 pixel per riga.
+
+**Uso**: nella scheda **🛰️ Satelliti meteo e immagini** scegli una stazione dall'elenco e premi **▶ Ascolta**. La chiavetta resta su quella frequenza: si sente l'audio, l'immagine si disegna mentre arriva e a fine immagine viene salvata in **Immagini ricevute** (e nell'entità *Ultima immagine meteo*). L'ascolto continua anche a pannello chiuso, finché non premi **■ Ferma**. Durante qualsiasi analisi continua si può anche scegliere a mano la decodifica, *Immagini SSTV* o *Radiofax meteo*, accanto al modo (FM stretta, AM, **USB**, **LSB**).
+
+**Onde corte**: sotto i 24 MHz Spettro attiva da solo il **direct sampling** della chiavetta, che riceve senza passare dal sintonizzatore. È impostato sul ramo Q, quello delle Nooelec NESDR SMArt v5 e RTL-SDR Blog V3, e si cambia nelle impostazioni avanzate (*Onde corte*: Q, I o spento, per esempio con la RTL-SDR Blog V4, che le onde corte le ha già). Serve un **filo lungo 5–10 m** come antenna, meglio all'aperto: le antennine in dotazione non bastano. C'è anche il preset di scansione *Onde corte (0,5–30)*.
 
 ## Requisiti
 

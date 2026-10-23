@@ -14,7 +14,7 @@ import zlib
 import numpy as np
 
 from . import dab, dvbt, rds
-from .demod import MODES, demodulate, fm_multiplex, wfm_audio
+from .demod import MODES, SSB_MODES, demodulate, fm_multiplex, wfm_audio
 
 FFT_SIZE = 2048  # ~1 kHz di risoluzione e ~1 ms per riga a 2 MS/s
 USABLE_FRACTION = 0.8  # i bordi della banda sono attenuati dal filtro della chiavetta
@@ -326,7 +326,9 @@ def analyze_iq(
     offset = centroid - center_hz
     mpx, fs_mpx = fm_multiplex(iq, rate, offset)
     audio = {"wfm": wfm_audio(mpx, fs_mpx)}
-    audio.update({mode: demodulate(iq, rate, offset, mode) for mode in MODES if mode != "wfm"})
+    # SSB solo in onde corte: altrove è inutile e occuperebbe spazio nell'archivio
+    audio.update({mode: demodulate(iq, rate, offset, mode) for mode in MODES
+                  if mode != "wfm" and (mode not in SSB_MODES or target_hz < 30e6)})
     # RDS: solo per le stazioni FM broadcast (FM larga)
     result["rds"] = rds.decode(mpx, fs_mpx) if result["audio_mode"] == "wfm" else None
     if result["rds"] and result["rds"]["ps"] and result["rds"]["ps_complete"]:

@@ -23,6 +23,9 @@ from typing import Any
 import numpy as np
 
 from . import dab, dvbt, rds, satellite, weather
+from .analysis import encode_png
+from .fax import FaxDecoder
+from .sstv import SstvDecoder, ToneTracker
 from .analysis import analyze_iq
 from .dabplus import DabLiveReceiver
 from .archive import SpikeArchive
@@ -38,6 +41,8 @@ CMD_SET_GAIN_MODE = 0x03
 CMD_SET_GAIN = 0x04
 CMD_SET_FREQ_CORRECTION = 0x05
 CMD_SET_AGC_MODE = 0x08
+CMD_SET_DIRECT_SAMPLING = 0x09
+HF_MAX_HZ = 24e6  # sotto questa frequenza (onde corte) si usa il direct sampling, se attivo
 
 TUNER_NAMES = {
     0: "Sconosciuto",
@@ -97,6 +102,8 @@ class ScanSettings:
     meteo_auto: bool = False  # riceve da solo i passaggi dei satelliti meteo Meteor
     meteo_min_el: float = 20.0  # elevazione massima minima di un passaggio da ricevere (gradi)
     meteo_days: float = 7.0  # giorni dopo cui si cancellano le immagini meteo
+    iss_sstv: bool = False  # riceve l'SSTV della ISS ai suoi passaggi
+    hf_sampling: int = 2  # onde corte: direct sampling sul ramo Q (2), I (1) o spento (0, es. RTL-SDR Blog V4)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> ScanSettings:
@@ -235,6 +242,7 @@ class SpectrumScanner:
         self._meteo_loop_task: asyncio.Task | None = None
         self._meteo_done: set[tuple[int, float]] = set()  # passaggi già ricevuti (norad, aos)
         self._radio = asyncio.Lock()  # una sola connessione rtl_tcp alla volta
+        self._direct: dict[int, int] = {}  # direct sampling attivo per connessione
         self._listeners: list[Callable[[dict[str, Any]], None]] = []
         self._task: asyncio.Task | None = None
         self._wake = asyncio.Event()
@@ -414,7 +422,7 @@ class SpectrumScanner:
                 try:
                     self.status["tuner"] = TUNER_NAMES.get(tuner, f"Tipo {tuner}")
                     await self._configure(writer, rate)
-                    await self._send(writer, CMD_SET_FREQ, int(center))
+                    await self._tune(writer, center)
                     async with asyncio.timeout(IO_TIMEOUT + ANALYSIS_MAX_S):
                         await self._discard(reader, discard_bytes)
                         raw = await reader.readexactly(capture_bytes)
@@ -509,7 +517,7 @@ class SpectrumScanner:
         center = self._tune_center(freq_hz, rate)
         self._set_status(auto_mhz=round(freq_hz / 1e6, 4))
         try:
-            await self._send(writer, CMD_SET_FREQ, int(center))
+            await self._tune(writer, center)
             duration = min(self.settings.analysis_s, ANALYSIS_MAX_S)
             async with asyncio.timeout(IO_TIMEOUT + duration):
                 await self._discard(reader, discard)
@@ -554,10 +562,14 @@ class SpectrumScanner:
             return "am"
         return "nfm"
 
-    async def live_start(self, freq_hz: float, mode: str | None = None, sid: str | None = None) -> dict[str, Any]:
+    async def live_start(self, freq_hz: float, mode: str | None = None, sid: str | None = None,
+                         decoder: str | None = None, until: datetime | None = None,
+                         title: str | None = None) -> dict[str, Any]:
         """Sintonizza la chiavetta fissa su freq_hz (scansione sospesa) e demodula di continuo.
 
         mode "dab" con sid: una radio DAB+ del multiplex (freq_hz = centro del canale).
+        decoder "sstv"/"fax": immagini nell'audio, salvate nella galleria; continua anche senza
+        pannelli aperti (fino a `until`, se c'è).
         """
         if self.analyzing:
             raise RuntimeError("C'è un'analisi in corso, riprova tra qualche secondo")
@@ -565,7 +577,10 @@ class SpectrumScanner:
             raise RuntimeError("Scegli una radio del multiplex")
         await self.live_stop()
         mode = mode or self.live_mode_for(freq_hz)
-        self.status["live"] = {"freq_mhz": round(freq_hz / 1e6, 4), "mode": mode, "sid": sid}
+        if decoder and mode not in ("nfm", "am", "usb", "lsb"):
+            raise RuntimeError("SSTV e radiofax si decodificano in FM stretta, AM o SSB")
+        self.status["live"] = {"freq_mhz": round(freq_hz / 1e6, 4), "mode": mode, "sid": sid, "decoder": decoder,
+                               "until": until.timestamp() if until else None, "title": title}
         if mode == "dab":
             ch = dab.channel_for(freq_hz / 1e6)
             self.status["live"]["channel"] = ch[0] if ch else None
@@ -579,9 +594,10 @@ class SpectrumScanner:
             self.status["live"].update(self._sat_transponder(freq_hz / 1e6))
         self._update_active()  # la scansione si ferma al passo successivo e libera la chiavetta
         run = (self._live_dab_run(freq_hz, sid) if mode == "dab"
-               else self._live_tv_run(freq_hz, mode == "sat") if mode in ("tv", "sat") else self._live_run(freq_hz, mode))
+               else self._live_tv_run(freq_hz, mode == "sat") if mode in ("tv", "sat")
+               else self._live_run(freq_hz, mode, decoder, until, title))
         self._live_task = asyncio.get_running_loop().create_task(run, name="spettro_live")
-        if self.viewers <= 0:
+        if self.viewers <= 0 and not decoder:
             self._schedule_live_stop()
         return self.status["live"]
 
@@ -603,14 +619,17 @@ class SpectrumScanner:
 
         def check() -> None:
             self._live_stop_handle = None
-            if self.viewers <= 0 and self._live_task is not None:
+            live = self.status["live"] or {}
+            if self.viewers <= 0 and self._live_task is not None and not live.get("decoder"):
                 _LOGGER.info("Nessun pannello aperto: analisi continua fermata")
                 asyncio.get_running_loop().create_task(self.live_stop())
 
         self._live_stop_handle = asyncio.get_running_loop().call_later(LIVE_NO_VIEWER_STOP_S, check)
 
-    async def _live_run(self, freq_hz: float, mode: str) -> None:
+    async def _live_run(self, freq_hz: float, mode: str, decoder: str | None = None,
+                        until: datetime | None = None, title: str | None = None) -> None:
         loop = asyncio.get_running_loop()
+        img = _ImageListener(decoder, freq_hz, title) if decoder else None
         center = float(round(freq_hz + LIVE_RATE / 8))
         discard = RCV_BUF + 2 * READ_LIMIT + int(LIVE_RATE * 2 * max(self.settings.settle_ms, 100) / 1000)
         discard -= discard % 2
@@ -621,17 +640,19 @@ class SpectrumScanner:
                 try:
                     self.status["tuner"] = TUNER_NAMES.get(tuner, f"Tipo {tuner}")
                     await self._configure(writer, LIVE_RATE)
-                    await self._send(writer, CMD_SET_FREQ, int(center))
+                    await self._tune(writer, center)
                     async with asyncio.timeout(IO_TIMEOUT):
                         await self._discard(reader, discard)
                     demod = LiveDemod(LIVE_RATE, freq_hz - center, mode)
                     mpx: list[np.ndarray] = []
                     keep = int(LIVE_RDS_WINDOW_S * demod.mid)
                     last_rds = loop.time()
-                    while True:
+                    while until is None or datetime.now(UTC) < until:
                         async with asyncio.timeout(IO_TIMEOUT):
                             raw = await reader.readexactly(CHUNK * 2)
-                        out = await loop.run_in_executor(None, _live_chunk, demod, raw)
+                        out = await loop.run_in_executor(None, _live_chunk, demod, raw, img)
+                        if img is not None:
+                            await self._image_events(img, out)
                         self._emit({
                             "kind": "live",
                             "freq_mhz": round(freq_hz / 1e6, 4),
@@ -688,7 +709,7 @@ class SpectrumScanner:
                 try:
                     self.status["tuner"] = TUNER_NAMES.get(tuner, f"Tipo {tuner}")
                     await self._configure(writer, dab.RATE)
-                    await self._send(writer, CMD_SET_FREQ, int(round(center)))
+                    await self._tune(writer, center)
                     async with asyncio.timeout(IO_TIMEOUT):
                         await self._discard(reader, discard)
                     while True:
@@ -774,7 +795,7 @@ class SpectrumScanner:
                 try:
                     self.status["tuner"] = TUNER_NAMES.get(tuner, f"Tipo {tuner}")
                     await self._configure(writer, rate)
-                    await self._send(writer, CMD_SET_FREQ, int(round(center)))
+                    await self._tune(writer, center)
                     async with asyncio.timeout(IO_TIMEOUT):
                         await self._discard(reader, discard)
                     while True:
@@ -841,11 +862,20 @@ class SpectrumScanner:
                     now = datetime.now(UTC)
                     for p in m.passes:
                         key = (p["norad"], p["aos"].timestamp())
-                        if key in self._meteo_done:
+                        if key in self._meteo_done or p.get("kind") != "meteor":
                             continue
                         if p["aos"] - timedelta(seconds=30) <= now < p["los"] - timedelta(seconds=90):
                             self._meteo_done.add(key)
                             self._meteo_start(p)
+                            break
+                if self.settings.iss_sstv and self._meteo_task is None and not self.status["live"]:
+                    now = datetime.now(UTC)
+                    for p in m.passes:
+                        key = (p["norad"], p["aos"].timestamp())
+                        if p.get("kind") == "iss" and key not in self._meteo_done and p["aos"] <= now < p["los"]:
+                            self._meteo_done.add(key)
+                            await self.live_start(weather.ISS_FREQ, "nfm", decoder="sstv", until=p["los"],
+                                                  title="ISS")
                             break
             except asyncio.CancelledError:
                 raise
@@ -860,7 +890,7 @@ class SpectrumScanner:
         now = datetime.now(UTC)
         cand = []
         for n, sat in self.meteo.sats.items():
-            if norad is not None and n != norad:
+            if n not in weather.SATELLITES or (norad is not None and n != norad):
                 continue
             for p in orbit_passes(sat, self.meteo.observer, now - timedelta(minutes=20), 1, 0):
                 if p["aos"] - timedelta(minutes=3) <= now < p["los"]:
@@ -918,7 +948,7 @@ class SpectrumScanner:
                     while True:
                         freq = freqs[fi]
                         center = freq + weather.CENTER_OFFSET
-                        await self._send(writer, CMD_SET_FREQ, int(round(center)))
+                        await self._tune(writer, center)
                         async with asyncio.timeout(IO_TIMEOUT):
                             await self._discard(reader, discard)
                         rx = weather.MeteorReceiver(freq)
@@ -994,6 +1024,44 @@ class SpectrumScanner:
             if n:
                 self._emit({"kind": "meteo_pruned"})
 
+    async def _image_events(self, img: _ImageListener, out: dict[str, Any]) -> None:
+        """Stato, anteprima e immagini finite della decodifica SSTV/radiofax in diretta."""
+        loop = asyncio.get_running_loop()
+        payload: dict[str, Any] = {"kind": "live_image", "decoder": img.kind, **img.status()}
+        for ev in out.get("img_events", []):
+            if ev["event"] == "start":
+                img.mode_name = ev.get("mode")
+            if ev["event"] == "image":
+                payload["saved"] = await self._save_image(img, ev)
+        if loop.time() - img.last_preview >= 4 and payload["state"] != "attesa":
+            img.last_preview = loop.time()
+            png = await loop.run_in_executor(None, img.preview_png)
+            if png:
+                payload["preview"] = base64.b64encode(png).decode()
+        self._emit(payload)
+
+    async def _save_image(self, img: _ImageListener, ev: dict[str, Any]) -> dict[str, Any] | None:
+        if self.meteo_archive is None:
+            return None
+        loop = asyncio.get_running_loop()
+        pix = ev["image"]
+        if pix.ndim == 2:
+            pix = np.stack([pix] * 3, axis=2)
+        png = await loop.run_in_executor(None, encode_png, np.ascontiguousarray(pix))
+        f_mhz = round(img.freq_hz / 1e6, 4)
+        if img.kind == "sstv":
+            title = f"SSTV {img.title or ''}".strip() + f" · {ev.get('mode') or img.mode_name}"
+        else:
+            title = f"Radiofax {f_mhz * 1000 + 1.9:.1f} kHz"
+        meta = {"timestamp": time.time(), "norad": img.kind, "satellite": title, "max_el": None,
+                "rows": int(pix.shape[0]), "composite": ev.get("mode") or ("radiofax" if img.kind == "fax" else ""),
+                "freq_mhz": f_mhz, "source": img.kind, "complete": bool(ev.get("complete")),
+                "aos": None, "los": None, "northbound": False, "vcdu_ok": None, "vcdu_bad": None}
+        entry = await loop.run_in_executor(None, self.meteo_archive.add, meta, png, None)
+        self.last_meteo_png = png
+        self._emit({"kind": "meteo_image", "entry": entry})
+        return entry
+
     async def _live_rds(self, mpx: np.ndarray, fs: float) -> None:
         result = await asyncio.get_running_loop().run_in_executor(None, rds.decode, mpx, fs)
         if self.status["live"]:
@@ -1047,9 +1115,18 @@ class SpectrumScanner:
         writer.write(struct.pack(">BI", cmd, value & 0xFFFFFFFF))
         await writer.drain()
 
+    async def _tune(self, writer: asyncio.StreamWriter, freq_hz: float) -> None:
+        """Sintonizza; sotto i 24 MHz accende il direct sampling (onde corte senza sintonizzatore)."""
+        mode = self.settings.hf_sampling if freq_hz < HF_MAX_HZ else 0
+        if self._direct.get(id(writer), -1) != mode:
+            await self._send(writer, CMD_SET_DIRECT_SAMPLING, mode)
+            self._direct[id(writer)] = mode
+        await self._send(writer, CMD_SET_FREQ, int(round(freq_hz)))
+
     async def _configure(self, writer: asyncio.StreamWriter, rate: int) -> None:
         """Sample rate, correzione ppm e guadagno presi dalle impostazioni."""
         s = self.settings
+        self._direct = {id(writer): -1}  # nuova connessione: il direct sampling va reimpostato alla prima sintonia
         await self._send(writer, CMD_SET_SAMPLE_RATE, rate)
         await self._send(writer, CMD_SET_FREQ_CORRECTION, int(s.ppm))
         await self._send(writer, CMD_SET_AGC_MODE, 0)
@@ -1104,7 +1181,7 @@ class SpectrumScanner:
                 if not self._active.is_set():
                     raise ScanPaused
                 center = f_start + (i * keep + keep / 2) * bin_hz
-                await self._send(writer, CMD_SET_FREQ, int(round(center)))
+                await self._tune(writer, center)
                 async with asyncio.timeout(IO_TIMEOUT):
                     await self._discard(reader, discard_bytes)
                     raw = await reader.readexactly(capture_bytes)
@@ -1209,7 +1286,40 @@ class SpectrumScanner:
         self._emit(payload)
 
 
-def _live_chunk(demod: LiveDemod, raw: bytes) -> dict[str, Any]:
+class _ImageListener:
+    """Immagini nell'audio della diretta: SSTV o radiofax."""
+
+    def __init__(self, kind: str, freq_hz: float, title: str | None) -> None:
+        self.kind, self.freq_hz, self.title = kind, freq_hz, title
+        self.tracker = ToneTracker()
+        self.dec: SstvDecoder | FaxDecoder = SstvDecoder() if kind == "sstv" else FaxDecoder()
+        self.last_preview = 0.0
+        self.mode_name: str | None = None
+
+    def feed(self, pcm: bytes) -> list[dict[str, Any]]:
+        return self.dec.feed(self.tracker.feed(pcm))
+
+    def status(self) -> dict[str, Any]:
+        d = self.dec
+        if isinstance(d, SstvDecoder):
+            return {"state": d.state, "mode": d.mode.name if d.mode else None,
+                    "rows": d.done_periods * (d.mode.rows if d.mode else 1),
+                    "height": d.mode.height if d.mode else None}
+        return {"state": d.state, "mode": "Radiofax 120/576", "rows": d.progress_rows(), "height": None}
+
+    def preview_png(self) -> bytes | None:
+        img = self.dec.preview()
+        if img is None:
+            return None
+        if img.ndim == 2:  # radiofax: in scala di grigi, ridotto a metà
+            img = np.stack([img[::2, ::2]] * 3, axis=2)
+        return encode_png(np.ascontiguousarray(img))
+
+
+def _live_chunk(demod: LiveDemod, raw: bytes, img: _ImageListener | None = None) -> dict[str, Any]:
     """Un blocco di byte rtl_tcp elaborato dal demodulatore in diretta (nell'executor)."""
     a = np.frombuffer(raw, dtype=np.uint8).astype(np.float32) - 127.5
-    return demod.process((a[0::2] + 1j * a[1::2]).astype(np.complex64))
+    out = demod.process((a[0::2] + 1j * a[1::2]).astype(np.complex64))
+    if img is not None:
+        out["img_events"] = img.feed(out["pcm"])
+    return out

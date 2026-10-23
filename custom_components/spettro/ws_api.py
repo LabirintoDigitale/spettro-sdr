@@ -113,6 +113,7 @@ def ws_subscribe(hass: HomeAssistant, connection: websocket_api.ActiveConnection
         vol.Optional("analysis_s"): vol.All(vol.Coerce(float), vol.Range(min=0.2, max=ANALYSIS_MAX_S)),
         vol.Optional("auto_analyze"): bool,
         vol.Optional("lnb"): bool,
+        vol.Optional("hf_sampling"): vol.All(vol.Coerce(int), vol.In([0, 1, 2])),
         vol.Optional("archive_hours"): vol.All(vol.Coerce(float), vol.Range(min=1, max=24 * 90)),
         vol.Optional("reanalyze_min"): vol.All(vol.Coerce(float), vol.Range(min=0, max=7 * 24 * 60)),
         vol.Optional("auto_limit_step"): bool,
@@ -330,8 +331,10 @@ async def ws_favorite_remove(hass: HomeAssistant, connection: websocket_api.Acti
     {
         vol.Required("type"): "spettro/live_start",
         vol.Required("freq_mhz"): vol.All(vol.Coerce(float), vol.Range(min=24, max=1766)),
-        vol.Optional("mode"): vol.Any(None, vol.In(["wfm", "nfm", "am", "dab", "tv", "sat"])),
+        vol.Optional("mode"): vol.Any(None, vol.In(["wfm", "nfm", "am", "usb", "lsb", "dab", "tv", "sat"])),
         vol.Optional("sid"): vol.Any(None, str),
+        vol.Optional("decoder"): vol.Any(None, vol.In(["sstv", "fax"])),
+        vol.Optional("title"): vol.Any(None, str),
     }
 )
 @websocket_api.async_response
@@ -341,7 +344,8 @@ async def ws_live_start(hass: HomeAssistant, connection: websocket_api.ActiveCon
     if scanner is None:
         return
     try:
-        live = await scanner.live_start(msg["freq_mhz"] * 1e6, msg.get("mode"), msg.get("sid"))
+        live = await scanner.live_start(msg["freq_mhz"] * 1e6, msg.get("mode"), msg.get("sid"),
+                                        decoder=msg.get("decoder"), title=msg.get("title"))
     except RuntimeError as err:
         connection.send_error(msg["id"], "live_failed", str(err))
         return
@@ -413,6 +417,8 @@ async def ws_meteo_delete(hass: HomeAssistant, connection: websocket_api.ActiveC
         vol.Optional("meteo_auto"): bool,
         vol.Optional("meteo_min_el"): vol.All(vol.Coerce(float), vol.Range(min=0, max=90)),
         vol.Optional("meteo_days"): vol.All(vol.Coerce(float), vol.Range(min=0.5, max=365)),
+        vol.Optional("iss_sstv"): bool,
+        vol.Optional("hf_sampling"): vol.All(vol.Coerce(int), vol.In([0, 1, 2])),
     }
 )
 @websocket_api.require_admin

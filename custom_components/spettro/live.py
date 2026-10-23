@@ -12,7 +12,7 @@ from typing import Any
 
 import numpy as np
 
-from .demod import AUDIO_RATE, DEEMPHASIS_S, MARGIN_OUT, MODES, _channel
+from .demod import AUDIO_RATE, DEEMPHASIS_S, MARGIN_OUT, MODES, SSB_MODES, _channel, ssb_shift
 
 LIVE_RATE = 1_024_000  # 4 × 256 kHz e 32 × 32 kHz: tutte le decimazioni sono intere
 CHUNK_S = 0.25
@@ -34,6 +34,9 @@ class LiveDemod:
     def __init__(self, rate: int, offset_hz: float, mode: str) -> None:
         target, self.half_bw, audio_bw = MODES[mode]
         self.rate, self.offset, self.mode = rate, offset_hz, mode
+        self.shift = ssb_shift(mode) if mode in SSB_MODES else 0.0
+        self.offset += self.shift  # SSB: si filtra la banda audio, non la portante
+        self.out_index = 0
         self.decim = max(1, int(round(rate / target)))
         self.mid = rate / self.decim
         self.margin = MARGIN_OUT * self.decim
@@ -60,7 +63,11 @@ class LiveDemod:
         self.first += len(iq)
         self.tail = buf[-2 * self.margin :]
 
-        if self.mode == "am":
+        if self.shift:
+            n = self.out_index + np.arange(len(z))
+            x = (z * np.exp(2j * np.pi * self.shift * n / self.mid)).real.astype(np.float64)
+            self.out_index += len(z)
+        elif self.mode == "am":
             x = np.abs(z).astype(np.float64)
             self.dc = x.mean() if self.prev is None else 0.9 * self.dc + 0.1 * x.mean()
             x -= self.dc

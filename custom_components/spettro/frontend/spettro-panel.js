@@ -1,7 +1,7 @@
 // Pannello "Spettro" per Home Assistant: grafico dello spettro, waterfall e picchi.
 
 // deve coincidere con VERSION in const.py: se il backend ne riporta un'altra manca un riavvio
-const PANEL_VERSION = "1.13.1";
+const PANEL_VERSION = "1.14.0";
 
 const PRESETS = [
   ["Personalizzato", null, null],
@@ -18,7 +18,20 @@ const PRESETS = [
   ["ADS-B (1085–1095)", 1085, 1095],
   ["TV digitale UHF (470–694)", 470, 694],
   ["Satellite con LNB (950–1760)", 950, 1760],
+  ["Onde corte (0,5–30)", 0.5, 30],
   ["Tutto (24–1766)", 24, 1766],
+];
+// immagini nell'audio: [nome, MHz di sintonia, modo, decoder]. Il radiofax si riceve in USB 1,9 kHz sotto la frequenza assegnata
+const IMG_PRESETS = [
+  ["ISS · SSTV 145,800 MHz (FM)", 145.8, "nfm", "sstv"],
+  ["SSTV radioamatori 20 m · 14,230 MHz (USB)", 14.23, "usb", "sstv"],
+  ["SSTV radioamatori 40 m · 7,171 MHz (LSB)", 7.171, "lsb", "sstv"],
+  ["SSTV radioamatori 80 m · 3,730 MHz (LSB)", 3.73, "lsb", "sstv"],
+  ["Radiofax meteo DWD · 3855 kHz", 3.8531, "usb", "fax"],
+  ["Radiofax meteo DWD · 7880 kHz", 7.8781, "usb", "fax"],
+  ["Radiofax meteo DWD · 13882,5 kHz", 13.8806, "usb", "fax"],
+  ["Radiofax meteo Northwood (UK) · 4610 kHz", 4.6081, "usb", "fax"],
+  ["Radiofax meteo Northwood (UK) · 8040 kHz", 8.0381, "usb", "fax"],
 ];
 const SAMPLE_RATES = [250000, 1024000, 1400000, 1800000, 2048000, 2400000, 2560000, 2880000];
 const FFT_SIZES = [256, 512, 1024, 2048, 4096];
@@ -257,6 +270,7 @@ class SpettroPanel extends HTMLElement {
     if (m.kind === "live_dab") { this._onLiveDab(m); return; }
     if (m.kind === "live_tv") { this._onLiveTv(m); return; }
     if (m.kind === "live_sat") { this._onLiveSat(m); return; }
+    if (m.kind === "live_image") { this._onLiveImage(m); return; }
     if (m.kind === "meteo_passes") { this._meteoPasses = m; this._renderMeteoPasses(); return; }
     if (m.kind === "meteo_live") { this._onMeteoLive(m); return; }
     if (m.kind === "meteo_image" || m.kind === "meteo_pruned") { this._loadMeteo(m.entry ? m.entry.id : null); return; }
@@ -435,13 +449,15 @@ class SpettroPanel extends HTMLElement {
               <div class="livehead">
                 <span class="dot">● IN DIRETTA</span>
                 <span class="title" id="livetitle"></span>
-                <select id="livemode" title="Demodulazione"><option value="wfm">FM larga (radio)</option><option value="nfm">FM stretta (voce)</option><option value="am">AM</option></select>
+                <select id="livemode" title="Demodulazione"><option value="wfm">FM larga (radio)</option><option value="nfm">FM stretta (voce)</option><option value="am">AM</option><option value="usb">USB</option><option value="lsb">LSB</option></select>
+                <select id="livedec" title="Immagini nell'audio"><option value="">Nessuna decodifica</option><option value="sstv">Immagini SSTV</option><option value="fax">Radiofax meteo</option></select>
                 <button id="livelisten">🔇 Ascolta</button>
                 <button class="primary" id="livestop">■ Ferma</button>
               </div>
               <canvas id="livewf" style="margin-top:8px"></canvas>
               <div class="liveaxis"><span id="livelo"></span><span id="livelevel"></span><span id="livehi"></span></div>
               <img id="liveslide" class="slide" style="display:none" alt="Slideshow DAB+">
+              <div id="liveimg"></div>
               <div id="liverds"></div>
             </div>
             <div id="anaout"></div>
@@ -449,7 +465,7 @@ class SpettroPanel extends HTMLElement {
         </div>
         <div class="card" id="meteocard">
           <div class="row" style="justify-content:space-between">
-            <h3 style="margin:0">🛰️ Satelliti meteo</h3>
+            <h3 style="margin:0">🛰️ Satelliti meteo e immagini</h3>
             <button id="meteonow" title="Riceve subito il Meteor che sta passando adesso">Ricevi ora</button>
           </div>
           <div id="meteolive"></div>
@@ -457,6 +473,13 @@ class SpettroPanel extends HTMLElement {
             <label class="chk" title="Quando un Meteor passa sopra l'elevazione minima la scansione si sospende e la chiavetta lo riceve"><input type="checkbox" id="meteoauto"> Ricevi da solo i passaggi</label>
             <label style="width:150px">Elevazione minima (°)<input id="meteoel" type="number" min="0" max="90" step="5"></label>
             <label style="width:150px">Conserva (giorni)<input id="meteodays" type="number" min="1" max="365" step="1"></label>
+          </div>
+          <div class="row" style="margin-top:4px">
+            <label class="chk" title="Durante gli eventi ARISS la Stazione spaziale trasmette immagini SSTV su 145,800 MHz in FM: ai suoi passaggi la chiavetta si sintonizza e le decodifica"><input type="checkbox" id="isssstv"> Ricevi l'SSTV della ISS ai passaggi</label>
+          </div>
+          <div class="row" style="margin-top:4px">
+            <select id="imgpreset" style="flex:1;min-width:220px">${IMG_PRESETS.map((p, i) => `<option value="${i}">${p[0]}</option>`).join("")}</select>
+            <button id="imglisten" title="Resta in ascolto su questa frequenza e salva le immagini che arrivano (la scansione si sospende)">▶ Ascolta</button>
           </div>
           <div id="meteopasses" class="hint">Calcolo dei passaggi…</div>
           <h3 style="margin:12px 0 4px">Immagini ricevute</h3>
@@ -536,6 +559,9 @@ class SpettroPanel extends HTMLElement {
                 </label>
                 <label>Assestamento (ms)<input id="settle" type="number" step="10" min="0" max="1000"></label>
                 <label>Correzione (ppm)<input id="ppm" type="number" step="1" min="-200" max="200"></label>
+                <label title="Sotto i 24 MHz la chiavetta riceve senza sintonizzatore (direct sampling): Nooelec SMArt v5 e RTL-SDR Blog V3 sul ramo Q; la Blog V4 ha già le onde corte (spento)">Onde corte
+                  <select id="hfs"><option value="2">Direct sampling Q</option><option value="1">Direct sampling I</option><option value="0">Spento</option></select>
+                </label>
                 <label title="Quanto registrare per ogni analisi, sia con Analizza sia per i picchi analizzati in automatico (ogni secondo in più allunga la scansione per ogni picco nuovo)">Durata analisi
                   <select id="anadur"><option value="1">1 s</option><option value="2">2 s</option><option value="5">5 s</option></select>
                 </label>
@@ -601,7 +627,12 @@ class SpettroPanel extends HTMLElement {
       try { await this._hass.callWS({ type: "spettro/live_stop" }); } catch (err) { this._msg(err.message || String(err), true); }
     });
     $("livelisten").addEventListener("click", () => this._setListen(!this._listen));
-    $("livemode").addEventListener("change", (e) => { if (this._live) this._liveStart(this._live.freq_mhz, e.target.value); });
+    $("livemode").addEventListener("change", (e) => {
+      if (this._live) this._liveStart(this._live.freq_mhz, e.target.value, null, this._live.decoder || null);
+    });
+    $("livedec").addEventListener("change", (e) => {
+      if (this._live) this._liveStart(this._live.freq_mhz, this._live.mode, null, e.target.value || null);
+    });
     $("resume").addEventListener("click", async () => {
       try {
         await this._hass.callWS({ type: "spettro/set_enabled", enabled: true });
@@ -616,6 +647,12 @@ class SpettroPanel extends HTMLElement {
       try { await this._hass.callWS({ type: "spettro/meteo_config", ...changes }); } catch (err) { this._msg(err.message || String(err), true); }
     };
     $("meteoauto").addEventListener("change", (e) => meteoCfg({ meteo_auto: e.target.checked }));
+    $("isssstv").addEventListener("change", (e) => meteoCfg({ iss_sstv: e.target.checked }));
+    $("imglisten").addEventListener("click", () => {
+      const [name, mhz, mode, dec] = IMG_PRESETS[+$("imgpreset").value];
+      this._select(mhz * 1e6);
+      this._liveStart(mhz, mode, null, dec, name.startsWith("ISS") ? "ISS" : null);
+    });
     $("meteoel").addEventListener("change", (e) => meteoCfg({ meteo_min_el: Math.max(0, Math.min(90, parseFloat(e.target.value) || 0)) }));
     $("meteodays").addEventListener("change", (e) => meteoCfg({ meteo_days: Math.max(1, parseFloat(e.target.value) || 7) }));
     $("meteonow").addEventListener("click", async () => {
@@ -670,11 +707,13 @@ class SpettroPanel extends HTMLElement {
     $("fft").value = String(s.fft_size);
     $("settle").value = s.settle_ms;
     $("ppm").value = s.ppm;
+    $("hfs").value = String(s.hf_sampling ?? 2);
     $("anadur").value = String(s.analysis_s ?? 2);
     $("viewonly").checked = !!s.only_when_viewed;
     $("autoana").checked = !!s.auto_analyze;
     $("lnb").checked = !!s.lnb;
     $("meteoauto").checked = !!s.meteo_auto;
+    $("isssstv").checked = !!s.iss_sstv;
     if (this.shadowRoot.activeElement !== $("meteoel")) $("meteoel").value = s.meteo_min_el ?? 20;
     if (this.shadowRoot.activeElement !== $("meteodays")) $("meteodays").value = s.meteo_days ?? 7;
     $("lnbwarn").style.display = s.lnb ? "" : "none";
@@ -708,6 +747,7 @@ class SpettroPanel extends HTMLElement {
       fft_size: parseInt($("fft").value, 10),
       settle_ms: parseInt($("settle").value, 10) || 0,
       ppm: parseInt($("ppm").value, 10) || 0,
+      hf_sampling: parseInt($("hfs").value, 10),
       analysis_s: parseFloat($("anadur").value) || 2,
       only_when_viewed: $("viewonly").checked,
       auto_analyze: $("autoana").checked,
@@ -1190,12 +1230,13 @@ class SpettroPanel extends HTMLElement {
 
   }
 
-  async _liveStart(mhz, mode = null, sid = null) {
+  async _liveStart(mhz, mode = null, sid = null, decoder = null, title = null) {
     if (mhz == null) return;
     this._setListen(true); // il tocco sul pulsante permette di avviare l'audio
     this._liveRestart = true; // la diretta precedente si ferma: l'audio resta acceso
     try {
-      await this._hass.callWS({ type: "spettro/live_start", freq_mhz: mhz, ...(mode ? { mode } : {}), ...(sid ? { sid } : {}) });
+      await this._hass.callWS({ type: "spettro/live_start", freq_mhz: mhz, ...(mode ? { mode } : {}), ...(sid ? { sid } : {}),
+        ...(decoder ? { decoder } : {}), ...(title ? { title } : {}) });
       this.shadowRoot.querySelector(".ana").scrollIntoView({ behavior: "smooth", block: "start" });
     } catch (err) {
       this._setListen(false);
@@ -1236,6 +1277,13 @@ class SpettroPanel extends HTMLElement {
     const digital = live.mode === "dab" || live.mode === "tv" || live.mode === "sat";
     $("livemode").style.display = digital ? "none" : "";
     $("livelisten").style.display = live.mode === "tv" || live.mode === "sat" ? "none" : "";
+    $("livedec").style.display = ["nfm", "am", "usb", "lsb"].includes(live.mode) ? "" : "none";
+    $("livedec").value = live.decoder || "";
+    if (!live.decoder) { $("liveimg").innerHTML = ""; this._liveImgPreview = null; }
+    else if (!was || was.decoder !== live.decoder || was.freq_mhz !== live.freq_mhz) {
+      this._liveImgPreview = null;
+      $("liveimg").innerHTML = `<div class="hint" style="margin-top:6px">In ascolto: ${live.decoder === "fax" ? "una carta inizia con il tono di avvio" : "ogni immagine SSTV inizia con il codice VIS"}…</div>`;
+    }
     this._updateFavBtn();
     if (!digital) $("livemode").value = live.mode;
     this._liveTitle();
@@ -1414,7 +1462,7 @@ class SpettroPanel extends HTMLElement {
     el.innerHTML = `<div class="hint">${head}</div>
       <table style="margin-top:4px"><thead><tr><th>Quando</th><th>Satellite</th><th class="num">Elev. max</th><th>Direzione</th><th class="num">Durata</th></tr></thead>
       <tbody>${m.passes.slice(0, 8).map((p) => `<tr${p.aos <= now && now < p.los ? ' style="font-weight:500"' : ""}>
-        <td>${t(p.aos)}${p.aos <= now && now < p.los ? " · ora" : ""}</td><td>${esc(p.satellite)}</td><td class="num">${p.max_el}°</td>
+        <td>${t(p.aos)}${p.aos <= now && now < p.los ? " · ora" : ""}</td><td>${esc(p.satellite)}${p.kind === "iss" ? " · SSTV" : ""}</td><td class="num">${p.max_el}°</td>
         <td>${dir(p)}</td><td class="num">${Math.round((p.los - p.aos) / 60)} min</td></tr>`).join("")}</tbody></table>`;
   }
 
@@ -1448,7 +1496,8 @@ class SpettroPanel extends HTMLElement {
     el.className = "";
     el.innerHTML = `<table><tbody>${list.map((e) => `<tr data-id="${esc(e.id)}"${e.id === this._meteoSel ? ' class="sel"' : ""}>
       <td>${new Date(e.timestamp * 1000).toLocaleString([], { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" })}</td>
-      <td>${esc(e.satellite)}</td><td class="num">${e.max_el}°</td><td class="num">${e.rows} righe</td></tr>`).join("")}</tbody></table>`;
+      <td>${esc(e.satellite)}</td><td class="num">${e.max_el != null ? `${e.max_el}°` : e.source === "fax" ? "radiofax" : "SSTV"}</td>
+      <td class="num">${e.rows} righe</td></tr>`).join("")}</tbody></table>`;
     el.querySelectorAll("tr[data-id]").forEach((tr) => tr.addEventListener("click", () => this._openMeteo(tr.dataset.id)));
   }
 
@@ -1460,9 +1509,12 @@ class SpettroPanel extends HTMLElement {
     try {
       const r = await this._hass.callWS({ type: "spettro/meteo_get", entry_id: id, ir });
       const when = new Date(r.timestamp * 1000).toLocaleString();
+      const meteor = r.max_el != null;
       view.innerHTML = `<div class="meteogrid hint">
-          <span>${esc(r.satellite)} · ${when}</span><span>elevazione max ${r.max_el}° · ${r.northbound ? "da sud a nord" : "da nord a sud"}</span>
-          <span>${r.rows} righe · ${esc(ir ? "infrarosso (canale 5)" : r.composite)}</span><span>${r.vcdu_ok} trame valide su ${r.freq_mhz} MHz</span></div>
+          <span>${esc(r.satellite)} · ${when}</span>
+          ${meteor ? `<span>elevazione max ${r.max_el}° · ${r.northbound ? "da sud a nord" : "da nord a sud"}</span>` : `<span>${r.complete ? "completa" : "interrotta"}</span>`}
+          <span>${r.rows} righe · ${esc(ir ? "infrarosso (canale 5)" : r.composite)}</span>
+          <span>${meteor ? `${r.vcdu_ok} trame valide su ${r.freq_mhz} MHz` : `${r.freq_mhz} MHz`}</span></div>
         <div class="row">
           ${r.has_ir ? `<button id="meteoir">${ir ? "Visibile" : "Infrarosso"}</button>` : ""}
           <a id="meteodl" download="${esc(id)}${ir ? "-ir" : ""}.png"><button>Scarica</button></a>
@@ -1481,6 +1533,28 @@ class SpettroPanel extends HTMLElement {
     } catch (err) {
       view.innerHTML = `<div class="err">${esc(err.message || err.code || err)}</div>`;
     }
+  }
+
+  _onLiveImage(m) {
+    if (!this._live || !this._live.decoder) return;
+    if (m.preview) this._liveImgPreview = m.preview;
+    const el = this.shadowRoot.getElementById("liveimg");
+    const fax = m.decoder === "fax";
+    const st = {
+      attesa: fax ? "In attesa del tono di avvio di una carta…" : "In attesa di un'immagine (codice VIS)…",
+      avvio: "Tono di avvio ricevuto: sta per iniziare una carta",
+      fasatura: "Allineamento delle righe (fasatura)…",
+      immagine: "Ricezione della carta",
+      ricezione: "Ricezione dell'immagine",
+    }[m.state] || m.state;
+    const prog = m.height ? ` · ${m.rows}/${m.height} righe (${Math.round((100 * m.rows) / m.height)}%)` : m.rows ? ` · ${m.rows} righe` : "";
+    const until = this._live.until ? ` · fino alle ${new Date(this._live.until * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` : "";
+    el.innerHTML = `<h3 style="margin:10px 0 4px">${fax ? "Radiofax" : "SSTV"}${this._live.title ? ` · ${esc(this._live.title)}` : ""}</h3>
+      <div class="hint">${esc(st)}${m.mode && m.state !== "attesa" ? ` · ${esc(m.mode)}` : ""}${prog}${until}</div>
+      ${m.saved ? `<div class="hint" style="color:var(--success-color,#43a047)">✓ Immagine salvata in «Immagini ricevute».</div>` : ""}
+      ${this._liveImgPreview && m.state !== "attesa" ? `<img class="meteoimg" src="data:image/png;base64,${this._liveImgPreview}" alt="Immagine in arrivo">` : ""}
+      <div class="hint" style="margin-top:4px">Continua anche a pannello chiuso: le immagini finiscono nella galleria della scheda Satelliti meteo e immagini.</div>`;
+    if (m.saved) this._loadMeteo();
   }
 
   _onLiveSat(m) {

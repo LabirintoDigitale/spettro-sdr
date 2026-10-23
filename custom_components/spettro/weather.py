@@ -27,6 +27,8 @@ SATELLITES: dict[int, tuple[str, tuple[float, ...]]] = {
     57166: ("Meteor-M2 3", (137.9e6, 137.1e6)),
     59051: ("Meteor-M2 4", (137.1e6, 137.9e6)),
 }
+ISS_NORAD = 25544  # Stazione spaziale: SSTV su 145,800 MHz durante gli eventi ARISS
+ISS_FREQ = 145.8e6
 TLE_URL = "https://celestrak.org/NORAD/elements/gp.php?CATNR={norad}&FORMAT=tle"
 TLE_MAX_AGE_S = 12 * 3600
 PASS_HOURS = 36
@@ -53,7 +55,7 @@ class MeteoArchive:
         self.entries = out
 
     def add(self, meta: dict[str, Any], png: bytes, ir_png: bytes | None) -> dict[str, Any]:
-        stamp = time.strftime("%Y%m%d-%H%M", time.localtime(meta["timestamp"]))
+        stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime(meta["timestamp"]))
         entry_id = f"{stamp}-{meta['norad']}"
         self.path.mkdir(parents=True, exist_ok=True)
         (self.path / f"{entry_id}.png").write_bytes(png)
@@ -108,7 +110,8 @@ class Meteo:
     def set_tles(self, tles: dict[int, tuple[str, str, str]], when: float) -> None:
         for norad, (name, l1, l2) in tles.items():
             try:
-                self.sats[norad] = orbit.Satellite(SATELLITES.get(norad, (name,))[0], l1, l2)
+                label = "ISS" if norad == ISS_NORAD else SATELLITES.get(norad, (name,))[0]
+                self.sats[norad] = orbit.Satellite(label, l1, l2)
                 self.tle_text[norad] = (name, l1, l2)
             except orbit.TleError as err:
                 _LOGGER.warning("TLE di %s non valido: %s", name, err)
@@ -120,7 +123,7 @@ class Meteo:
         if self.fetch is None:
             return False
         got: dict[int, tuple[str, str, str]] = {}
-        for norad in SATELLITES:
+        for norad in (*SATELLITES, ISS_NORAD):
             try:
                 text = await self.fetch(TLE_URL.format(norad=norad))
             except Exception as err:  # noqa: BLE001 - rete o servizio: si riprova più tardi
@@ -141,7 +144,9 @@ class Meteo:
         for norad, sat in self.sats.items():
             for p in orbit.passes(sat, self.observer, now - timedelta(minutes=20), PASS_HOURS, min_el):
                 if p["los"] > now:
-                    out.append({**p, "norad": norad, "satellite": sat.name, "freqs": list(SATELLITES[norad][1])})
+                    iss = norad == ISS_NORAD
+                    out.append({**p, "norad": norad, "satellite": sat.name, "kind": "iss" if iss else "meteor",
+                                "freqs": [ISS_FREQ] if iss else list(SATELLITES.get(norad, ("", (137.9e6,)))[1])})
         out.sort(key=lambda p: p["aos"])
         self.passes = out
         self.passes_time = time.time()
@@ -161,7 +166,8 @@ class Meteo:
             "passes": [pass_json(p) for p in self.passes[:12]],
             "tle_age_h": round((time.time() - self.tle_time) / 3600, 1) if self.tle_time else None,
             "tle_error": self.tle_error,
-            "satellites": [{"norad": n, "name": SATELLITES[n][0], "loaded": n in self.sats} for n in SATELLITES],
+            "satellites": [{"norad": n, "name": SATELLITES[n][0], "loaded": n in self.sats} for n in SATELLITES]
+            + [{"norad": ISS_NORAD, "name": "ISS", "loaded": ISS_NORAD in self.sats}],
             "location": [round(self.location[0], 2), round(self.location[1], 2)],
         }
 
@@ -170,7 +176,7 @@ def pass_json(p: dict[str, Any]) -> dict[str, Any]:
     return {
         "norad": p["norad"], "satellite": p["satellite"], "max_el": p["max_el"],
         "aos": p["aos"].timestamp(), "los": p["los"].timestamp(), "tca": p["tca"].timestamp(),
-        "az_aos": p["az_aos"], "az_los": p["az_los"], "northbound": p["northbound"],
+        "az_aos": p["az_aos"], "az_los": p["az_los"], "northbound": p["northbound"], "kind": p.get("kind", "meteor"),
     }
 
 
