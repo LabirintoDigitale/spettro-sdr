@@ -18,7 +18,7 @@ AUDIO_MODES = ("wfm", "nfm", "am", "usb", "lsb")  # audio demodulato salvato con
 
 # campi dell'analisi copiati nell'indice (quello che serve a elenchi e tabella dei picchi)
 META_FIELDS = ("target_mhz", "center_mhz", "kind", "snr_db", "peak_db", "obw_99_khz", "duty_cycle", "audio_mode",
-               "scan_snr_db")
+               "scan_snr_db", "iq_bytes")
 
 
 class SpikeArchive:
@@ -40,7 +40,8 @@ class SpikeArchive:
 
     def _files(self, entry_id: str) -> list[Path]:
         # nomi esatti: una ricerca nella cartella per ogni analisi, con migliaia di file, dura minuti
-        names = [f"{entry_id}.json", f"{entry_id}.png", *(f"{entry_id}.{m}.wav" for m in AUDIO_MODES)]
+        names = [f"{entry_id}.json", f"{entry_id}.png", f"{entry_id}.cu8",
+                 *(f"{entry_id}.{m}.wav" for m in AUDIO_MODES)]
         return [self.path / n for n in names]
 
     def _size(self, entry_id: str) -> int:
@@ -62,7 +63,7 @@ class SpikeArchive:
         meta.update({k: result.get(k) for k in META_FIELDS})
         return meta
 
-    def add(self, result: dict[str, Any], png: bytes, audio: dict[str, bytes]) -> dict[str, Any]:
+    def add(self, result: dict[str, Any], png: bytes, audio: dict[str, bytes], iq: bytes | None = None) -> dict[str, Any]:
         stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime(result["timestamp"]))
         entry_id = f"{stamp}-{round(result['target_mhz'] * 1000)}"
         n = 1
@@ -73,6 +74,10 @@ class SpikeArchive:
         (self.path / f"{entry_id}.png").write_bytes(png)
         for mode, wav in audio.items():
             (self.path / f"{entry_id}.{mode}.wav").write_bytes(wav)
+        if iq:
+            # registrazione grezza della chiavetta (I e Q a 8 bit senza segno, come rtl_sdr)
+            (self.path / f"{entry_id}.cu8").write_bytes(iq)
+            result = {**result, "iq_bytes": len(iq)}
         (self.path / f"{entry_id}.json").write_text(json.dumps(result))
         meta = self._meta(entry_id, result, self._size(entry_id))
         self.entries.insert(0, meta)
@@ -93,6 +98,13 @@ class SpikeArchive:
                 audio[mode] = f.read_bytes()
         return result, png, audio
 
+    def iq_path(self, entry_id: str) -> Path | None:
+        """File della registrazione grezza di un'analisi, se è stata salvata."""
+        if not any(e["id"] == entry_id for e in self.entries):
+            return None
+        p = self.path / f"{entry_id}.cu8"
+        return p if p.exists() else None
+
     def _remove_files(self, entry_id: str) -> None:
         for f in self._files(entry_id):
             f.unlink(missing_ok=True)
@@ -108,7 +120,7 @@ class SpikeArchive:
         count = len(self.entries)
         # tutta la cartella in una passata (anche file rimasti orfani)
         for f in self.path.iterdir():
-            if f.is_file() and f.suffix in (".json", ".png", ".wav"):
+            if f.is_file() and f.suffix in (".json", ".png", ".wav", ".cu8"):
                 f.unlink(missing_ok=True)
         self.entries = []
         return count

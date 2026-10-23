@@ -99,6 +99,7 @@ class ScanSettings:
     auto_limit_sweep: bool = False  # limita i picchi analizzati per scansione completa
     auto_max_per_sweep: int = 20
     analysis_s: float = 2.0  # durata della registrazione di ogni analisi, manuale o automatica
+    save_iq_auto: bool = False  # salva la registrazione grezza (IQ) anche delle analisi automatiche
     lnb: bool = False  # c'è un LNB satellitare sul cavo: 950–2150 MHz sono transponder TV
     meteo_auto: bool = False  # riceve da solo i passaggi dei satelliti meteo Meteor
     meteo_min_el: float = 20.0  # elevazione massima minima di un passaggio da ricevere (gradi)
@@ -491,10 +492,11 @@ class SpectrumScanner:
         finally:
             self.analyzing = False
             self._update_active()  # riparte la scansione
-        return await self._store_analysis(result, png, audio, auto=False)
+        result["tune_hz"] = center  # frequenza a cui era sintonizzata la chiavetta (centro della registrazione)
+        return await self._store_analysis(result, png, audio, auto=False, iq=raw)
 
     async def _store_analysis(
-        self, result: dict[str, Any], png: bytes, audio: dict[str, bytes], auto: bool
+        self, result: dict[str, Any], png: bytes, audio: dict[str, bytes], auto: bool, iq: bytes | None = None
     ) -> dict[str, Any]:
         """Ultima analisi in memoria, archivio su disco e notifica a pannello ed entità."""
         result["timestamp"] = time.time()
@@ -502,8 +504,10 @@ class SpectrumScanner:
         entry = None
         if self.archive is not None:
             try:
-                entry = await asyncio.get_running_loop().run_in_executor(None, self.archive.add, result, png, audio)
+                entry = await asyncio.get_running_loop().run_in_executor(
+                    None, self.archive.add, result, png, audio, iq)
                 result["id"] = entry["id"]
+                result["iq_bytes"] = entry.get("iq_bytes")
             except OSError as err:
                 _LOGGER.warning("Impossibile salvare l'analisi nell'archivio: %s", err)
         self.last_analysis = result
@@ -589,7 +593,8 @@ class SpectrumScanner:
                         raise ConnectionError("Connessione chiusa dal server")
             result, png, audio = job.result()
             result["scan_snr_db"] = scan_snr  # quanto stava sopra il rumore nella scansione
-            await self._store_analysis(result, png, audio, auto=True)
+            result["tune_hz"] = center
+            await self._store_analysis(result, png, audio, auto=True, iq=raw if self.settings.save_iq_auto else None)
         finally:
             self._set_status(auto_mhz=None)
 

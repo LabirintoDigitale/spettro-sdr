@@ -1,7 +1,7 @@
 // Pannello "Spettro" per Home Assistant: grafico dello spettro, waterfall e picchi.
 
 // deve coincidere con VERSION in const.py: se il backend ne riporta un'altra manca un riavvio
-const PANEL_VERSION = "1.15.0";
+const PANEL_VERSION = "1.16.0";
 
 const PRESETS = [
   ["Personalizzato", null, null],
@@ -579,6 +579,8 @@ class SpettroPanel extends HTMLElement {
                   <select id="anadur"><option value="1">1 s</option><option value="2">2 s</option><option value="5">5 s</option></select>
                 </label>
               </div>
+              <label class="chk" style="margin-top:6px" title="Le analisi fatte a mano salvano sempre la registrazione grezza (circa 4 MB al secondo); le automatiche solo con questa opzione, perché riempirebbero il disco">
+                <input type="checkbox" id="saveiq"> Salva la registrazione IQ anche delle analisi automatiche</label>
             </details>
             <div class="row" style="margin-top:10px">
               <button class="primary" id="apply">Applica</button>
@@ -597,7 +599,7 @@ class SpettroPanel extends HTMLElement {
     this._menu.narrow = this._narrow;
 
     const form = ["start", "stop", "interval", "gain", "threshold", "viewonly", "autoana", "lnb", "reana", "archhours", "limstep", "maxstep", "limsweep", "maxsweep",
-      "rate", "fft", "settle", "ppm", "anadur"];
+      "rate", "fft", "settle", "ppm", "anadur", "hfs", "saveiq"];
     for (const id of form) $(id).addEventListener("input", () => {
       this._formDirty = true;
       if (id === "start" || id === "stop") $("preset").value = "0";
@@ -742,6 +744,7 @@ class SpettroPanel extends HTMLElement {
     $("viewonly").checked = !!s.only_when_viewed;
     $("autoana").checked = !!s.auto_analyze;
     $("lnb").checked = !!s.lnb;
+    $("saveiq").checked = !!s.save_iq_auto;
     $("meteoauto").checked = !!s.meteo_auto;
     $("isssstv").checked = !!s.iss_sstv;
     if (this.shadowRoot.activeElement !== $("meteoel")) $("meteoel").value = s.meteo_min_el ?? 20;
@@ -782,6 +785,7 @@ class SpettroPanel extends HTMLElement {
       only_when_viewed: $("viewonly").checked,
       auto_analyze: $("autoana").checked,
       lnb: $("lnb").checked,
+      save_iq_auto: $("saveiq").checked,
       reanalyze_min: Math.max(0, parseFloat($("reana").value) || 0),
       archive_hours: Math.max(1, parseFloat($("archhours").value) || 24),
       auto_limit_step: $("limstep").checked,
@@ -2225,6 +2229,12 @@ class SpettroPanel extends HTMLElement {
           <audio id="player" controls preload="auto" style="flex:1;min-width:200px;height:36px"></audio>
         </div>
         ${r.audio_mode ? "" : `<div class="hint">Segnale digitale: demodulato si sente solo rumore.</div>`}` : ""}
+      ${r.iq_bytes && r.id ? `<div class="row">
+          <span class="hint">Registrazione grezza (${(r.iq_bytes / 1e6).toFixed(1)} MB, ${(r.sample_rate / 1e6).toFixed(3)} MS/s
+            centrata su ${((r.tune_hz || r.target_mhz * 1e6) / 1e6).toFixed(4)} MHz):</span>
+          <button class="iqdl" data-fmt="wav" title="WAV IQ a 16 bit: SDR#, SDR++, SDRangel, SatDump, Universal Radio Hacker">⬇ WAV IQ</button>
+          <button class="iqdl" data-fmt="cu8" title="Byte grezzi della chiavetta, come rtl_sdr (I e Q a 8 bit senza segno)">⬇ cu8</button>
+        </div>` : ""}
       ${aiCtl}`;
     const player = this.shadowRoot.getElementById("player");
     if (player) {
@@ -2244,6 +2254,20 @@ class SpettroPanel extends HTMLElement {
       // le analisi delle versioni precedenti non hanno il centro del canale: va bene qualsiasi
       // frequenza del blocco, il backend risale al canale
       this._liveStart(r.dab_channel_mhz || r.center_mhz, "dab", b.dataset.sid)));
+    out.querySelectorAll("button.iqdl").forEach((b) => b.addEventListener("click", async () => {
+      // link firmato (valido pochi minuti): il file è grande, si scarica fuori dal websocket
+      try {
+        const res = await this._hass.callWS({ type: "spettro/iq_url", entry_id: r.id, format: b.dataset.fmt });
+        const a = document.createElement("a");
+        a.href = res.url;
+        a.download = "";
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+      } catch (err) {
+        this._msg(err.message || String(err), true);
+      }
+    }));
     const tvb = this.shadowRoot.getElementById("tvlive");
     if (tvb) tvb.addEventListener("click", () => this._liveStart(r.tv_channel_mhz, "tv"));
     const btn = this.shadowRoot.getElementById("askai");

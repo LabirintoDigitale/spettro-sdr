@@ -3,18 +3,21 @@
 from __future__ import annotations
 
 import base64
+from datetime import timedelta
 import logging
 from typing import Any
 
 import voluptuous as vol
 
 from homeassistant.components import websocket_api
+from homeassistant.components.http.auth import async_sign_path
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import entity_registry as er
 
 from .analysis import describe
+from .download import FORMATS, IqDownloadView, iq_url
 from .const import DATA_WS_REGISTERED, DOMAIN, OPT_ENABLED
 from .scanner import ANALYSIS_MAX_S, FFT_SIZES, SAMPLE_RATES, ScanSettings
 
@@ -55,6 +58,8 @@ def async_setup(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, ws_favorite_remove)
     websocket_api.async_register_command(hass, ws_live_start)
     websocket_api.async_register_command(hass, ws_live_stop)
+    websocket_api.async_register_command(hass, ws_iq_url)
+    hass.http.register_view(IqDownloadView())
     websocket_api.async_register_command(hass, ws_meteo_list)
     websocket_api.async_register_command(hass, ws_meteo_get)
     websocket_api.async_register_command(hass, ws_meteo_delete)
@@ -113,6 +118,7 @@ def ws_subscribe(hass: HomeAssistant, connection: websocket_api.ActiveConnection
         vol.Optional("analysis_s"): vol.All(vol.Coerce(float), vol.Range(min=0.2, max=ANALYSIS_MAX_S)),
         vol.Optional("auto_analyze"): bool,
         vol.Optional("lnb"): bool,
+        vol.Optional("save_iq_auto"): bool,
         vol.Optional("hf_sampling"): vol.All(vol.Coerce(int), vol.In([0, 1, 2])),
         vol.Optional("archive_hours"): vol.All(vol.Coerce(float), vol.Range(min=1, max=24 * 90)),
         vol.Optional("reanalyze_min"): vol.All(vol.Coerce(float), vol.Range(min=0, max=7 * 24 * 60)),
@@ -464,3 +470,17 @@ async def ws_meteo_stop(hass: HomeAssistant, connection: websocket_api.ActiveCon
         return
     await scanner.meteo_stop()
     connection.send_result(msg["id"], {})
+
+
+@websocket_api.websocket_command(
+    {vol.Required("type"): "spettro/iq_url", vol.Required("entry_id"): str, vol.Required("format"): vol.In(FORMATS)}
+)
+@callback
+def ws_iq_url(hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]) -> None:
+    """Link firmato (valido 10 minuti) per scaricare la registrazione IQ di un'analisi."""
+    _entry, scanner = _scanner(hass, connection, msg)
+    if scanner is None:
+        return
+    url = async_sign_path(hass, iq_url(msg["entry_id"], msg["format"]), timedelta(minutes=10),
+                          refresh_token_id=connection.refresh_token_id)
+    connection.send_result(msg["id"], {"url": url})

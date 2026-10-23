@@ -14,7 +14,7 @@ import zlib
 import numpy as np
 
 from . import dab, dvbt, rds
-from .demod import MODES, SSB_MODES, demodulate, fm_multiplex, wfm_audio
+from .demod import MODES, SSB_MODES, _channel, demodulate, fm_multiplex, wfm_audio
 
 FFT_SIZE = 2048  # ~1 kHz di risoluzione e ~1 ms per riga a 2 MS/s
 USABLE_FRACTION = 0.8  # i bordi della banda sono attenuati dal filtro della chiavetta
@@ -22,6 +22,7 @@ IMG_ROWS = 400
 IMG_COLS = 512
 ACTIVE_DB = 6.0  # un istante conta come "trasmissione" se supera il rumore di questi dB
 CONTINUOUS = 0.9  # attivo per almeno questa frazione del tempo = trasmissione continua
+FLAT_DIGITAL = 0.75  # piattezza dello spettro oltre cui un segnale è digitale (fonia FM ~0,4–0,5)
 VOICE_MAX_KHZ = 25.0  # la fonia analogica a banda stretta occupa meno di così (NFM ~11 kHz, AM ~6 kHz)
 JOIN_HZ = 60e3  # buchi più stretti di così restano nello stesso segnale (es. i due toni di un FSK)
 
@@ -94,6 +95,40 @@ def _runs(mask: np.ndarray) -> list[tuple[int, int]]:
     return list(zip(np.nonzero(d == 1)[0].tolist(), np.nonzero(d == -1)[0].tolist(), strict=True))
 
 
+def fsk_levels(iq: np.ndarray, rate: int, offset_hz: float, obw_hz: float) -> int:
+    """Livelli di frequenza su cui il segnale "si ferma" (FSK a 2 o 4 livelli), 0 se nessuno chiaro.
+
+    Demodulato in FM, un 4FSK (DMR, dPMR, NXDN, P25) o un 2FSK (cercapersone, telemetria) passa
+    quasi tutto il tempo su pochi valori fissi; la voce varia con continuità.
+    """
+    decim = max(1, int(round(rate / 48e3)))
+    fs = rate / decim
+    z = _channel(iq, rate, offset_hz, decim, max(obw_hz * 0.6, 5e3))
+    if len(z) < 4096:
+        return 0
+    power = np.abs(z) ** 2
+    on = power > 0.25 * np.median(power[power > np.percentile(power, 50)])  # solo quando trasmette
+    f = np.angle(z[1:] * np.conj(z[:-1])) * fs / (2 * np.pi)
+    f = np.convolve(f, np.ones(5) / 5, "same")[on[1:]]
+    if len(f) < 2048:
+        return 0
+    lo, hi = np.percentile(f, [1, 99])
+    if hi - lo < 600:
+        return 0
+    h, _ = np.histogram(f, bins=48, range=(lo, hi))
+    h = np.convolve(h, [1, 2, 3, 2, 1], "same").astype(float)
+    peaks = [i for i in range(1, len(h) - 1) if h[i] >= h[i - 1] and h[i] > h[i + 1] and h[i] > 0.35 * h.max()]
+    # picchi ben separati, con una valle in mezzo
+    keep = []
+    for i in peaks:
+        if keep and min(h[keep[-1]: i + 1]) > 0.75 * min(h[keep[-1]], h[i]):
+            if h[i] > h[keep[-1]]:
+                keep[-1] = i
+            continue
+        keep.append(i)
+    return len(keep) if len(keep) in (2, 4) else 0
+
+
 def classify(r: dict[str, Any]) -> tuple[str, str | None]:
     """Ipotesi sul tipo di segnale dalle sole misure, e la demodulazione più adatta per ascoltarlo.
 
@@ -112,6 +147,16 @@ def classify(r: dict[str, Any]) -> tuple[str, str | None]:
         return "due toni alternati: FSK (dati digitali)", None
     if 118 <= f <= 137 and bw < VOICE_MAX_KHZ:
         return "AM: banda aerea (voce)", "am"
+    # spettro "a tavola" largo una ventina di kHz: modulazione digitale, non fonia
+    flat = r.get("flatness", 0) >= FLAT_DIGITAL and 8 <= bw <= 30
+    if flat and (380 <= f <= 400 or 410 <= f <= 430) and 14 <= bw <= 28:
+        return "TETRA: radio digitale dei servizi di emergenza (cifrata)", None
+    if r.get("fsk_levels") == 4 and bw <= 16:
+        return "radio digitale 4FSK (DMR, dPMR, NXDN o P25): voce digitale o dati", None
+    if flat:
+        return "segnale digitale a banda stretta (dati o voce digitale)", None
+    if r.get("fsk_levels") == 2 and bw <= 25 and not (87.5 <= f <= 108):
+        return "dati in FSK a due toni (cercapersone, telemetria, sensori)", None
     if bw >= VOICE_MAX_KHZ:
         # troppo largo per la fonia analogica: modulazione digitale
         if (880 <= f <= 960 or 1710 <= f <= 1880) and 120 <= bw <= 350:
@@ -206,12 +251,19 @@ def analyze_iq(
     # banda occupata al 99% e centroide, sulla potenza media meno il rumore
     excess = np.clip(10 ** (mean_db[band] / 10) - 10 ** (floor_mean / 10), 0, None)
     tot = float(excess.sum())
+    flatness = 0.0
     if tot > 0:
         cum = np.cumsum(excess) / tot
         i_lo = int(np.searchsorted(cum, 0.005))
         i_hi = int(np.searchsorted(cum, 0.995))
         obw = (i_hi - i_lo + 1) * bin_hz
         centroid = float((freqs[band] * excess).sum() / tot)
+        # piattezza dello spettro nella banda occupata (media geometrica / aritmetica, 0…1): i segnali
+        # digitali sono "a tavola" (~0,6–1), la fonia FM ha l'energia concentrata (valori bassi)
+        core = excess[i_lo: i_hi + 1]
+        core = core[len(core) // 10: len(core) - len(core) // 10] if len(core) >= 10 else core
+        if len(core) >= 3 and core.mean() > 0:
+            flatness = float(np.exp(np.mean(np.log(core + core.mean() * 1e-3))) / core.mean())
     else:
         obw, centroid = bin_hz, float(freqs[pk])
 
@@ -295,6 +347,7 @@ def analyze_iq(
         "bw_6db_above_noise_khz": round(ext / 1e3, 1),
         "obw_99_khz": round(obw / 1e3, 1),
         "tones": tones,
+        "flatness": round(flatness, 2),
         "duty_cycle": round(duty, 3),
         "continuous": duty >= CONTINUOUS,
         "bursts": len(merged),
@@ -322,8 +375,9 @@ def analyze_iq(
         ).tolist(),
         "noise_power_db": round(noise_pw, 1),
     }
-    result["kind"], result["audio_mode"] = classify(result)
     offset = centroid - center_hz
+    result["fsk_levels"] = fsk_levels(iq, rate, offset, obw) if detected and 4e3 <= obw <= 30e3 else 0
+    result["kind"], result["audio_mode"] = classify(result)
     mpx, fs_mpx = fm_multiplex(iq, rate, offset)
     audio = {"wfm": wfm_audio(mpx, fs_mpx)}
     # SSB solo in onde corte: altrove è inutile e occuperebbe spazio nell'archivio
