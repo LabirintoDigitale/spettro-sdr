@@ -1,7 +1,7 @@
 // Pannello "Spettro" per Home Assistant: grafico dello spettro, waterfall e picchi.
 
 // deve coincidere con VERSION in const.py: se il backend ne riporta un'altra manca un riavvio
-const PANEL_VERSION = "1.14.0";
+const PANEL_VERSION = "1.14.1";
 
 const PRESETS = [
   ["Personalizzato", null, null],
@@ -332,6 +332,8 @@ class SpettroPanel extends HTMLElement {
         .card { background:var(--card-background-color,#fff); border-radius:var(--ha-card-border-radius,12px);
                 box-shadow:var(--ha-card-box-shadow,none); border:1px solid var(--divider-color); padding:12px; min-width:0; }
         .charts { display:flex; flex-direction:column; gap:6px; }
+        label.selfreq { display:flex; align-items:center; gap:6px; white-space:nowrap; }
+        label.selfreq input { width:130px; }
         .maincol { display:flex; flex-direction:column; gap:12px; min-width:0; }
         #meteopasses table td, #meteolist table td { padding:4px 6px; }
         #meteolist tr { cursor:pointer; }
@@ -440,7 +442,9 @@ class SpettroPanel extends HTMLElement {
           <div class="ana">
             <h3 style="margin:0">Analisi segnale</h3>
             <div class="row">
-              <div class="hint" id="selinfo" style="flex:1;min-width:200px">Tocca un picco sul grafico o una riga dell'Archivio spike per sceglierlo.</div>
+              <label class="selfreq" title="Frequenza da analizzare: si prende dal clic sul grafico o si scrive qui (Invio per confermare)">MHz
+                <input id="selfreq" type="text" inputmode="decimal" placeholder="es. 99.6" autocomplete="off"></label>
+              <div class="hint" id="selinfo" style="flex:1;min-width:160px">Tocca un picco sul grafico, una riga dell'Archivio spike, o scrivi la frequenza.</div>
               <button class="primary" id="analyze" disabled>Analizza</button>
               <button id="livebtn" disabled title="Resta sintonizzato su questa frequenza: audio, cascata e RDS in diretta (la scansione si sospende)">▶ Analisi continua</button>
               <button class="heart" id="fav" disabled title="Aggiungi ai preferiti">♡</button>
@@ -630,6 +634,25 @@ class SpettroPanel extends HTMLElement {
     $("livemode").addEventListener("change", (e) => {
       if (this._live) this._liveStart(this._live.freq_mhz, e.target.value, null, this._live.decoder || null);
     });
+    const typed = () => {
+      // frequenza scritta a mano (anche con la virgola): si seleziona e si inquadra sul grafico
+      const v = parseFloat($("selfreq").value.trim().replace(",", "."));
+      if (!(v >= 0.5 && v <= 2200)) {
+        $("selinfo").textContent = "Frequenza non valida: scrivila in MHz, tra 0,5 e 2200 (es. 7.8781 o 145,8).";
+        return;
+      }
+      const f = v * 1e6;
+      this._select(f);
+      const sp = this._spec;
+      if (sp && f >= sp.range_start && f <= sp.range_stop) {
+        const half = Math.max(50e3, (sp.range_stop - sp.range_start) * 0.02);
+        this._view = [Math.max(sp.range_start, f - half), Math.min(sp.range_stop, f + half)];
+        this._draw();
+      }
+      $("selfreq").value = v.toFixed(4);
+    };
+    $("selfreq").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); typed(); $("selfreq").blur(); } });
+    $("selfreq").addEventListener("change", typed);
     $("livedec").addEventListener("change", (e) => {
       if (this._live) this._liveStart(this._live.freq_mhz, this._live.mode, null, e.target.value || null);
     });
@@ -1945,6 +1968,7 @@ class SpettroPanel extends HTMLElement {
     this._sel = f;
     const $ = (id) => this.shadowRoot.getElementById(id);
     $("selinfo").textContent = `Selezionato: ${(f / 1e6).toFixed(4)} MHz${this._kuText(f / 1e6)}`;
+    if (this.shadowRoot.activeElement !== $("selfreq")) $("selfreq").value = (f / 1e6).toFixed(4);
     $("analyze").disabled = !!this._analyzing || !!this._live;
     $("livebtn").disabled = false;
     $("fav").disabled = false;
