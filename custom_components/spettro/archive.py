@@ -14,6 +14,8 @@ from pathlib import Path
 import time
 from typing import Any
 
+AUDIO_MODES = ("wfm", "nfm", "am")  # audio demodulato salvato con ogni analisi
+
 # campi dell'analisi copiati nell'indice (quello che serve a elenchi e tabella dei picchi)
 META_FIELDS = ("target_mhz", "center_mhz", "kind", "snr_db", "peak_db", "obw_99_khz", "duty_cycle", "audio_mode")
 
@@ -36,10 +38,18 @@ class SpikeArchive:
         self.entries = entries
 
     def _files(self, entry_id: str) -> list[Path]:
-        return [f for f in self.path.glob(f"{entry_id}.*") if f.name.split(".")[0] == entry_id]
+        # nomi esatti: una ricerca nella cartella per ogni analisi, con migliaia di file, dura minuti
+        names = [f"{entry_id}.json", f"{entry_id}.png", *(f"{entry_id}.{m}.wav" for m in AUDIO_MODES)]
+        return [self.path / n for n in names]
 
     def _size(self, entry_id: str) -> int:
-        return sum(f.stat().st_size for f in self._files(entry_id))
+        total = 0
+        for f in self._files(entry_id):
+            try:
+                total += f.stat().st_size
+            except OSError:
+                pass
+        return total
 
     @property
     def total_bytes(self) -> int:
@@ -76,8 +86,10 @@ class SpikeArchive:
         except OSError:
             return None
         audio = {}
-        for f in self.path.glob(f"{entry_id}.*.wav"):
-            audio[f.name[len(entry_id) + 1 : -4]] = f.read_bytes()
+        for mode in AUDIO_MODES:
+            f = self.path / f"{entry_id}.{mode}.wav"
+            if f.exists():
+                audio[mode] = f.read_bytes()
         return result, png, audio
 
     def _remove_files(self, entry_id: str) -> None:
@@ -93,8 +105,10 @@ class SpikeArchive:
 
     def clear(self) -> int:
         count = len(self.entries)
-        for e in self.entries:
-            self._remove_files(e["id"])
+        # tutta la cartella in una passata (anche file rimasti orfani)
+        for f in self.path.iterdir():
+            if f.is_file() and f.suffix in (".json", ".png", ".wav"):
+                f.unlink(missing_ok=True)
         self.entries = []
         return count
 

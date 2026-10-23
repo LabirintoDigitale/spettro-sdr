@@ -1,7 +1,7 @@
 // Pannello "Spettro" per Home Assistant: grafico dello spettro, waterfall e picchi.
 
 // deve coincidere con VERSION in const.py: se il backend ne riporta un'altra manca un riavvio
-const PANEL_VERSION = "1.13.0";
+const PANEL_VERSION = "1.13.1";
 
 const PRESETS = [
   ["Personalizzato", null, null],
@@ -628,12 +628,19 @@ class SpettroPanel extends HTMLElement {
       this._renderArchive();
     });
     $("archclear").addEventListener("click", async () => {
-      if (!this._archive.length || !confirm("Cancellare tutte le analisi archiviate?")) return;
+      if (!this._archive.length || !confirm(`Cancellare tutte le ${this._archive.length} analisi archiviate?`)) return;
+      const btn = $("archclear");
+      btn.disabled = true;
+      btn.textContent = "Cancellazione…";
       try {
-        await this._hass.callWS({ type: "spettro/archive_delete" });
+        const res = await this._hass.callWS({ type: "spettro/archive_delete" });
+        this._msg(`Archivio svuotato: ${res.removed} analisi cancellate.`);
         await this._loadArchive();
       } catch (err) {
         this._msg(err.message || String(err), true);
+      } finally {
+        btn.disabled = false;
+        btn.textContent = "Svuota archivio";
       }
     });
     $("zoomscan").addEventListener("click", () => {
