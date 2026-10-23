@@ -55,6 +55,12 @@ def async_setup(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, ws_favorite_remove)
     websocket_api.async_register_command(hass, ws_live_start)
     websocket_api.async_register_command(hass, ws_live_stop)
+    websocket_api.async_register_command(hass, ws_meteo_list)
+    websocket_api.async_register_command(hass, ws_meteo_get)
+    websocket_api.async_register_command(hass, ws_meteo_delete)
+    websocket_api.async_register_command(hass, ws_meteo_config)
+    websocket_api.async_register_command(hass, ws_meteo_receive)
+    websocket_api.async_register_command(hass, ws_meteo_stop)
 
 
 @callback
@@ -350,3 +356,105 @@ async def ws_live_stop(hass: HomeAssistant, connection: websocket_api.ActiveConn
         return
     await scanner.live_stop()
     connection.send_result(msg["id"])
+
+
+# --- satelliti meteo ----------------------------------------------------------------
+
+
+@websocket_api.websocket_command({vol.Required("type"): "spettro/meteo_list"})
+@callback
+def ws_meteo_list(hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]) -> None:
+    """Immagini ricevute e prossimi passaggi."""
+    _entry, scanner = _scanner(hass, connection, msg)
+    if scanner is None:
+        return
+    archive = scanner.meteo_archive
+    connection.send_result(msg["id"], {
+        "entries": archive.entries if archive else [],
+        "days": scanner.settings.meteo_days,
+        "passes": scanner.meteo.snapshot() if scanner.meteo else None,
+    })
+
+
+@websocket_api.websocket_command(
+    {vol.Required("type"): "spettro/meteo_get", vol.Required("entry_id"): str, vol.Optional("ir", default=False): bool}
+)
+@websocket_api.async_response
+async def ws_meteo_get(hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]) -> None:
+    """Un'immagine meteo (PNG in base64)."""
+    _entry, scanner = _scanner(hass, connection, msg)
+    if scanner is None:
+        return
+    archive = scanner.meteo_archive
+    png = await hass.async_add_executor_job(archive.get, msg["entry_id"], msg["ir"]) if archive else None
+    if png is None:
+        connection.send_error(msg["id"], "not_found", "Immagine non trovata")
+        return
+    meta = next(e for e in archive.entries if e["id"] == msg["entry_id"])
+    connection.send_result(msg["id"], {**meta, "png": base64.b64encode(png).decode()})
+
+
+@websocket_api.websocket_command({vol.Required("type"): "spettro/meteo_delete", vol.Optional("entry_id"): str})
+@websocket_api.require_admin
+@websocket_api.async_response
+async def ws_meteo_delete(hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]) -> None:
+    """Cancella un'immagine meteo, o tutte senza entry_id."""
+    _entry, scanner = _scanner(hass, connection, msg)
+    if scanner is None or scanner.meteo_archive is None:
+        return
+    n = await hass.async_add_executor_job(scanner.meteo_archive.delete, msg.get("entry_id"))
+    scanner._emit({"kind": "meteo_pruned"})  # noqa: SLF001 - avvisa i pannelli
+    connection.send_result(msg["id"], {"deleted": n})
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "spettro/meteo_config",
+        vol.Optional("meteo_auto"): bool,
+        vol.Optional("meteo_min_el"): vol.All(vol.Coerce(float), vol.Range(min=0, max=90)),
+        vol.Optional("meteo_days"): vol.All(vol.Coerce(float), vol.Range(min=0.5, max=365)),
+    }
+)
+@websocket_api.require_admin
+@callback
+def ws_meteo_config(hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]) -> None:
+    """Impostazioni dei satelliti meteo (senza toccare quelle della scansione)."""
+    entry, scanner = _scanner(hass, connection, msg)
+    if scanner is None:
+        return
+    changes = {k: v for k, v in msg.items() if k not in ("id", "type")}
+    merged = {**ScanSettings().as_dict(), **entry.options, **changes}
+    hass.config_entries.async_update_entry(entry, options=merged)
+    scanner.settings = ScanSettings.from_dict(merged)
+    scanner.status["settings"] = scanner.settings.as_dict()
+    scanner._emit(dict(scanner.status))  # noqa: SLF001
+    hass.async_create_task(scanner.prune_meteo())
+    connection.send_result(msg["id"], merged)
+
+
+@websocket_api.websocket_command({vol.Required("type"): "spettro/meteo_receive", vol.Optional("norad"): int})
+@websocket_api.require_admin
+@websocket_api.async_response
+async def ws_meteo_receive(hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]) -> None:
+    """Riceve subito il passaggio in corso."""
+    _entry, scanner = _scanner(hass, connection, msg)
+    if scanner is None:
+        return
+    try:
+        p = await scanner.meteo_receive(msg.get("norad"))
+    except RuntimeError as err:
+        connection.send_error(msg["id"], "meteo_failed", str(err))
+        return
+    connection.send_result(msg["id"], p)
+
+
+@websocket_api.websocket_command({vol.Required("type"): "spettro/meteo_stop"})
+@websocket_api.require_admin
+@websocket_api.async_response
+async def ws_meteo_stop(hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]) -> None:
+    """Interrompe la ricezione (l'immagine ricevuta fin lì viene salvata)."""
+    _entry, scanner = _scanner(hass, connection, msg)
+    if scanner is None:
+        return
+    await scanner.meteo_stop()
+    connection.send_result(msg["id"], {})

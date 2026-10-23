@@ -9,12 +9,15 @@ from homeassistant.components.http import StaticPathConfig
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_HOST, CONF_PORT, Platform
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers.storage import Store
 
 from . import ws_api
 from .const import (
     ARCHIVE_DIR,
     DATA_STATIC_REGISTERED,
     DOMAIN,
+    METEO_DIR,
     OPT_ENABLED,
     PANEL_ELEMENT,
     PANEL_ICON,
@@ -26,6 +29,7 @@ from .const import (
 from .archive import SpikeArchive
 from .favorites import Favorites
 from .scanner import ScanSettings, SpectrumScanner
+from .weather import Meteo, MeteoArchive
 
 PLATFORMS = [Platform.IMAGE, Platform.SENSOR, Platform.SWITCH]
 
@@ -44,6 +48,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: SpettroConfigEntry) -> b
     scanner.favorites = Favorites(hass)
     await scanner.favorites.async_load()
     await scanner.prune_archive()
+    await _setup_meteo(hass, scanner)
     scanner.status["version"] = VERSION
     entry.runtime_data = scanner
     hass.data[DOMAIN] = entry
@@ -69,6 +74,33 @@ async def async_setup_entry(hass: HomeAssistant, entry: SpettroConfigEntry) -> b
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     scanner.start()
     return True
+
+
+async def _setup_meteo(hass: HomeAssistant, scanner: SpectrumScanner) -> None:
+    """Satelliti meteo: posizione della stazione, TLE salvati (e scaricati da CelesTrak), archivio immagini."""
+    session = async_get_clientsession(hass)
+
+    async def fetch(url: str) -> str:
+        async with session.get(url, timeout=30) as resp:
+            resp.raise_for_status()
+            return await resp.text()
+
+    meteo = Meteo(hass.config.latitude, hass.config.longitude, hass.config.elevation or 0, fetch)
+    store: Store[dict] = Store(hass, 1, f"{DOMAIN}.tle")
+    saved = await store.async_load()
+    if saved and saved.get("tles"):
+        meteo.set_tles({int(k): tuple(v) for k, v in saved["tles"].items()}, saved.get("time", 0))
+
+    def save() -> None:
+        hass.async_create_task(store.async_save({"tles": {str(k): list(v) for k, v in meteo.tle_text.items()},
+                                                 "time": meteo.tle_time}))
+
+    archive = MeteoArchive(Path(hass.config.path(METEO_DIR)))
+    await hass.async_add_executor_job(archive.load)
+    scanner.meteo, scanner.meteo_save, scanner.meteo_archive = meteo, save, archive
+    if archive.entries:
+        scanner.last_meteo_png = await hass.async_add_executor_job(archive.get, archive.entries[0]["id"])
+    await scanner.prune_meteo()
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: SpettroConfigEntry) -> bool:

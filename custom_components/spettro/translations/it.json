@@ -39,6 +39,9 @@
     "image": {
       "analysis": {
         "name": "Ultima analisi"
+      },
+      "meteo": {
+        "name": "Ultima immagine meteo"
       }
     }
   }

@@ -12,6 +12,7 @@ import base64
 from collections import deque
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, fields
+from datetime import UTC, datetime, timedelta
 import logging
 import math
 import socket
@@ -21,11 +22,12 @@ from typing import Any
 
 import numpy as np
 
-from . import dab, dvbt, rds, satellite
+from . import dab, dvbt, rds, satellite, weather
 from .analysis import analyze_iq
 from .dabplus import DabLiveReceiver
 from .archive import SpikeArchive
 from .live import CHUNK, LIVE_RATE, LiveDemod
+from .orbit import passes as orbit_passes
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -92,6 +94,9 @@ class ScanSettings:
     auto_max_per_sweep: int = 20
     analysis_s: float = 2.0  # durata della registrazione di ogni analisi, manuale o automatica
     lnb: bool = False  # c'è un LNB satellitare sul cavo: 950–2150 MHz sono transponder TV
+    meteo_auto: bool = False  # riceve da solo i passaggi dei satelliti meteo Meteor
+    meteo_min_el: float = 20.0  # elevazione massima minima di un passaggio da ricevere (gradi)
+    meteo_days: float = 7.0  # giorni dopo cui si cancellano le immagini meteo
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> ScanSettings:
@@ -221,6 +226,14 @@ class SpectrumScanner:
         self.last_slide: dict[str, str] | None = None  # ultima immagine della slideshow DAB+
         self.last_dab: dict[str, Any] = {}  # ultimi dati della radio DAB+ (nome, testo, statistiche)
         self._live_stop_handle: asyncio.TimerHandle | None = None
+        self.meteo: weather.Meteo | None = None  # orbite e passaggi, impostati dall'integrazione
+        self.meteo_archive: weather.MeteoArchive | None = None
+        self.meteo_save: Callable[[], None] | None = None  # salva i TLE scaricati
+        self.meteo_rx: dict[str, Any] | None = None  # ricezione di un passaggio in corso
+        self.last_meteo_png: bytes | None = None
+        self._meteo_task: asyncio.Task | None = None
+        self._meteo_loop_task: asyncio.Task | None = None
+        self._meteo_done: set[tuple[int, float]] = set()  # passaggi già ricevuti (norad, aos)
         self._radio = asyncio.Lock()  # una sola connessione rtl_tcp alla volta
         self._listeners: list[Callable[[dict[str, Any]], None]] = []
         self._task: asyncio.Task | None = None
@@ -282,6 +295,10 @@ class SpectrumScanner:
             out.append(self.last_spectrum)
         if self.favorites is not None:
             out.append({"kind": "favorites", "favorites": self.favorites.items})
+        if self.meteo is not None:
+            out.append(self.meteo.snapshot())
+        if self.meteo_rx:
+            out.append({"kind": "meteo_live", **self.meteo_rx})
         live = self.status["live"]
         if live and live.get("mode") == "dab" and (self.last_slide or self.last_dab):
             # un pannello aperto a diretta già avviata riceve subito nome, testo e immagine
@@ -311,6 +328,8 @@ class SpectrumScanner:
     # --- pausa -------------------------------------------------------------
 
     def _pause_reason(self) -> str | None:
+        if self.meteo_rx:
+            return "satellite"
         if self.analyzing:
             return "analysis"
         if self.status["live"]:
@@ -346,9 +365,15 @@ class SpectrumScanner:
     def start(self) -> None:
         if self._task is None or self._task.done():
             self._task = asyncio.get_running_loop().create_task(self._run(), name="spettro_scanner")
+        if self.meteo is not None and (self._meteo_loop_task is None or self._meteo_loop_task.done()):
+            self._meteo_loop_task = asyncio.get_running_loop().create_task(self._meteo_loop(), name="spettro_meteo")
 
     async def stop(self) -> None:
         await self.live_stop()
+        await self.meteo_stop()
+        if self._meteo_loop_task is not None:
+            self._meteo_loop_task.cancel()
+            self._meteo_loop_task = None
         if self._task is not None:
             self._task.cancel()
             try:
@@ -794,6 +819,180 @@ class SpectrumScanner:
                 self._live_task = None
             self.status["live"] = None
             self._update_active()
+
+    # --- satelliti meteo --------------------------------------------------------
+
+    async def _meteo_loop(self) -> None:
+        """Tiene aggiornati TLE e passaggi; con la ricezione automatica avvia i passaggi da sé."""
+        assert self.meteo is not None
+        loop = asyncio.get_running_loop()
+        min_el = None
+        while True:
+            try:
+                m = self.meteo
+                if m.fetch is not None and time.time() - m.tle_time > weather.TLE_MAX_AGE_S:
+                    if await m.update_tles() and self.meteo_save is not None:
+                        self.meteo_save()
+                if m.sats and (time.time() - m.passes_time > 600 or min_el != self.settings.meteo_min_el):
+                    min_el = self.settings.meteo_min_el
+                    await loop.run_in_executor(None, m.compute_passes, min_el)
+                    self._emit(m.snapshot())
+                if self.settings.meteo_auto and self._meteo_task is None:
+                    now = datetime.now(UTC)
+                    for p in m.passes:
+                        key = (p["norad"], p["aos"].timestamp())
+                        if key in self._meteo_done:
+                            continue
+                        if p["aos"] - timedelta(seconds=30) <= now < p["los"] - timedelta(seconds=90):
+                            self._meteo_done.add(key)
+                            self._meteo_start(p)
+                            break
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 - il ciclo non deve morire per un errore
+                _LOGGER.exception("Errore nella gestione dei satelliti meteo")
+            await asyncio.sleep(15)
+
+    def meteo_pass_now(self, norad: int | None = None) -> dict[str, Any] | None:
+        """Passaggio in corso (o che inizia entro 3 minuti), anche sotto l'elevazione minima."""
+        if self.meteo is None or not self.meteo.sats:
+            return None
+        now = datetime.now(UTC)
+        cand = []
+        for n, sat in self.meteo.sats.items():
+            if norad is not None and n != norad:
+                continue
+            for p in orbit_passes(sat, self.meteo.observer, now - timedelta(minutes=20), 1, 0):
+                if p["aos"] - timedelta(minutes=3) <= now < p["los"]:
+                    cand.append({**p, "norad": n, "satellite": sat.name, "freqs": list(weather.SATELLITES[n][1])})
+        return min(cand, key=lambda p: p["aos"]) if cand else None
+
+    def _meteo_start(self, p: dict[str, Any]) -> None:
+        self._meteo_task = asyncio.get_running_loop().create_task(self._meteo_run(p), name="spettro_meteo_rx")
+
+    async def meteo_receive(self, norad: int | None = None) -> dict[str, Any]:
+        """Ricezione a mano del passaggio in corso."""
+        if self._meteo_task is not None:
+            raise RuntimeError("C'è già una ricezione in corso")
+        if self.meteo is None or not self.meteo.sats:
+            raise RuntimeError("Orbite dei satelliti non ancora scaricate da CelesTrak: riprova tra qualche minuto")
+        p = self.meteo_pass_now(norad)
+        if p is None:
+            raise RuntimeError("Nessun satellite Meteor sopra l'orizzonte adesso (o nei prossimi 3 minuti)")
+        self._meteo_done.add((p["norad"], p["aos"].timestamp()))
+        self._meteo_start(p)
+        return weather.pass_json(p)
+
+    async def meteo_stop(self) -> None:
+        task, self._meteo_task = self._meteo_task, None
+        if task is not None:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+    async def _meteo_run(self, p: dict[str, Any]) -> None:
+        """Riceve un passaggio: chiavetta fissa sul Meteor (con il Doppler), immagine alla fine."""
+        assert self.meteo is not None
+        loop = asyncio.get_running_loop()
+        norad, freqs = p["norad"], p["freqs"]
+        info = weather.pass_json(p)
+        self.meteo_rx = {"pass": info, "stats": None, "preview": None, "rows": 0, "error": None}
+        await self.live_stop()
+        self._update_active()
+        self._emit({"kind": "meteo_live", **self.meteo_rx})
+        rate = weather.IN_RATE
+        chunk = rate // 4 * 2  # 0,25 s
+        discard = RCV_BUF + 2 * READ_LIMIT + int(rate * 2 * max(self.settings.settle_ms, 100) / 1000)
+        discard -= discard % 2
+        rx: weather.MeteorReceiver | None = None
+        try:
+            async with self._radio:
+                reader, writer, tuner = await _open(self.host, self.port)
+                try:
+                    self.status["tuner"] = TUNER_NAMES.get(tuner, f"Tipo {tuner}")
+                    await self._configure(writer, rate)
+                    fi = 0
+                    last_preview = loop.time()
+                    while True:
+                        freq = freqs[fi]
+                        center = freq + weather.CENTER_OFFSET
+                        await self._send(writer, CMD_SET_FREQ, int(round(center)))
+                        async with asyncio.timeout(IO_TIMEOUT):
+                            await self._discard(reader, discard)
+                        rx = weather.MeteorReceiver(freq)
+                        switched = False
+                        while datetime.now(UTC) < p["los"] + timedelta(seconds=10):
+                            async with asyncio.timeout(IO_TIMEOUT):
+                                raw = await reader.readexactly(chunk)
+                            dop = self.meteo.doppler(norad, datetime.now(UTC), freq)
+                            stats = await loop.run_in_executor(None, rx.process, raw, center, dop)
+                            look = self.meteo.look(norad, datetime.now(UTC))
+                            stats["el"] = round(look["el"], 1) if look else None
+                            stats["doppler_hz"] = round(dop)
+                            self.meteo_rx["stats"] = stats
+                            # dopo un po' senza trame valide (e con il satellite alto) si prova l'altra frequenza
+                            if (len(freqs) > 1 and not stats["vcdu_ok"] and stats["elapsed_s"] > weather.SWITCH_AFTER_S
+                                    and (look is None or look["el"] > 10)):
+                                fi = (fi + 1) % len(freqs)
+                                switched = True
+                                break
+                            if loop.time() - last_preview >= 8:
+                                last_preview = loop.time()
+                                png, _ir, name, rows = await loop.run_in_executor(None, rx.images, p["northbound"], 4)
+                                if png:
+                                    self.meteo_rx.update(preview=base64.b64encode(png).decode(), rows=rows * 4,
+                                                         composite=name)
+                            self._emit({"kind": "meteo_live", **{k: v for k, v in self.meteo_rx.items()
+                                                                 if k != "preview" or loop.time() - last_preview < 0.5}})
+                        if not switched:
+                            break
+                finally:
+                    writer.close()
+                    try:
+                        await writer.wait_closed()
+                    except OSError:
+                        pass
+        except asyncio.CancelledError:
+            raise
+        except (OSError, TimeoutError, asyncio.IncompleteReadError, RtlTcpError) as err:
+            msg = str(err) or type(err).__name__
+            _LOGGER.warning("Ricezione del satellite meteo interrotta: %s", msg)
+            self._emit({"kind": "meteo_live", **(self.meteo_rx or {}), "error": msg})
+        finally:
+            try:
+                if rx is not None and rx.decoder.strips:
+                    await asyncio.shield(self._meteo_save_image(rx, p))
+            finally:
+                if asyncio.current_task() is self._meteo_task:
+                    self._meteo_task = None
+                self.meteo_rx = None
+                self._update_active()
+                self._emit({"kind": "meteo_live", "done": True})
+
+    async def _meteo_save_image(self, rx: weather.MeteorReceiver, p: dict[str, Any]) -> None:
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, rx.finish)
+        png, ir, name, rows = await loop.run_in_executor(None, rx.images, p["northbound"], 0)
+        if not png or rows < 16 or self.meteo_archive is None:
+            return
+        st = rx.stats()
+        meta = {"timestamp": time.time(), "norad": p["norad"], "satellite": p["satellite"], "max_el": p["max_el"],
+                "aos": p["aos"].timestamp(), "los": p["los"].timestamp(), "northbound": p["northbound"],
+                "rows": rows, "composite": name, "freq_mhz": st["freq_mhz"], "vcdu_ok": st["vcdu_ok"],
+                "vcdu_bad": st["vcdu_bad"]}
+        entry = await loop.run_in_executor(None, self.meteo_archive.add, meta, png, ir)
+        self.last_meteo_png = png
+        self._emit({"kind": "meteo_image", "entry": entry})
+        await self.prune_meteo()
+
+    async def prune_meteo(self) -> None:
+        if self.meteo_archive is not None:
+            n = await asyncio.get_running_loop().run_in_executor(
+                None, self.meteo_archive.prune, self.settings.meteo_days * 86400)
+            if n:
+                self._emit({"kind": "meteo_pruned"})
 
     async def _live_rds(self, mpx: np.ndarray, fs: float) -> None:
         result = await asyncio.get_running_loop().run_in_executor(None, rds.decode, mpx, fs)

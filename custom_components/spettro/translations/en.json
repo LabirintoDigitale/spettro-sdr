@@ -39,6 +39,9 @@
     "image": {
       "analysis": {
         "name": "Last analysis"
+      },
+      "meteo": {
+        "name": "Last weather satellite image"
       }
     }
   }

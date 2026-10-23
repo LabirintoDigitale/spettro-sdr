@@ -18,6 +18,7 @@ Integrazione custom per **Home Assistant** che trasforma una chiavetta RTL-SDR c
 - **DAB / DAB+ (radio digitale)**: i multiplex della banda III (174–240 MHz, canali 5A…13F, in Italia soprattutto il 12) compaiono come blocchi piatti larghi 1,5 MHz e l'analisi li riconosce con il loro canale. Sintonizzandosi al centro del canale decodifica il canale di servizio (FIC: sincronismo sulle trame da 96 ms, demodulazione OFDM/DQPSK, Viterbi, CRC) e mostra **nome del multiplex**, codice EId e l'**elenco delle radio** con il tipo (DAB o DAB+); il nome finisce anche nel tipo rilevato e nell'archivio. Serve il sample rate di 2,048 MS/s (quello predefinito). Per ogni radio si vede anche la velocità (kbit/s).
 - **TV digitale (DVB-T/T2)**: riconosce i multiplex TV dei canali UHF 21–48 dalla struttura dei simboli OFDM e ne misura standard, modalità, intervallo di guardia e qualità (MER stimato), con una scheda dei canali trovati e un misuratore continuo per puntare l'antenna. Vedi [Misuratore di campo TV](#misuratore-di-campo-tv).
 - **TV satellitare**: con la chiavetta sul cavo della parabola riconosce il satellite (Hotbird, Astra…) dalla posizione dei transponder e misura il livello per puntare la parabola. Vedi [Satellite](#satellite-parabola-con-lnb).
+- **Satelliti meteo**: calcola i passaggi dei Meteor-M, li riceve da solo e ricostruisce le foto della Terra (LRPT), con anteprima in diretta e archivio. Vedi [Satelliti meteo](#satelliti-meteo-meteor-m).
 - **Preferiti**: con il cuoricino ♡ accanto ad *Analizza* la frequenza selezionata (dal grafico o dall'archivio) entra nei preferiti e il cuore diventa ❤. La scheda *Preferiti* li elenca con il nome: quello RDS per le radio FM, altrimenti *NONAME 1*, *NONAME 2*…; con ✏ lo cambi a mano (un nome scritto da te non viene mai sostituito dall'RDS; lasciandolo vuoto torna automatico). Toccando la riga si seleziona la frequenza, ▶ avvia l'analisi continua, ❤ la toglie. I preferiti sono salvati in Home Assistant, quindi uguali su telefono e computer.
 - **Analisi continua (in diretta)**: dal pulsante *▶ Analisi continua* o dai preferiti la chiavetta resta sintonizzata fissa sulla frequenza (la scansione si sospende e alla fine riparte, solo se era attiva) e il pannello mostra in diretta la cascata che scorre, il livello del segnale e l'**audio** (FM larga, FM stretta o AM, con *Ascolta*/*Muto*). Per le radio FM l'**RDS si aggiorna** ogni secondo, con lo storico dei testi ricevuti (titoli, conduttori…). In diretta si usa 1,024 MS/s (circa 2 MB/s in rete); l'elaborazione avviene sul computer di Home Assistant. Se tutti i pannelli vengono chiusi l'analisi continua si ferma da sola dopo 30 s, per liberare la chiavetta.
 - **Ascolto**: la registrazione viene demodulata in FM larga (radio), FM stretta (voce) e AM; il pannello propone la più adatta in un lettore audio e si può passare alle altre.
@@ -156,6 +157,42 @@ Collegando la chiavetta al cavo della parabola, Spettro diventa un **sat finder*
 4. Con **▶** su un transponder parte la **misura continua del livello**, con il massimo raggiunto e il grafico degli ultimi due minuti: si sposta la parabola di pochi millimetri alla volta e ci si ferma dove il livello è più alto.
 
 **Come funziona**: dentro un transponder non si legge nulla (la chiavetta ne riceve 2 MHz su 30, e il DVB-S non ha l'intervallo di guardia usato per la TV terrestre), ma ogni satellite ha il suo **piano di frequenze**. Spettro confronta le gobbe della scansione con i transponder di ciascun satellite, per entrambe le bande e polarizzazioni e con l'oscillatore dell'LNB spostato fino a ±8 MHz, e sceglie quello che spiega meglio dove cadono le gobbe. I piani vengono dal file `satellites.xml` dei decoder Enigma2 (ottobre 2026): se un satellite cambia i transponder il riconoscimento può peggiorare. Programmi, nomi dei canali e qualità del segnale (MER) non si possono misurare.
+
+## Satelliti meteo (Meteor-M)
+
+Spettro riceve le **foto della Terra** trasmesse dai satelliti meteo russi **Meteor-M2 3** e **Meteor-M2 4**, che passano sopra l'Italia 2–4 volte al giorno ciascuno. Tutto avviene dentro l'integrazione, in Python, senza programmi esterni: calcolo delle orbite, ricezione e decodifica dell'immagine.
+
+**Antenna**: serve un'antenna per i 137 MHz **all'aperto**, con il cielo libero il più possibile. Va bene un **V-dipolo**, due bracci da ~53 cm aperti a 120° in orizzontale, o una QFH. L'antenna della TV o un'antennina da interno non bastano.
+
+**Uso**
+
+1. Nella scheda **🛰️ Satelliti meteo** compaiono i **prossimi passaggi** sopra la tua posizione (presa da Home Assistant): ora, satellite, elevazione massima, direzione e durata.
+2. Con **Ricevi da solo i passaggi**, quando un Meteor passa sopra l'**elevazione minima** (predefinita 20°) la scansione si sospende e la chiavetta lo riceve per tutto il passaggio. **Ricevi ora** riceve subito il satellite che sta passando.
+3. Durante la ricezione si vedono:
+   - elevazione del satellite, Doppler e aggancio del segnale;
+   - le trame valide;
+   - l'**immagine che cresce** riga per riga.
+
+   **■ Ferma e salva** interrompe la ricezione e tiene quanto ricevuto fin lì.
+4. A fine passaggio l'immagine va nell'elenco **Immagini ricevute**, nella cartella `spettro_meteo` e nell'entità **Ultima immagine meteo**. Da lì si può usare in dashboard o mandare in una notifica.
+   - Di giorno l'immagine è a **colori quasi naturali** (canali visibile e vicino infrarosso). Se il satellite trasmette il canale termico, c'è anche la versione **infrarosso**, utile di notte.
+   - Il nord è sempre in alto. Le immagini più vecchie di *Conserva (giorni)* vengono cancellate.
+
+**Come funziona**
+
+- **Orbite**: gli elementi orbitali (TLE) si scaricano da CelesTrak due volte al giorno e restano salvati se manca la rete. Il modello SGP4 è scritto nell'integrazione: calcola i passaggi e il **Doppler**, fino a ±3,5 kHz, che viene corretto mentre il satellite passa.
+- **Ricezione**: la chiavetta sta a 1,024 MS/s vicino a 137,1 o 137,9 MHz. Se dopo una ventina di secondi non arrivano dati, prova l'altra frequenza, perché ogni tanto i satelliti le scambiano.
+- **Demodulazione**: segnale **OQPSK a 72 ksym/s**. Portante, fase e tempo dei simboli si ricavano a blocchi dal segnale elevato al quadrato, che ha due righe a ±72 kHz.
+- **Decodifica**:
+  - Viterbi (codice convoluzionale 1/2, K=7);
+  - decodifica differenziale;
+  - sincronismo delle trame;
+  - Reed-Solomon (255,223) ×4;
+  - pacchetti CCSDS;
+  - blocchi JPEG 8×8 dello strumento MSU-MR, ricomposti in righe da 1568 pixel (circa 1 km per pixel).
+- Sui segnali di prova la ricezione funziona fino a un rapporto segnale/rumore di circa 2 dB e richiede circa metà del tempo reale di calcolo.
+
+I satelliti geostazionari **Meteosat** non si possono ricevere con la chiavetta: trasmettono a 3,75 Msym/s, oltre la sua banda, e servirebbe una parabola da 1,5–2 m.
 
 ## Requisiti
 

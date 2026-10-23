@@ -1,7 +1,7 @@
 // Pannello "Spettro" per Home Assistant: grafico dello spettro, waterfall e picchi.
 
 // deve coincidere con VERSION in const.py: se il backend ne riporta un'altra manca un riavvio
-const PANEL_VERSION = "1.12.0";
+const PANEL_VERSION = "1.13.0";
 
 const PRESETS = [
   ["Personalizzato", null, null],
@@ -222,6 +222,7 @@ class SpettroPanel extends HTMLElement {
     }
     if (!this._tick) this._tick = setInterval(() => this._updateStatus(), 1000);
     this._loadArchive();
+    this._loadMeteo();
     if (this._ro && this.$spec) { this._ro.observe(this.$spec); this._ro.observe(this.$wf); }
   }
 
@@ -256,6 +257,9 @@ class SpettroPanel extends HTMLElement {
     if (m.kind === "live_dab") { this._onLiveDab(m); return; }
     if (m.kind === "live_tv") { this._onLiveTv(m); return; }
     if (m.kind === "live_sat") { this._onLiveSat(m); return; }
+    if (m.kind === "meteo_passes") { this._meteoPasses = m; this._renderMeteoPasses(); return; }
+    if (m.kind === "meteo_live") { this._onMeteoLive(m); return; }
+    if (m.kind === "meteo_image" || m.kind === "meteo_pruned") { this._loadMeteo(m.entry ? m.entry.id : null); return; }
     if (m.kind === "live_error") { this._msg(`Analisi continua interrotta: ${m.error}`, true); return; }
     if (m.kind === "analysis") {
       if (m.entry && !this._archive.some((e) => e.id === m.entry.id)) {
@@ -314,6 +318,13 @@ class SpettroPanel extends HTMLElement {
         .card { background:var(--card-background-color,#fff); border-radius:var(--ha-card-border-radius,12px);
                 box-shadow:var(--ha-card-box-shadow,none); border:1px solid var(--divider-color); padding:12px; min-width:0; }
         .charts { display:flex; flex-direction:column; gap:6px; }
+        .maincol { display:flex; flex-direction:column; gap:12px; min-width:0; }
+        #meteopasses table td, #meteolist table td { padding:4px 6px; }
+        #meteolist tr { cursor:pointer; }
+        #meteolist tr:hover td { background:var(--secondary-background-color); }
+        #meteolist tr.sel td { background:rgba(3,169,244,.16); }
+        .meteoimg { width:100%; height:auto; display:block; border-radius:6px; margin-top:8px; background:#000; image-rendering:auto; }
+        .meteogrid { display:grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap:4px 12px; margin:6px 0; }
         canvas { display:block; width:100%; }
         #spec { height:340px; cursor:crosshair; touch-action:none; }
         #wf { height:220px; border-radius:4px; }
@@ -398,6 +409,7 @@ class SpettroPanel extends HTMLElement {
       <div class="toolbar"><ha-menu-button></ha-menu-button><div class="title"><span>👻 Spettro</span><span class="ver">versione ${PANEL_VERSION}</span></div></div>
       <div id="verwarn" class="err" style="display:none;padding:10px 16px;font-size:14px"></div>
       <div class="content">
+        <div class="maincol">
         <div class="card charts">
           <div class="row">
             <div class="status" id="status">Collegamento…</div>
@@ -434,6 +446,26 @@ class SpettroPanel extends HTMLElement {
             </div>
             <div id="anaout"></div>
           </div>
+        </div>
+        <div class="card" id="meteocard">
+          <div class="row" style="justify-content:space-between">
+            <h3 style="margin:0">🛰️ Satelliti meteo</h3>
+            <button id="meteonow" title="Riceve subito il Meteor che sta passando adesso">Ricevi ora</button>
+          </div>
+          <div id="meteolive"></div>
+          <div class="row" style="margin-top:6px">
+            <label class="chk" title="Quando un Meteor passa sopra l'elevazione minima la scansione si sospende e la chiavetta lo riceve"><input type="checkbox" id="meteoauto"> Ricevi da solo i passaggi</label>
+            <label style="width:150px">Elevazione minima (°)<input id="meteoel" type="number" min="0" max="90" step="5"></label>
+            <label style="width:150px">Conserva (giorni)<input id="meteodays" type="number" min="1" max="365" step="1"></label>
+          </div>
+          <div id="meteopasses" class="hint">Calcolo dei passaggi…</div>
+          <h3 style="margin:12px 0 4px">Immagini ricevute</h3>
+          <div id="meteolist" class="hint">Nessuna immagine ancora.</div>
+          <div id="meteoview"></div>
+          <div class="hint" style="margin-top:8px">Serve un'antenna per i 137 MHz all'aperto con il cielo libero (V-dipolo con due bracci da
+            ~53 cm a 120°, o QFH): quella della TV non va bene. I Meteor-M trasmettono le foto della Terra in digitale (LRPT) su 137,1 o 137,9 MHz
+            per 10–15 minuti a passaggio; orbite da CelesTrak, posizione della stazione da Home Assistant.</div>
+        </div>
         </div>
         <div class="side">
           <div class="card" id="tvcard" style="display:none">
@@ -580,6 +612,15 @@ class SpettroPanel extends HTMLElement {
     });
     for (const id of ["autoana", "limstep", "limsweep"]) $(id).addEventListener("change", () => this._syncLimits());
     $("lnb").addEventListener("change", (e) => { $("lnbwarn").style.display = e.target.checked ? "" : "none"; });
+    const meteoCfg = async (changes) => {
+      try { await this._hass.callWS({ type: "spettro/meteo_config", ...changes }); } catch (err) { this._msg(err.message || String(err), true); }
+    };
+    $("meteoauto").addEventListener("change", (e) => meteoCfg({ meteo_auto: e.target.checked }));
+    $("meteoel").addEventListener("change", (e) => meteoCfg({ meteo_min_el: Math.max(0, Math.min(90, parseFloat(e.target.value) || 0)) }));
+    $("meteodays").addEventListener("change", (e) => meteoCfg({ meteo_days: Math.max(1, parseFloat(e.target.value) || 7) }));
+    $("meteonow").addEventListener("click", async () => {
+      try { await this._hass.callWS({ type: "spettro/meteo_receive" }); } catch (err) { this._msg(err.message || String(err), true); }
+    });
     $("archfilter").addEventListener("change", (ev) => {
       this._archFilter = ev.target.value;
       try { localStorage.setItem("spettro.archFilter", this._archFilter); } catch (e) { /* non disponibile */ }
@@ -626,6 +667,9 @@ class SpettroPanel extends HTMLElement {
     $("viewonly").checked = !!s.only_when_viewed;
     $("autoana").checked = !!s.auto_analyze;
     $("lnb").checked = !!s.lnb;
+    $("meteoauto").checked = !!s.meteo_auto;
+    if (this.shadowRoot.activeElement !== $("meteoel")) $("meteoel").value = s.meteo_min_el ?? 20;
+    if (this.shadowRoot.activeElement !== $("meteodays")) $("meteodays").value = s.meteo_days ?? 7;
     $("lnbwarn").style.display = s.lnb ? "" : "none";
     this._lnb = !!s.lnb;
     $("reana").value = s.reanalyze_min ?? 30;
@@ -730,7 +774,8 @@ class SpettroPanel extends HTMLElement {
         break;
       }
       case "paused":
-        text = s.paused === "analysis" ? "Analisi del segnale in corso, scansione sospesa…"
+        text = s.paused === "satellite" ? "Ricezione di un satellite meteo in corso, scansione sospesa…"
+          : s.paused === "analysis" ? "Analisi del segnale in corso, scansione sospesa…"
           : s.paused === "live" ? `Analisi continua su ${s.live ? s.live.freq_mhz.toFixed(4) : "?"} MHz, scansione sospesa`
           : s.paused === "disabled" ? "In pausa (interruttore Scansione spento)" : "In pausa: nessun pannello aperto";
         break;
@@ -1330,6 +1375,105 @@ class SpettroPanel extends HTMLElement {
         if (e.target.closest("button")) this._liveStart(f / 1e6, "sat");
       });
     });
+  }
+
+  // ---------------------------------------------------------------- satelliti meteo
+
+  async _loadMeteo(select = null) {
+    try {
+      const res = await this._hass.callWS({ type: "spettro/meteo_list" });
+      this._meteoEntries = res.entries || [];
+      if (res.passes) { this._meteoPasses = res.passes; this._renderMeteoPasses(); }
+      this._renderMeteoList();
+      if (select) this._openMeteo(select);
+    } catch (err) {
+      /* integrazione precedente: la scheda resta vuota */
+    }
+  }
+
+  _renderMeteoPasses() {
+    const el = this.shadowRoot.getElementById("meteopasses");
+    const m = this._meteoPasses;
+    if (!el || !m) return;
+    const t = (s) => new Date(s * 1000).toLocaleString([], { weekday: "short", hour: "2-digit", minute: "2-digit" });
+    const dir = (p) => (p.northbound ? "da sud a nord" : "da nord a sud");
+    const loaded = m.satellites.filter((x) => x.loaded).map((x) => x.name);
+    let head = `Stazione ${m.location[0]}°, ${m.location[1]}° · `
+      + (loaded.length ? `orbite di ${loaded.join(" e ")}${m.tle_age_h != null ? ` (aggiornate ${m.tle_age_h} h fa)` : ""}` : "orbite non ancora scaricate");
+    if (m.tle_error) head += ` · ⚠ ${esc(m.tle_error)}`;
+    if (!m.passes.length) { el.innerHTML = `<div class="hint">${head}<br>Nessun passaggio sopra l'elevazione minima nelle prossime 36 ore.</div>`; return; }
+    const now = Date.now() / 1000;
+    el.className = "";
+    el.innerHTML = `<div class="hint">${head}</div>
+      <table style="margin-top:4px"><thead><tr><th>Quando</th><th>Satellite</th><th class="num">Elev. max</th><th>Direzione</th><th class="num">Durata</th></tr></thead>
+      <tbody>${m.passes.slice(0, 8).map((p) => `<tr${p.aos <= now && now < p.los ? ' style="font-weight:500"' : ""}>
+        <td>${t(p.aos)}${p.aos <= now && now < p.los ? " · ora" : ""}</td><td>${esc(p.satellite)}</td><td class="num">${p.max_el}°</td>
+        <td>${dir(p)}</td><td class="num">${Math.round((p.los - p.aos) / 60)} min</td></tr>`).join("")}</tbody></table>`;
+  }
+
+  _onMeteoLive(m) {
+    const el = this.shadowRoot.getElementById("meteolive");
+    if (m.done) { el.innerHTML = ""; this._meteoPreview = null; return; }
+    if (m.preview) this._meteoPreview = m.preview;
+    const s = m.stats, p = m.pass;
+    const rows = s ? [
+      ["Satellite", `${p.satellite} · ${s.freq_mhz} MHz${s.el != null ? ` · elevazione ${s.el}°` : ""}`],
+      ["Segnale", s.locked ? `agganciato (righe ${s.line_db} dB sopra il fondo, simboli ${s.snr_db} dB)` : "in ricerca…"],
+      ["Doppler", `${s.doppler_hz > 0 ? "+" : ""}${s.doppler_hz} Hz · scarto misurato ${s.offset_hz} Hz`],
+      ["Trame valide", `${s.vcdu_ok}${s.vcdu_bad ? ` · ${s.vcdu_bad} perse` : ""}`],
+      ["Immagine", `${m.rows || 0} righe${m.composite ? ` · ${m.composite}` : ""}`],
+      ["Tempo", `${Math.floor(s.elapsed_s / 60)}:${String(Math.floor(s.elapsed_s % 60)).padStart(2, "0")} · fine alle ${new Date(p.los * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`],
+    ] : [];
+    el.innerHTML = `<div class="livehead" style="margin-top:8px"><span class="dot">● IN RICEZIONE</span>
+        <span class="title">${esc(p.satellite)}</span><button class="primary" id="meteostop">■ Ferma e salva</button></div>
+      ${m.error ? `<div class="err">${esc(m.error)}</div>` : ""}
+      <table><tbody>${rows.map(([k, v]) => `<tr><td>${k}</td><td class="num">${esc(v)}</td></tr>`).join("")}</tbody></table>
+      ${this._meteoPreview ? `<img class="meteoimg" src="data:image/png;base64,${this._meteoPreview}" alt="Immagine in arrivo">` : ""}`;
+    el.querySelector("#meteostop").addEventListener("click", async () => {
+      try { await this._hass.callWS({ type: "spettro/meteo_stop" }); } catch (err) { this._msg(err.message || String(err), true); }
+    });
+  }
+
+  _renderMeteoList() {
+    const el = this.shadowRoot.getElementById("meteolist");
+    const list = this._meteoEntries || [];
+    if (!list.length) { el.className = "hint"; el.textContent = "Nessuna immagine ancora: attiva «Ricevi da solo i passaggi» o premi «Ricevi ora» durante un passaggio."; return; }
+    el.className = "";
+    el.innerHTML = `<table><tbody>${list.map((e) => `<tr data-id="${esc(e.id)}"${e.id === this._meteoSel ? ' class="sel"' : ""}>
+      <td>${new Date(e.timestamp * 1000).toLocaleString([], { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" })}</td>
+      <td>${esc(e.satellite)}</td><td class="num">${e.max_el}°</td><td class="num">${e.rows} righe</td></tr>`).join("")}</tbody></table>`;
+    el.querySelectorAll("tr[data-id]").forEach((tr) => tr.addEventListener("click", () => this._openMeteo(tr.dataset.id)));
+  }
+
+  async _openMeteo(id, ir = false) {
+    this._meteoSel = id;
+    this.shadowRoot.querySelectorAll("#meteolist tr[data-id]").forEach((tr) => tr.classList.toggle("sel", tr.dataset.id === id));
+    const view = this.shadowRoot.getElementById("meteoview");
+    view.innerHTML = `<div class="hint">Caricamento dell'immagine…</div>`;
+    try {
+      const r = await this._hass.callWS({ type: "spettro/meteo_get", entry_id: id, ir });
+      const when = new Date(r.timestamp * 1000).toLocaleString();
+      view.innerHTML = `<div class="meteogrid hint">
+          <span>${esc(r.satellite)} · ${when}</span><span>elevazione max ${r.max_el}° · ${r.northbound ? "da sud a nord" : "da nord a sud"}</span>
+          <span>${r.rows} righe · ${esc(ir ? "infrarosso (canale 5)" : r.composite)}</span><span>${r.vcdu_ok} trame valide su ${r.freq_mhz} MHz</span></div>
+        <div class="row">
+          ${r.has_ir ? `<button id="meteoir">${ir ? "Visibile" : "Infrarosso"}</button>` : ""}
+          <a id="meteodl" download="${esc(id)}${ir ? "-ir" : ""}.png"><button>Scarica</button></a>
+          <button id="meteodel">Cancella</button>
+        </div>
+        <img class="meteoimg" src="data:image/png;base64,${r.png}" alt="Immagine del satellite meteo">`;
+      const dl = view.querySelector("#meteodl");
+      dl.href = `data:image/png;base64,${r.png}`;
+      const irb = view.querySelector("#meteoir");
+      if (irb) irb.addEventListener("click", () => this._openMeteo(id, !ir));
+      view.querySelector("#meteodel").addEventListener("click", async () => {
+        if (!confirm("Cancellare questa immagine?")) return;
+        await this._hass.callWS({ type: "spettro/meteo_delete", entry_id: id });
+        view.innerHTML = "";
+      });
+    } catch (err) {
+      view.innerHTML = `<div class="err">${esc(err.message || err.code || err)}</div>`;
+    }
   }
 
   _onLiveSat(m) {
