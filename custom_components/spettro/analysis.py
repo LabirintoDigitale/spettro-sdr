@@ -13,7 +13,7 @@ import zlib
 
 import numpy as np
 
-from . import dab, rds
+from . import dab, dvbt, rds
 from .demod import MODES, demodulate, fm_multiplex, wfm_audio
 
 FFT_SIZE = 2048  # ~1 kHz di risoluzione e ~1 ms per riga a 2 MS/s
@@ -332,10 +332,23 @@ def analyze_iq(
     if result["rds"] and result["rds"]["ps"] and result["rds"]["ps_complete"]:
         result["kind"] = "FM a banda larga: radio broadcast «" + result["rds"]["ps"] + "»"
 
+    # TV digitale: il multiplex (7–8 MHz) riempie tutta la banda ricevuta, quindi lo spettro non lo
+    # distingue dal rumore; lo rivela la ripetizione dei simboli OFDM (intervallo di guardia)
+    tv_ch = dvbt.channel_for(target_hz / 1e6)
+    result["tv"] = result["tv_channel"] = result["tv_channel_mhz"] = None
+    if tv_ch and rate >= 1_500_000:
+        m = dvbt.measure(iq, rate, tv_ch[2])
+        if m:
+            result["tv"], result["tv_channel"], result["tv_channel_mhz"] = m, dvbt.channel_label(tv_ch[0]), tv_ch[1]
+            result["detected"], result["audio_mode"] = True, None
+            result["snr_db"] = m["mer_db"]  # il rapporto segnale/rumore che conta per la TV
+            result["kind"] = (f"TV digitale {m['standard']} canale {result['tv_channel']}: multiplex "
+                              f"{m['mode']} {m['guard']}, qualità {dvbt.quality_label(m)}")
+
     # DAB: blocco largo ~1,5 MHz in un canale della banda III
     ch = dab.channel_for(result["center_mhz"]) or dab.channel_for(target_hz / 1e6)
     result["dab_channel"] = result["dab"] = result["dab_channel_mhz"] = None
-    if ch and detected and result["obw_99_khz"] >= 600:
+    if ch and detected and result["obw_99_khz"] >= 600 and not result["tv"]:
         result["dab_channel"], result["dab_channel_mhz"] = ch
         result["audio_mode"] = None
         dab_offset = ch[1] * 1e6 - center_hz
@@ -373,6 +386,12 @@ def describe(result: dict[str, Any]) -> str:
     if m and m.get("ensemble"):
         lines.append(f"DAB canale {r['dab_channel']} decodificato: multiplex «{m['ensemble']}» (EId {m['eid']}), servizi: "
                      + ", ".join(f"{s['name']} ({s['type']})" for s in m["services"]) + ".")
+    t = r.get("tv")
+    if t:
+        lines.append(f"TV digitale canale {r['tv_channel']}: struttura OFDM {t['standard']} riconosciuta dall'intervallo "
+                     f"di guardia (modalità {t['mode']}, guardia {t['guard']}, canale {t['bandwidth_mhz']} MHz), "
+                     f"MER stimato {t['mer_db']} dB, livello {t['level_db']} dBFS. La chiavetta riceve solo ~2 MHz "
+                     "del multiplex: i programmi non sono decodificabili.")
     d = r.get("rds")
     if d:
         info = [f"{k} {v}" for k, v in (("PI", d["pi"]), ("nome (PS)", d["ps"]), ("testo (RT)", d["rt"]),

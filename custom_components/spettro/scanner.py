@@ -21,7 +21,7 @@ from typing import Any
 
 import numpy as np
 
-from . import dab, rds
+from . import dab, dvbt, rds
 from .analysis import analyze_iq
 from .dabplus import DabLiveReceiver
 from .archive import SpikeArchive
@@ -65,6 +65,7 @@ LIVE_RDS_WINDOW_S = 6.0  # multiplex tenuto per decodificare l'RDS in diretta
 LIVE_RDS_EVERY_S = 1.0
 LIVE_NO_VIEWER_STOP_S = 30  # senza pannelli aperti l'analisi continua si ferma da sola
 ANALYSIS_MAX_S = 5  # durata massima di una registrazione per l'analisi
+TV_LIVE_S = 0.4  # campioni di ogni misura del multiplex TV in diretta
 SPIKE_TOL_HZ = 100e3  # due picchi così vicini sono lo stesso segnale
 
 
@@ -444,6 +445,9 @@ class SpectrumScanner:
         ch = dab.channel_for(freq_hz / 1e6)
         if ch and rate == dab.RATE:
             return ch[1] * 1e6
+        tv = dvbt.channel_for(freq_hz / 1e6)
+        if tv and rate >= 1_500_000:
+            return tv[1] * 1e6  # multiplex TV: tutta la banda ricevuta è dentro il canale
         return float(round(freq_hz + rate / 8))
 
     def _spike_candidates(self, seg: np.ndarray, f0: float, bin_hz: float, level: float) -> list[float]:
@@ -458,8 +462,11 @@ class SpectrumScanner:
             f = f0 + int(i) * bin_hz
             # un multiplex DAB è un blocco piatto con più "picchi": conta una volta, al centro del canale
             ch = dab.channel_for(f / 1e6)
+            tv = dvbt.channel_for(f / 1e6)
             if ch:
                 f = ch[1] * 1e6
+            elif tv and tv[2] == 8:  # anche un multiplex TV (8 MHz, UHF) conta una volta sola
+                f = tv[1] * 1e6
             if any(abs(f - g) <= SPIKE_TOL_HZ for g in out):
                 continue
             if self.archive.find(f, SPIKE_TOL_HZ, newer_than=recent):
@@ -511,6 +518,9 @@ class SpectrumScanner:
     def live_mode_for(freq_hz: float) -> str:
         """Demodulazione predefinita per la frequenza: FM larga per la radio, AM per la banda aerea."""
         mhz = freq_hz / 1e6
+        tv = dvbt.channel_for(mhz)
+        if tv and tv[2] == 8:
+            return "tv"
         if 87.5 <= mhz <= 108:
             return "wfm"
         if 118 <= mhz <= 137:
@@ -532,8 +542,15 @@ class SpectrumScanner:
         if mode == "dab":
             ch = dab.channel_for(freq_hz / 1e6)
             self.status["live"]["channel"] = ch[0] if ch else None
+        if mode == "tv":
+            tv = dvbt.channel_for(freq_hz / 1e6)
+            if not tv:
+                self.status["live"] = None
+                raise RuntimeError("La frequenza non è in un canale TV (UHF 21–48 o VHF D–H2)")
+            self.status["live"].update(channel=dvbt.channel_label(tv[0]), freq_mhz=tv[1])
         self._update_active()  # la scansione si ferma al passo successivo e libera la chiavetta
-        run = self._live_dab_run(freq_hz, sid) if mode == "dab" else self._live_run(freq_hz, mode)
+        run = (self._live_dab_run(freq_hz, sid) if mode == "dab"
+               else self._live_tv_run(freq_hz) if mode == "tv" else self._live_run(freq_hz, mode))
         self._live_task = asyncio.get_running_loop().create_task(run, name="spettro_live")
         if self.viewers <= 0:
             self._schedule_live_stop()
@@ -681,6 +698,71 @@ class SpectrumScanner:
         except (OSError, TimeoutError, asyncio.IncompleteReadError, RtlTcpError) as err:
             msg = str(err) or type(err).__name__
             _LOGGER.warning("Analisi continua DAB interrotta: %s", msg)
+            self._emit({"kind": "live_error", "error": msg})
+        finally:
+            if asyncio.current_task() is self._live_task:
+                self._live_task = None
+            self.status["live"] = None
+            self._update_active()
+
+    async def _live_tv_run(self, freq_hz: float) -> None:
+        """Misuratore di campo TV: chiavetta al centro del canale, livello e qualità del multiplex di continuo."""
+        loop = asyncio.get_running_loop()
+        name, center_mhz, bw = dvbt.channel_for(freq_hz / 1e6) or ("?", freq_hz / 1e6, 8)
+        center = center_mhz * 1e6
+        rate = dab.RATE
+        discard = RCV_BUF + 2 * READ_LIMIT + int(rate * 2 * max(self.settings.settle_ms, 100) / 1000)
+        discard -= discard % 2
+        chunk = int(rate * TV_LIVE_S) * 2
+        known: dict[str, Any] | None = None
+        misses = 0
+
+        def work(raw: bytes) -> tuple[dict[str, Any] | None, list[float], float]:
+            a = np.frombuffer(raw, dtype=np.uint8).astype(np.float32) - 127.5
+            iq = a[0::2] + 1j * a[1::2]
+            level = 10 * math.log10(float(np.mean(a * a)) * 2 / 127.5**2 + 1e-20)
+            return dvbt.measure(iq, rate, bw, known), dvbt.spectrum_row(iq), round(level, 1)
+
+        try:
+            async with self._radio:
+                reader, writer, tuner = await _open(self.host, self.port)
+                try:
+                    self.status["tuner"] = TUNER_NAMES.get(tuner, f"Tipo {tuner}")
+                    await self._configure(writer, rate)
+                    await self._send(writer, CMD_SET_FREQ, int(round(center)))
+                    async with asyncio.timeout(IO_TIMEOUT):
+                        await self._discard(reader, discard)
+                    while True:
+                        async with asyncio.timeout(IO_TIMEOUT):
+                            raw = await reader.readexactly(chunk)
+                        job = loop.run_in_executor(None, work, raw)
+                        # durante il calcolo si scartano i campioni in arrivo: la misura dopo è fresca
+                        while not job.done():
+                            async with asyncio.timeout(IO_TIMEOUT):
+                                if not await reader.read(READ_LIMIT):
+                                    raise ConnectionError("Connessione chiusa dal server")
+                            await asyncio.sleep(0)
+                        m, row, level = job.result()
+                        if m:
+                            known, misses = m, 0
+                        else:
+                            misses += 1
+                            if misses >= 3:
+                                known = None  # forse è cambiato: si torna a cercare tutte le modalità
+                        self._emit({"kind": "live_tv", "freq_mhz": center_mhz, "channel": dvbt.channel_label(name),
+                                    "row": row, "span_hz": rate, "level_db": level,
+                                    "tv": m, "quality": dvbt.quality_label(m) if m else None})
+                finally:
+                    writer.close()
+                    try:
+                        await writer.wait_closed()
+                    except OSError:
+                        pass
+        except asyncio.CancelledError:
+            raise
+        except (OSError, TimeoutError, asyncio.IncompleteReadError, RtlTcpError) as err:
+            msg = str(err) or type(err).__name__
+            _LOGGER.warning("Misura continua TV interrotta: %s", msg)
             self._emit({"kind": "live_error", "error": msg})
         finally:
             if asyncio.current_task() is self._live_task:

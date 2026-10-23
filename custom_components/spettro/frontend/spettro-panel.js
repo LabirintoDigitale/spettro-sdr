@@ -1,7 +1,7 @@
 // Pannello "Spettro" per Home Assistant: grafico dello spettro, waterfall e picchi.
 
 // deve coincidere con VERSION in const.py: se il backend ne riporta un'altra manca un riavvio
-const PANEL_VERSION = "1.10.1";
+const PANEL_VERSION = "1.11.0";
 
 const PRESETS = [
   ["Personalizzato", null, null],
@@ -101,6 +101,37 @@ function concatU8(parts) {
   return out;
 }
 
+// canali UHF della TV digitale in Italia (21–48, 8 MHz): centro in Hz
+const TV_UHF = Array.from({ length: 28 }, (_, i) => [String(21 + i), (474 + 8 * i) * 1e6]);
+
+// tipi di segnale per il filtro dell'archivio, riconosciuti dal testo del tipo rilevato
+const ARCH_CATS = [
+  ["dab", "DAB / DAB+"], ["tv", "TV digitale"], ["fm", "Radio FM"], ["voce", "Voce e analogico"],
+  ["cell", "Cellulare (GSM)"], ["dati", "Dati digitali"], ["vuoto", "Nessun segnale chiaro"],
+];
+function archCat(kind) {
+  const k = kind || "";
+  if (/^nessun segnale/.test(k)) return "vuoto";
+  if (/^segnale digitale a banda larga/.test(k)) return "dati"; // OFDM generico (LTE, DAB+ o TV)
+  if (/^DAB/.test(k)) return "dab";
+  if (/^TV digitale/.test(k)) return "tv";
+  if (/^FM a banda larga/.test(k)) return "fm";
+  if (/GSM/.test(k)) return "cell";
+  if (/fonia|^AM|portante stabile|non classificato/.test(k)) return "voce";
+  return "dati";
+}
+
+function tvRows(t) {
+  return [
+    ["Standard", t.standard === "DVB-T2" ? "DVB-T2 (HD/HEVC)" : "DVB-T"],
+    ["Qualità (MER stimato)", `${t.mer_at_least ? "≥ " : ""}${t.mer_db} dB`],
+    ["Modalità FFT", `${t.mode} (portanti ogni ${t.carrier_spacing_hz} Hz)`],
+    ["Intervallo di guardia", `${t.guard} · simbolo ${(t.symbol_us / 1000).toFixed(3)} ms`],
+    ["Larghezza canale", `${t.bandwidth_mhz} MHz`],
+    ["Livello", `${t.level_db} dBFS`],
+  ];
+}
+
 function esc(t) {
   return String(t).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
 }
@@ -130,6 +161,8 @@ class SpettroPanel extends HTMLElement {
     this._ana = null; // risultato dell'ultima analisi
     this._archive = []; // analisi archiviate (solo indice), dalla più recente
     this._archHours = null;
+    this._archFilter = "all"; // tipo di segnale mostrato nell'archivio
+    try { this._archFilter = localStorage.getItem("spettro.archFilter") || "all"; } catch (e) { /* non disponibile */ }
     this._archSort = { key: "timestamp", desc: true }; // colonna e verso dell'ordinamento dell'archivio
     this._archSel = null; // id dell'analisi dell'archivio mostrata
     this._favs = []; // frequenze preferite
@@ -219,6 +252,7 @@ class SpettroPanel extends HTMLElement {
     if (m.kind === "live") { this._onLive(m); return; }
     if (m.kind === "live_rds") { this._onLiveRds(m.rds); return; }
     if (m.kind === "live_dab") { this._onLiveDab(m); return; }
+    if (m.kind === "live_tv") { this._onLiveTv(m); return; }
     if (m.kind === "live_error") { this._msg(`Analisi continua interrotta: ${m.error}`, true); return; }
     if (m.kind === "analysis") {
       if (m.entry && !this._archive.some((e) => e.id === m.entry.id)) {
@@ -253,6 +287,7 @@ class SpettroPanel extends HTMLElement {
       }
       this._spec = { ...m, values, peaks, cursor: m.f_start + m.values.length * m.bin_hz };
     }
+    this._renderTv();
     if (this._view && (this._view[1] < m.range_start || this._view[0] > m.range_stop)) this._view = null;
     this._draw();
   }
@@ -311,6 +346,10 @@ class SpettroPanel extends HTMLElement {
         .answer { white-space:pre-wrap; font-size:14px; line-height:1.45; background:var(--secondary-background-color);
                   border-radius:6px; padding:10px; }
         .err { color:var(--error-color,#db4437); }
+        /* la lista scorre da sola: aprire un'analisi non la riporta in cima */
+        #archive { max-height:min(70vh, 720px); overflow-y:auto; }
+        #archive thead th { position:sticky; top:0; z-index:1; background:var(--card-background-color, var(--primary-background-color)); }
+        #archfilter { width:auto; margin-bottom:6px; }
         #archive table td { cursor:pointer; }
         #archive th.sort { cursor:pointer; user-select:none; white-space:nowrap; }
         #archive th.sort:hover { color:var(--primary-text-color); }
@@ -323,6 +362,16 @@ class SpettroPanel extends HTMLElement {
         .anahead { font-size:12px; color:var(--secondary-text-color); }
         button.heart { font-size:20px; line-height:1; padding:6px 10px; color:#e53935; }
         #favs table td { cursor:pointer; }
+        #tvlist .tvrow { display:grid; grid-template-columns:64px 1fr 52px 34px; align-items:center; gap:6px; padding:3px 0;
+                         cursor:pointer; font-size:13px; }
+        #tvlist .tvrow:hover { background:var(--secondary-background-color); }
+        #tvlist .tvbar, .meter { height:10px; background:var(--divider-color); border-radius:5px; overflow:hidden; position:relative; }
+        #tvlist .tvbar > div, .meter > div { height:100%; border-radius:5px; }
+        #tvlist button { padding:2px 6px; font-size:12px; }
+        .meter { height:18px; margin:4px 0 2px; }
+        .meter .mark { position:absolute; top:0; bottom:0; width:2px; background:var(--primary-text-color, #000); opacity:.7; border-radius:0; }
+        .bignum { font-size:28px; font-weight:500; }
+        canvas.trend { width:100%; height:70px; display:block; margin-top:6px; background:#080820; border-radius:6px; }
         #favs tr:hover td { background:var(--secondary-background-color); }
         #favs td.name { font-weight:500; }
         #favs td.act { text-align:right; white-space:nowrap; }
@@ -380,6 +429,12 @@ class SpettroPanel extends HTMLElement {
           </div>
         </div>
         <div class="side">
+          <div class="card" id="tvcard" style="display:none">
+            <h3>Canali TV</h3>
+            <div id="tvlist"></div>
+            <div class="hint" style="margin-top:6px">Multiplex del digitale terrestre trovati nell'ultima scansione: quanto
+              ciascuno sta sopra il rumore. ▶ apre il misuratore continuo (modalità, guardia e qualità del segnale).</div>
+          </div>
           <div class="card">
             <h3>Preferiti <span style="color:#e53935">❤</span></h3>
             <div id="favs" class="hint">Nessun preferito: seleziona una frequenza e tocca ♡ nell'Analisi segnale.</div>
@@ -390,6 +445,7 @@ class SpettroPanel extends HTMLElement {
               <button id="archclear" title="Cancella tutte le analisi archiviate">Svuota archivio</button>
             </div>
             <div class="hint" id="archinfo" style="margin:6px 0"></div>
+            <select id="archfilter" title="Mostra solo un tipo di segnale" style="display:none"></select>
             <div id="archive" class="hint">Nessuna analisi archiviata.</div>
           </div>
           <div class="card">
@@ -506,6 +562,12 @@ class SpettroPanel extends HTMLElement {
       }
     });
     for (const id of ["autoana", "limstep", "limsweep"]) $(id).addEventListener("change", () => this._syncLimits());
+    $("archfilter").addEventListener("change", (ev) => {
+      this._archFilter = ev.target.value;
+      try { localStorage.setItem("spettro.archFilter", this._archFilter); } catch (e) { /* non disponibile */ }
+      this.shadowRoot.getElementById("archive").scrollTop = 0;
+      this._renderArchive();
+    });
     $("archclear").addEventListener("click", async () => {
       if (!this._archive.length || !confirm("Cancellare tutte le analisi archiviate?")) return;
       try {
@@ -1086,16 +1148,20 @@ class SpettroPanel extends HTMLElement {
       this._rtHistory = [];
       this._liveRds = null;
       this._dabState = null;
+      this._tvTrend = [];
       this._dabFallback = false;
       $("liveslide").style.display = "none";
       $("liveslide").removeAttribute("src");
       this._closeDec();
       $("liverds").innerHTML = live.mode === "wfm" ? `<div class="hint" style="margin-top:6px">In attesa dei dati RDS…</div>`
-        : live.mode === "dab" ? `<div class="hint" style="margin-top:6px">Aggancio del multiplex DAB…</div>` : "";
+        : live.mode === "dab" ? `<div class="hint" style="margin-top:6px">Aggancio del multiplex DAB…</div>`
+        : live.mode === "tv" ? `<div class="hint" style="margin-top:6px">Ricerca del multiplex TV…</div>` : "";
     }
-    $("livemode").style.display = live.mode === "dab" ? "none" : "";
+    const digital = live.mode === "dab" || live.mode === "tv";
+    $("livemode").style.display = digital ? "none" : "";
+    $("livelisten").style.display = live.mode === "tv" ? "none" : "";
     this._updateFavBtn();
-    if (live.mode !== "dab") $("livemode").value = live.mode;
+    if (!digital) $("livemode").value = live.mode;
     this._liveTitle();
   }
 
@@ -1106,6 +1172,10 @@ class SpettroPanel extends HTMLElement {
       const ens = this._dabState && this._dabState.info && this._dabState.info.ensemble;
       this.shadowRoot.getElementById("livetitle").textContent =
         `DAB ${live.channel || ""} · «${live.service || live.sid}»${ens ? ` (${ens})` : ""}`;
+      return;
+    }
+    if (live.mode === "tv") {
+      this.shadowRoot.getElementById("livetitle").textContent = `TV ${live.channel || ""} · ${live.freq_mhz.toFixed(1)} MHz`;
       return;
     }
     const fav = this._favFor(live.freq_mhz);
@@ -1123,6 +1193,104 @@ class SpettroPanel extends HTMLElement {
     $("livelevel").textContent = `livello ${m.level_db} dBFS`;
     this._drawLiveRow(m.row);
     if (this._listen && this._audioCtx) this._playPcm(m.audio);
+  }
+
+  _onLiveTv(m) {
+    if (!this._live) this._setLive({ freq_mhz: m.freq_mhz, mode: "tv", channel: m.channel });
+    if (this._live.mode !== "tv") return;
+    const $ = (id) => this.shadowRoot.getElementById(id);
+    $("livelo").textContent = ((m.freq_mhz * 1e6 - m.span_hz / 2) / 1e6).toFixed(3);
+    $("livehi").textContent = ((m.freq_mhz * 1e6 + m.span_hz / 2) / 1e6).toFixed(3);
+    $("livelevel").textContent = `livello ${m.level_db} dBFS`;
+    this._drawLiveRow(m.row);
+    const t = m.tv;
+    const trend = this._tvTrend || (this._tvTrend = []);
+    trend.push(t ? t.mer_db : null);
+    if (trend.length > 150) trend.shift();
+    const el = $("liverds");
+    if (!t) {
+      el.innerHTML = `<div class="hint" style="margin-top:6px">Nessun multiplex TV riconoscibile su ${esc(m.channel)}
+        (livello ${m.level_db} dBFS): canale libero, segnale troppo debole o antenna da orientare.</div>
+        <canvas class="trend" id="tvtrend"></canvas>`;
+      this._drawTvTrend();
+      return;
+    }
+    const need = t.standard === "DVB-T" ? 18 : 17; // come min_mer() in dvbt.py
+    const merPct = Math.max(0, Math.min(100, (t.mer_db / 32) * 100));
+    const color = t.mer_db >= need + 3 ? "#43a047" : t.mer_db >= need ? "#fb8c00" : "#e53935";
+    const lvlPct = Math.max(0, Math.min(100, ((m.level_db + 45) / 45) * 100));
+    el.innerHTML = `<h3 style="margin:10px 0 4px">Misuratore di campo · ${esc(t.standard)}</h3>
+      <div class="row" style="justify-content:space-between;align-items:baseline">
+        <span>Qualità (MER stimato)</span><span class="bignum" style="color:${color}">${t.mer_at_least ? "≥ " : ""}${t.mer_db} dB</span></div>
+      <div class="meter"><div style="width:${merPct}%;background:${color}"></div>
+        <div class="mark" style="left:${(need / 32) * 100}%" title="minimo per vedere senza blocchi"></div></div>
+      <div class="hint">${esc(m.quality || "")} · la tacca segna il minimo per ${esc(t.standard)} (~${need} dB)</div>
+      <div class="row" style="justify-content:space-between;margin-top:8px"><span>Livello in ingresso</span><span>${m.level_db} dBFS</span></div>
+      <div class="meter"><div style="width:${lvlPct}%;background:#039be5"></div></div>
+      <div class="hint">Vicino a 0 dBFS la chiavetta satura: abbassa il guadagno. Molto in basso: alzalo o controlla l'antenna.</div>
+      <canvas class="trend" id="tvtrend"></canvas>
+      <div class="hint">Andamento della qualità (ultimi ~2 minuti): muovi l'antenna lentamente e fermati dove è più alta.</div>
+      <table style="margin-top:6px"><tbody>${tvRows(t).filter(([k]) => k !== "Qualità (MER stimato)")
+        .map(([k, v]) => `<tr><td>${k}</td><td class="num">${esc(v)}</td></tr>`).join("")}</tbody></table>`;
+    this._drawTvTrend();
+  }
+
+  _drawTvTrend() {
+    const c = this.shadowRoot.getElementById("tvtrend");
+    if (!c) return;
+    const dpr = window.devicePixelRatio || 1;
+    const w = Math.max(1, Math.round(c.clientWidth * dpr)), h = Math.max(1, Math.round(c.clientHeight * dpr));
+    c.width = w; c.height = h;
+    const g = c.getContext("2d");
+    const data = this._tvTrend || [];
+    const y = (v) => h - (Math.max(0, Math.min(32, v)) / 32) * h;
+    g.strokeStyle = "rgba(255,255,255,.25)"; g.setLineDash([4 * dpr, 4 * dpr]);
+    for (const v of [10, 20, 30]) { g.beginPath(); g.moveTo(0, y(v)); g.lineTo(w, y(v)); g.stroke(); }
+    g.setLineDash([]); g.strokeStyle = "#ffd54f"; g.lineWidth = 2 * dpr; g.beginPath();
+    let pen = false;
+    data.forEach((v, i) => {
+      const x = (i / 149) * w;
+      if (v === null) { pen = false; return; }
+      if (pen) g.lineTo(x, y(v)); else g.moveTo(x, y(v));
+      pen = true;
+    });
+    g.stroke();
+    g.fillStyle = "rgba(255,255,255,.6)"; g.font = `${10 * dpr}px sans-serif`;
+    for (const v of [10, 20, 30]) g.fillText(`${v} dB`, 4 * dpr, y(v) + 11 * dpr);
+  }
+
+  _renderTv() {
+    // multiplex TV nella scansione: livello medio del canale sopra il rumore
+    const card = this.shadowRoot.getElementById("tvcard");
+    const sp = this._spec;
+    if (!card || !sp || !sp.values || !sp.values.length) return;
+    const found = [];
+    for (const [ch, fc] of TV_UHF) {
+      if (fc - 3.5e6 < sp.range_start || fc + 3.5e6 > sp.range_stop) continue;
+      const i0 = Math.max(0, Math.round((fc - 3.5e6 - sp.f_start) / sp.bin_hz));
+      const i1 = Math.min(sp.values.length, Math.round((fc + 3.5e6 - sp.f_start) / sp.bin_hz));
+      if (i1 - i0 < 3) continue;
+      const v = sp.values.slice(i0, i1).sort((a, b) => a - b);
+      const above = v[Math.floor(v.length / 2)] - sp.floor_db;
+      if (above >= 3) found.push([ch, fc, above]);
+    }
+    const covered = TV_UHF.some(([, fc]) => fc > sp.range_start && fc < sp.range_stop);
+    card.style.display = covered ? "" : "none";
+    if (!covered) return;
+    const list = this.shadowRoot.getElementById("tvlist");
+    if (!found.length) { list.innerHTML = `<div class="hint">Nessun multiplex TV sopra il rumore nell'intervallo scansionato.</div>`; return; }
+    list.innerHTML = found.map(([ch, fc, a]) => `<div class="tvrow" data-f="${fc}">
+        <span>UHF ${ch}</span>
+        <div class="tvbar"><div style="width:${Math.min(100, (a / 40) * 100)}%;background:${a >= 15 ? "#43a047" : a >= 8 ? "#fb8c00" : "#e53935"}"></div></div>
+        <span class="num">${a.toFixed(0)} dB</span>
+        <button title="Misuratore continuo del canale ${ch}">▶</button></div>`).join("");
+    list.querySelectorAll(".tvrow").forEach((row) => {
+      const f = Number(row.dataset.f);
+      row.addEventListener("click", (e) => {
+        if (e.target.closest("button")) { this._select(f); this._liveStart(f / 1e6, "tv"); return; }
+        this._select(f);
+      });
+    });
   }
 
   _playPcm(b64) {
@@ -1504,6 +1672,7 @@ class SpettroPanel extends HTMLElement {
     info.textContent = `${this._archive.length} analisi · ${size} su disco · le più vecchie di ${hours ?? "?"} ore vengono cancellate`;
     if (!this._archive.length) {
       el.className = "hint";
+      this.shadowRoot.getElementById("archfilter").style.display = "none";
       el.textContent = "Nessuna analisi archiviata. Attiva \"Analizza subito i picchi trovati\" o usa Analizza.";
       return;
     }
@@ -1512,9 +1681,20 @@ class SpettroPanel extends HTMLElement {
       return (today ? "" : d.toLocaleDateString([], { day: "2-digit", month: "2-digit" }) + " ")
         + d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
     };
+    // filtro per tipo, con il numero di analisi di ciascuno
+    const sel = this.shadowRoot.getElementById("archfilter");
+    const counts = {};
+    for (const e of this._archive) { const c = archCat(e.kind); counts[c] = (counts[c] || 0) + 1; }
+    if (this._archFilter !== "all" && !counts[this._archFilter]) this._archFilter = "all";
+    sel.style.display = "";
+    sel.innerHTML = `<option value="all">Tutti i tipi (${this._archive.length})</option>`
+      + ARCH_CATS.filter(([k]) => counts[k]).map(([k, t]) => `<option value="${k}">${t} (${counts[k]})</option>`).join("");
+    sel.value = this._archFilter;
+    const list = this._archFilter === "all" ? this._archive : this._archive.filter((e) => archCat(e.kind) === this._archFilter);
     const { key, desc } = this._archSort;
-    const rows = this._archive.slice().sort((a, b) => (desc ? b[key] - a[key] : a[key] - b[key]));
+    const rows = list.slice().sort((a, b) => (desc ? b[key] - a[key] : a[key] - b[key]));
     const th = (k, label, cls = "") => `<th class="sort ${cls}" data-key="${k}">${label}${k === key ? (desc ? " ▼" : " ▲") : ""}</th>`;
+    const top = el.scrollTop;
     el.className = "";
     el.innerHTML = `<table><thead><tr>${th("timestamp", "Ora")}${th("target_mhz", "MHz")}${th("snr_db", "SNR", "num")}</tr></thead>
       ${rows.map((e) => `<tbody class="entry${e.id === this._archSel ? " sel" : ""}" data-id="${esc(e.id)}"><tr>
@@ -1522,6 +1702,7 @@ class SpettroPanel extends HTMLElement {
         <tr><td colspan="3" class="kind">${esc(e.kind)}</td></tr></tbody>`).join("")}
       </table>
       <div class="hint" style="margin-top:6px">✋ = analisi avviata a mano.</div>`;
+    el.scrollTop = top;
     el.querySelectorAll("th.sort").forEach((h) => h.addEventListener("click", () => {
       const k = h.dataset.key;
       // primo tocco: data dalla più recente, frequenza crescente, SNR dal più forte; secondo tocco: al contrario
@@ -1618,6 +1799,13 @@ class SpettroPanel extends HTMLElement {
           <div class="hint" style="margin-top:4px">${m.fib_ok}/${m.fib_total} blocchi informativi integri in ${m.frames} trame${m.fib_ok < m.fib_total * 0.7 ? " · segnale al limite" : ""}</div>`;
       }
     }
+    // TV digitale: modalità, guardia e qualità del multiplex
+    const t = r.tv;
+    const tvHtml = t ? `<h3 style="margin:8px 0 4px">TV digitale · canale ${esc(r.tv_channel)}</h3>
+        <table><tbody>${tvRows(t).map(([k, v]) => `<tr><td>${k}</td><td class="num">${esc(v)}</td></tr>`).join("")}</tbody></table>
+        <div class="row" style="margin-top:6px"><button id="tvlive">▶ Misura continua</button></div>
+        <div class="hint" style="margin-top:4px">La chiavetta riceve ~2 MHz degli 8 del multiplex: si misura il segnale,
+          ma i programmi non si possono vedere.</div>` : "";
     const states = this._hass.states;
     const ais = Object.keys(states).filter((e) => e.startsWith("ai_task.")).sort();
     const aiCtl = ais.length
@@ -1644,6 +1832,7 @@ class SpettroPanel extends HTMLElement {
           <div class="hint" style="margin-top:6px">${r.bands.length ? esc(r.bands.join(" · ")) : "Frequenza non presente nella tabella delle bande."}</div>
           ${rdsHtml}
           ${dabHtml}
+          ${tvHtml}
         </div>
       </div>
       ${r.audio ? `<div class="row">
@@ -1671,6 +1860,8 @@ class SpettroPanel extends HTMLElement {
       // le analisi delle versioni precedenti non hanno il centro del canale: va bene qualsiasi
       // frequenza del blocco, il backend risale al canale
       this._liveStart(r.dab_channel_mhz || r.center_mhz, "dab", b.dataset.sid)));
+    const tvb = this.shadowRoot.getElementById("tvlive");
+    if (tvb) tvb.addEventListener("click", () => this._liveStart(r.tv_channel_mhz, "tv"));
     const btn = this.shadowRoot.getElementById("askai");
     if (btn) btn.addEventListener("click", () => this._askAi());
   }
