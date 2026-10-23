@@ -124,6 +124,17 @@ La TV digitale terrestre (DVB-T/DVB-T2) non si può guardare con la chiavetta in
 - **Analisi**: anche se lo spettro di un multiplex è piatto come il rumore, Spettro lo riconosce dalla struttura dei simboli OFDM, che ripetono in testa la propria parte finale (intervallo di guardia). Ne ricava lo **standard** (DVB-T o DVB-T2), la **modalità** (2k…32k), l'**intervallo di guardia** e una **stima del MER**, la qualità del segnale che decide se l'immagine si vede senza blocchi. Indicativamente servono ~18 dB per il DVB-T e ~17 dB per il DVB-T2.
 - **▶ Misura continua**: la chiavetta resta sul canale e aggiorna più volte al secondo **qualità** e **livello**, con le barre e il grafico degli ultimi due minuti. Si muove l'antenna lentamente e ci si ferma dove la qualità è più alta. Un livello vicino a 0 dBFS vuol dire chiavetta saturata (abbassa il guadagno).
 
+**Esempio** (finestra di Spettro, misura continua sul canale UHF 42, 642 MHz)
+
+<p align="center">
+  <a href="https://raw.githubusercontent.com/LabirintoDigitale/spettro-sdr/main/docs/images/screenshots/tv.jpg"><img src="https://raw.githubusercontent.com/LabirintoDigitale/spettro-sdr/main/docs/images/screenshots/tv.jpg" width="800" alt="Misuratore di campo su un multiplex DVB-T del canale UHF 42"></a>
+</p>
+
+- **TV UHF 42 · 642,0 MHz**: la chiavetta è al centro del canale e la cascata mostra i 2 MHz centrali del multiplex, una fascia uniforme di portanti OFDM. Le strisce verticali più chiare e più scure sono portanti attenuate dalle riflessioni (percorsi multipli), che si spostano lentamente nel tempo.
+- Lo standard è riconosciuto come **DVB-T** in modalità **8k** con intervallo di guardia **1/4**: simboli da 1,120 ms con portanti ogni 1116 Hz, la configurazione tipica dei multiplex DVB-T italiani.
+- **Qualità (MER stimato) 18,8 dB, discreta**: appena sopra la tacca dei ~18 dB che servono per vedere senza blocchi. Il grafico sotto mostra la qualità degli ultimi due minuti, tra circa 20 e 25 dB con qualche calo: è la traccia da seguire mentre si orienta l'antenna.
+- **Livello in ingresso −20,8 dBFS**: lontano dalla saturazione (0 dBFS), quindi il guadagno va bene.
+
 I nomi dei canali (Rai 1, Canale 5…) non si vedono: viaggiano dentro il flusso dati, che senza l'intero multiplex non si decodifica. Con una guardia corta (es. DVB-T2 32k 1/128) la stima del MER resta per difetto e il pannello la indica con «≥».
 
 ## Requisiti
