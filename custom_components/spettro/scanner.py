@@ -184,19 +184,69 @@ def compute_psd(raw: bytes, fft_size: int, window: np.ndarray, norm: float) -> n
     return (10 * np.log10(power / norm + 1e-20)).astype(np.float32)
 
 
+FLOOR_SPAN = 11  # passi (~16 MHz) su cui si stima il rumore di una zona
+
+
+def zone_floor(lows: list[float] | np.ndarray) -> float:
+    """Rumore di una zona dai livelli bassi dei suoi passi: il 25° percentile, così un segnale largo
+    che occupa qualche passo intero (DAB 1,5 MHz, TV 8 MHz) non diventa lui il "rumore"."""
+    return float(np.percentile(lows, 25))
+
+
+def step_low(seg: np.ndarray) -> float:
+    """Livello basso di un passo (20° percentile dei suoi bin)."""
+    return float(np.percentile(seg, 20))
+
+
+def local_floor(values: np.ndarray, block: int) -> np.ndarray:
+    """Rumore di fondo zona per zona, raccordato tra i passi.
+
+    Un solo valore per tutta la scansione non va: il rumore cambia molto con la frequenza (onde
+    corte, guadagno del sintonizzatore), e dove è più alto della media il rumore stesso sembrava un picco.
+    """
+    n = len(values)
+    if n == 0:
+        return np.zeros(0, np.float32)
+    block = max(16, block)
+    edges = np.append(np.arange(0, n, block), n)  # blocchi = passi della scansione (il fondo cambia tra un passo e l'altro)
+    if len(edges) > 2 and edges[-1] - edges[-2] < block // 4:
+        edges = np.delete(edges, -2)  # l'ultimo pezzetto si unisce al blocco prima
+    nb = len(edges) - 1
+    lows = np.array([step_low(values[a:b]) for a, b in zip(edges[:-1], edges[1:], strict=True)])
+    # zona a sinistra e a destra di ogni passo: si sceglie quella più vicina al passo stesso, così
+    # un salto del fondo (es. al passaggio al direct sampling) viene seguito subito, mentre un segnale
+    # largo resta sopra il rumore (le sue zone, da entrambi i lati, cadono nel rumore attorno)
+    zone = np.empty(nb)
+    for k in range(nb):
+        left = zone_floor(lows[max(0, k - FLOOR_SPAN + 1): k + 1])
+        right = zone_floor(lows[k: k + FLOOR_SPAN])
+        zone[k] = left if abs(left - lows[k]) <= abs(right - lows[k]) else right
+    return np.interp(np.arange(n), (edges[:-1] + edges[1:] - 1) / 2, zone).astype(np.float32)
+
+
 def find_peaks(
-    values: np.ndarray, f_start: float, bin_hz: float, threshold_db: float, min_sep_hz: float
-) -> tuple[list[dict[str, float]], float]:
-    """Massimi locali sopra (rumore di fondo + soglia), separati di almeno min_sep_hz."""
+    values: np.ndarray, f_start: float, bin_hz: float, threshold_db: float, min_sep_hz: float, block: int = 0
+) -> tuple[list[dict[str, float]], np.ndarray]:
+    """Massimi locali sopra (rumore di fondo locale + soglia), separati di almeno min_sep_hz."""
     if len(values) < 3:
-        return [], float(values.max()) if len(values) else 0.0
-    floor = float(np.median(values))
+        return [], np.full(len(values), float(values.max()) if len(values) else 0.0, np.float32)
+    floor_arr = local_floor(values, block) if block else np.full(len(values), float(np.median(values)), np.float32)
     mid = values[1:-1]
-    mask = (mid > values[:-2]) & (mid >= values[2:]) & (mid > floor + threshold_db)
+    mask = (mid > values[:-2]) & (mid >= values[2:]) & (mid > floor_arr[1:-1] + threshold_db)
     idx = np.nonzero(mask)[0] + 1
     if not len(idx):
-        return [], floor
-    order = idx[np.argsort(values[idx])[::-1]][:3000]
+        return [], floor_arr
+    # un segnale largo (DAB, TV, FM) ha tanti massimi: conta uno solo per tratto sopra il rumore
+    over = np.convolve(values > floor_arr + threshold_db / 2, np.ones(9), "same") > 0
+    region = np.cumsum(np.diff(np.concatenate([[0], over.astype(np.int8)])) == 1)
+    snr = values - floor_arr
+    best: dict[int, int] = {}
+    for i in idx:
+        r = int(region[i])
+        if r not in best or snr[i] > snr[best[r]]:
+            best[r] = int(i)
+    idx = np.array(sorted(best.values()))
+    order = idx[np.argsort(snr[idx])[::-1]][:3000]  # dal più alto sopra il rumore locale
     min_sep = max(1, int(min_sep_hz / bin_hz))
     chosen: list[int] = []
     for i in order:
@@ -208,11 +258,11 @@ def find_peaks(
         {
             "freq_mhz": round((f_start + i * bin_hz) / 1e6, 4),
             "db": round(float(values[i]), 1),
-            "snr": round(float(values[i]) - floor, 1),
+            "snr": round(float(values[i] - floor_arr[i]), 1),
         }
         for i in chosen
     ]
-    return peaks, floor
+    return peaks, floor_arr
 
 
 class SpectrumScanner:
@@ -245,6 +295,7 @@ class SpectrumScanner:
         self._radio = asyncio.Lock()  # una sola connessione rtl_tcp alla volta
         self._direct: dict[int, int] = {}  # direct sampling attivo per connessione
         self._rate = 2_048_000  # sample rate della connessione in corso
+        self._floor_prev: tuple[tuple[float, float, int], np.ndarray] | None = None  # rumore dell'ultima scansione
         self._listeners: list[Callable[[dict[str, Any]], None]] = []
         self._task: asyncio.Task | None = None
         self._wake = asyncio.Event()
@@ -486,13 +537,14 @@ class SpectrumScanner:
             return tv[1] * 1e6  # multiplex TV: tutta la banda ricevuta è dentro il canale
         return float(round(freq_hz + rate / 8))
 
-    def _spike_candidates(self, seg: np.ndarray, f0: float, bin_hz: float, level: float) -> list[float]:
+    def _spike_candidates(self, seg: np.ndarray, f0: float, bin_hz: float, level: float,
+                          noise: float) -> list[tuple[float, float]]:
         """Picchi di un passo della scansione sopra `level`, dal più forte, non ancora analizzati di recente."""
         if self.archive is None or len(seg) < 3:
             return []
         mid = seg[1:-1]
         idx = np.nonzero((mid > seg[:-2]) & (mid >= seg[2:]) & (mid > level))[0] + 1
-        out: list[float] = []
+        out: list[tuple[float, float]] = []  # (frequenza, dB sopra il rumore della zona)
         recent = time.time() - self.settings.reanalyze_min * 60
         for i in idx[np.argsort(seg[idx])[::-1]]:
             f = f0 + int(i) * bin_hz
@@ -503,17 +555,18 @@ class SpectrumScanner:
                 f = ch[1] * 1e6
             elif tv and tv[2] == 8:  # anche un multiplex TV (8 MHz, UHF) conta una volta sola
                 f = tv[1] * 1e6
-            if any(abs(f - g) <= SPIKE_TOL_HZ for g in out):
+            if any(abs(f - g) <= SPIKE_TOL_HZ for g, _ in out):
                 continue
             if self.archive.find(f, SPIKE_TOL_HZ, newer_than=recent):
                 continue
-            out.append(f)
+            out.append((f, round(float(seg[i]) - noise, 1)))
             if self.settings.auto_limit_step and len(out) >= self.settings.auto_max_per_step:
                 break
         return out
 
     async def _auto_analyze(
-        self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, rate: int, freq_hz: float, discard: int
+        self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, rate: int, freq_hz: float, discard: int,
+        scan_snr: float | None = None,
     ) -> None:
         """Analisi di un picco a metà scansione, sulla stessa connessione e con le stesse impostazioni."""
         center = self._tune_center(freq_hz, rate)
@@ -535,6 +588,7 @@ class SpectrumScanner:
                     if not await reader.read(READ_LIMIT):
                         raise ConnectionError("Connessione chiusa dal server")
             result, png, audio = job.result()
+            result["scan_snr_db"] = scan_snr  # quanto stava sopra il rumore nella scansione
             await self._store_analysis(result, png, audio, auto=True)
         finally:
             self._set_status(auto_mhz=None)
@@ -853,7 +907,8 @@ class SpectrumScanner:
         while True:
             try:
                 m = self.meteo
-                if m.fetch is not None and time.time() - m.tle_time > weather.TLE_MAX_AGE_S:
+                stale = time.time() - m.tle_time > weather.TLE_MAX_AGE_S
+                if m.fetch is not None and time.time() - m.tle_try > 600 and (stale or m.missing()):
                     if await m.update_tles() and self.meteo_save is not None:
                         self.meteo_save()
                 if m.sats and (time.time() - m.passes_time > 600 or min_el != self.settings.meteo_min_el):
@@ -1207,9 +1262,19 @@ class SpectrumScanner:
 
                 # picco trovato: si interrompe la ricerca, lo si analizza subito e poi si riprende
                 if s.auto_analyze and auto_left > 0:
-                    level = float(np.median(spectrum[: (i + 1) * keep])) + s.threshold_db
+                    # stesso criterio del grafico: soglia sopra il rumore della zona; dalla scansione
+                    # precedente (vede anche i passi successivi) o, la prima volta, dai passi già fatti
+                    prev = self._floor_prev
+                    if prev is not None and prev[0] == (f_start, bin_hz, total_bins):
+                        noise = float(np.median(prev[1][i * keep: (i + 1) * keep]))
+                    else:
+                        # mai sotto il livello basso del passo stesso: dopo un salto del fondo il rumore
+                        # dei passi precedenti sarebbe troppo basso (un blocco DAB/TV aspetta il giro dopo)
+                        first = max(0, i - FLOOR_SPAN + 1)
+                        noise = max(step_low(psd[lo: lo + keep]), zone_floor(
+                            [step_low(spectrum[k * keep: (k + 1) * keep]) for k in range(first, i + 1)]))
                     f0 = f_start + i * keep * bin_hz
-                    spikes = self._spike_candidates(psd[lo : lo + keep], f0, bin_hz, level)
+                    spikes = self._spike_candidates(psd[lo : lo + keep], f0, bin_hz, noise + s.threshold_db, noise)
                     if spikes and i < steps - 1:
                         # prima il grafico aggiornato: le analisi possono durare parecchi secondi
                         last_partial = time.monotonic()
@@ -1218,14 +1283,14 @@ class SpectrumScanner:
                         self._publish(spectrum, (i + 1) * keep, total_bins, f_start, f_stop,
                                       bin_hz, pool, min_sep_hz, sweep_id, False, progress, None)
                         self._emit(dict(self.status))
-                    for f in spikes:
+                    for f, scan_snr in spikes:
                         if auto_left <= 0:
                             break
                         if not self._active.is_set():
                             raise ScanPaused
                         auto_left -= 1
                         auto_done += 1
-                        await self._auto_analyze(reader, writer, rate, f, discard_bytes)
+                        await self._auto_analyze(reader, writer, rate, f, discard_bytes, scan_snr)
 
                 now = time.monotonic()
                 if now - last_partial >= PARTIAL_EVERY and i < steps - 1:
@@ -1268,7 +1333,12 @@ class SpectrumScanner:
         pooled = data[:whole].reshape(-1, pool).max(axis=1) if whole else np.empty(0, np.float32)
         if complete and whole < len(data):
             pooled = np.append(pooled, data[whole:].max())
-        peaks, floor = find_peaks(data, f_start, bin_hz, self.settings.threshold_db, min_sep_hz)
+        block = int(self.settings.fft_size * USABLE_FRACTION)  # bin di un passo della scansione
+        peaks, floor_arr = find_peaks(data, f_start, bin_hz, self.settings.threshold_db, min_sep_hz, block)
+        floor = float(np.median(floor_arr)) if len(floor_arr) else 0.0
+        fl_pooled = floor_arr[: len(data) // pool * pool].reshape(-1, pool).mean(axis=1) if whole else floor_arr[:0]
+        if complete and whole < len(data):
+            fl_pooled = np.append(fl_pooled, floor_arr[whole:].mean())
         if self.archive is not None:
             for p in peaks:
                 entry = self.archive.find(p["freq_mhz"] * 1e6, SPIKE_TOL_HZ)
@@ -1288,6 +1358,7 @@ class SpectrumScanner:
             "values": np.round(pooled, 1).tolist(),
             "peaks": peaks,
             "floor_db": round(floor, 1),
+            "floor_values": np.round(fl_pooled, 1).tolist(),  # rumore locale, punto per punto
             "timestamp": time.time(),
             "sweep_s": sweep_s,
         }
@@ -1296,6 +1367,7 @@ class SpectrumScanner:
             freqs = (f_start + np.arange(len(data)) * bin_hz) / 1e6
             payload["sat"] = satellite.identify(freqs, data)
         if complete:
+            self._floor_prev = ((f_start, bin_hz, total_bins), floor_arr)
             self.last_complete = payload
             self.history.append(payload)
         self._emit(payload)

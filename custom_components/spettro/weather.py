@@ -103,6 +103,7 @@ class Meteo:
         self.sats: dict[int, orbit.Satellite] = {}
         self.tle_text: dict[int, tuple[str, str, str]] = {}
         self.tle_time = 0.0
+        self.tle_try = 0.0  # ultimo tentativo di scaricare i TLE
         self.tle_error: str | None = None
         self.passes: list[dict[str, Any]] = []
         self.passes_time = 0.0
@@ -122,6 +123,7 @@ class Meteo:
         """Scarica i TLE da CelesTrak; True se sono cambiati."""
         if self.fetch is None:
             return False
+        self.tle_try = time.time()
         got: dict[int, tuple[str, str, str]] = {}
         for norad in (*SATELLITES, ISS_NORAD):
             try:
@@ -137,6 +139,10 @@ class Meteo:
             self.tle_error = None
             self.set_tles(got, time.time())
         return bool(got)
+
+    def missing(self) -> bool:
+        """Manca l'orbita di qualche satellite (es. la ISS, aggiunta dopo che i TLE erano già salvati)."""
+        return any(n not in self.sats for n in (*SATELLITES, ISS_NORAD))
 
     def compute_passes(self, min_el: float, now: datetime | None = None) -> list[dict[str, Any]]:
         now = now or datetime.now(UTC)

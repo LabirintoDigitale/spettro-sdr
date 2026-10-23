@@ -1,7 +1,7 @@
 // Pannello "Spettro" per Home Assistant: grafico dello spettro, waterfall e picchi.
 
 // deve coincidere con VERSION in const.py: se il backend ne riporta un'altra manca un riavvio
-const PANEL_VERSION = "1.14.3";
+const PANEL_VERSION = "1.15.0";
 
 const PRESETS = [
   ["Personalizzato", null, null],
@@ -306,6 +306,9 @@ class SpettroPanel extends HTMLElement {
       let values = m.values, peaks = m.peaks;
       if (grid(m, this._lastComplete) && this._lastComplete.values.length > values.length) {
         values = values.concat(this._lastComplete.values.slice(values.length));
+        if (m.floor_values && this._lastComplete.floor_values) {
+          m.floor_values = m.floor_values.concat(this._lastComplete.floor_values.slice(m.floor_values.length));
+        }
         peaks = this._lastComplete.peaks;
       }
       this._spec = { ...m, values, peaks, cursor: m.f_start + m.values.length * m.bin_hz };
@@ -334,6 +337,8 @@ class SpettroPanel extends HTMLElement {
         .charts { display:flex; flex-direction:column; gap:6px; }
         label.selfreq { display:flex; align-items:center; gap:6px; white-space:nowrap; }
         label.selfreq input { width:130px; }
+        h4.sub { margin:14px 0 2px; font-size:14px; font-weight:500; border-top:1px solid var(--divider-color); padding-top:10px; }
+        #meteopasses button { padding:2px 8px; font-size:12px; }
         .maincol { display:flex; flex-direction:column; gap:12px; min-width:0; }
         #meteopasses table td, #meteolist table td { padding:4px 6px; }
         #meteolist tr { cursor:pointer; }
@@ -386,6 +391,7 @@ class SpettroPanel extends HTMLElement {
         #archive th.sort { cursor:pointer; user-select:none; white-space:nowrap; }
         #archive th.sort:hover { color:var(--primary-text-color); }
         #archive tbody.entry:hover td { background:var(--secondary-background-color); }
+        #archive span.scan { color:var(--secondary-text-color); font-size:11px; }
         #archive td.kind { color:var(--secondary-text-color); font-size:12px; }
         /* le due righe di un'analisi (ora/frequenza e tipo) si evidenziano insieme */
         #archive tbody.entry tr:first-child td { border-bottom:none; }
@@ -468,25 +474,28 @@ class SpettroPanel extends HTMLElement {
           </div>
         </div>
         <div class="card" id="meteocard">
-          <div class="row" style="justify-content:space-between">
-            <h3 style="margin:0">🛰️ Satelliti meteo e immagini</h3>
-            <button id="meteonow" title="Riceve subito il Meteor che sta passando adesso">Ricevi ora</button>
-          </div>
+          <h3 style="margin:0">🛰️ Satelliti meteo e immagini</h3>
           <div id="meteolive"></div>
-          <div class="row" style="margin-top:6px">
-            <label class="chk" title="Quando un Meteor passa sopra l'elevazione minima la scansione si sospende e la chiavetta lo riceve"><input type="checkbox" id="meteoauto"> Ricevi da solo i passaggi</label>
+          <h4 class="sub">Satelliti in passaggio</h4>
+          <div class="hint">Meteor e ISS si ricevono solo quando passano sopra di te: ecco i prossimi passaggi. Con le caselle la
+            chiavetta li riceve da sola; ▶ su un passaggio in corso lo riceve subito.</div>
+          <div class="row" style="margin-top:4px">
+            <label class="chk" title="Quando un Meteor passa sopra l'elevazione minima la scansione si sospende e la chiavetta riceve le foto (LRPT, 137 MHz)"><input type="checkbox" id="meteoauto"> Meteor: ricevi da solo le foto</label>
+            <label class="chk" title="La ISS trasmette immagini SSTV su 145,800 MHz solo durante gli eventi ARISS (qualche volta l'anno): ascoltando ogni passaggio le immagini si salvano quando ci sono, altrimenti non succede nulla"><input type="checkbox" id="isssstv"> ISS: ascolta da sola l'SSTV</label>
+          </div>
+          <div class="row" style="margin-top:4px">
             <label style="width:150px">Elevazione minima (°)<input id="meteoel" type="number" min="0" max="90" step="5"></label>
-            <label style="width:150px">Conserva (giorni)<input id="meteodays" type="number" min="1" max="365" step="1"></label>
-          </div>
-          <div class="row" style="margin-top:4px">
-            <label class="chk" title="Durante gli eventi ARISS la Stazione spaziale trasmette immagini SSTV su 145,800 MHz in FM: ai suoi passaggi la chiavetta si sintonizza e le decodifica"><input type="checkbox" id="isssstv"> Ricevi l'SSTV della ISS ai passaggi</label>
-          </div>
-          <div class="row" style="margin-top:4px">
-            <select id="imgpreset" style="flex:1;min-width:220px">${IMG_PRESETS.map((p, i) => `<option value="${i}">${p[0]}</option>`).join("")}</select>
-            <button id="imglisten" title="Resta in ascolto su questa frequenza e salva le immagini che arrivano (la scansione si sospende)">▶ Ascolta</button>
+            <label style="width:150px">Conserva immagini (giorni)<input id="meteodays" type="number" min="1" max="365" step="1"></label>
           </div>
           <div id="meteopasses" class="hint">Calcolo dei passaggi…</div>
-          <h3 style="margin:12px 0 4px">Immagini ricevute</h3>
+          <h4 class="sub">Stazioni radio con immagini</h4>
+          <div class="hint">Trasmettono da terra a orari propri: il radiofax meteo quasi sempre, l'SSTV dei radioamatori quando
+            qualcuno trasmette. ▶ Ascolta resta in ascolto (anche a pannello chiuso) e salva ogni immagine che arriva.</div>
+          <div class="row" style="margin-top:4px">
+            <select id="imgpreset" style="flex:1;min-width:220px">${IMG_PRESETS.filter((p) => !p[0].startsWith("ISS")).map((p) => `<option value="${IMG_PRESETS.indexOf(p)}">${p[0]}</option>`).join("")}</select>
+            <button id="imglisten" title="Resta in ascolto su questa frequenza e salva le immagini che arrivano (la scansione si sospende)">▶ Ascolta</button>
+          </div>
+          <h4 class="sub">Immagini ricevute</h4>
           <div id="meteolist" class="hint">Nessuna immagine ancora.</div>
           <div id="meteoview"></div>
           <div class="hint" style="margin-top:8px">Serve un'antenna per i 137 MHz all'aperto con il cielo libero (V-dipolo con due bracci da
@@ -678,9 +687,7 @@ class SpettroPanel extends HTMLElement {
     });
     $("meteoel").addEventListener("change", (e) => meteoCfg({ meteo_min_el: Math.max(0, Math.min(90, parseFloat(e.target.value) || 0)) }));
     $("meteodays").addEventListener("change", (e) => meteoCfg({ meteo_days: Math.max(1, parseFloat(e.target.value) || 7) }));
-    $("meteonow").addEventListener("click", async () => {
-      try { await this._hass.callWS({ type: "spettro/meteo_receive" }); } catch (err) { this._msg(err.message || String(err), true); }
-    });
+
     $("archfilter").addEventListener("change", (ev) => {
       this._archFilter = ev.target.value;
       try { localStorage.setItem("spettro.archFilter", this._archFilter); } catch (e) { /* non disponibile */ }
@@ -981,6 +988,9 @@ class SpettroPanel extends HTMLElement {
       }
     }
     if (!isFinite(vmin)) { vmin = -80; vmax = -20; }
+    if (s.floor_values && s.floor_values.length && this._status && this._status.settings) {
+      vmax = Math.max(vmax, Math.max(...s.floor_values) + this._status.settings.threshold_db);  // la soglia resta visibile
+    }
     const floor = s.floor_db ?? vmin;
     let yMin = Math.floor((Math.min(floor - 10, vmin) - 2) / 10) * 10;
     let yMax = Math.ceil((vmax + 3) / 10) * 10;
@@ -1059,12 +1069,24 @@ class SpettroPanel extends HTMLElement {
     }
     flush();
 
-    // soglia di rilevamento
+    // soglia di rilevamento: rumore della zona + soglia (segue il fondo lungo la banda)
     if (s.floor_db != null && this._status && this._status.settings) {
-      const y = vToY(s.floor_db + this._status.settings.threshold_db);
+      const th = this._status.settings.threshold_db;
       ctx.setLineDash([4, 4]);
       ctx.strokeStyle = "rgba(219,68,55,.6)";
-      ctx.beginPath(); ctx.moveTo(L, y); ctx.lineTo(L + pw, y); ctx.stroke();
+      ctx.beginPath();
+      if (s.floor_values && s.floor_values.length) {
+        for (let x = 0; x <= pw; x += 2) {
+          const f = lo + ((hi - lo) * x) / pw;
+          const i = Math.max(0, Math.min(s.floor_values.length - 1, Math.round((f - s.f_start) / s.bin_hz)));
+          const y = vToY(s.floor_values[i] + th);
+          if (x === 0) ctx.moveTo(L + x, y); else ctx.lineTo(L + x, y);
+        }
+      } else {
+        const y = vToY(s.floor_db + th);
+        ctx.moveTo(L, y); ctx.lineTo(L + pw, y);
+      }
+      ctx.stroke();
       ctx.setLineDash([]);
     }
 
@@ -1477,16 +1499,28 @@ class SpettroPanel extends HTMLElement {
     const dir = (p) => (p.northbound ? "da sud a nord" : "da nord a sud");
     const loaded = m.satellites.filter((x) => x.loaded).map((x) => x.name);
     let head = `Stazione ${m.location[0]}°, ${m.location[1]}° · `
-      + (loaded.length ? `orbite di ${loaded.join(" e ")}${m.tle_age_h != null ? ` (aggiornate ${m.tle_age_h} h fa)` : ""}` : "orbite non ancora scaricate");
+      + (loaded.length ? `orbite di ${loaded.join(", ")}${m.tle_age_h != null ? ` (aggiornate ${m.tle_age_h} h fa)` : ""}` : "orbite non ancora scaricate");
     if (m.tle_error) head += ` · ⚠ ${esc(m.tle_error)}`;
     if (!m.passes.length) { el.innerHTML = `<div class="hint">${head}<br>Nessun passaggio sopra l'elevazione minima nelle prossime 36 ore.</div>`; return; }
     const now = Date.now() / 1000;
     el.className = "";
     el.innerHTML = `<div class="hint">${head}</div>
-      <table style="margin-top:4px"><thead><tr><th>Quando</th><th>Satellite</th><th class="num">Elev. max</th><th>Direzione</th><th class="num">Durata</th></tr></thead>
-      <tbody>${m.passes.slice(0, 8).map((p) => `<tr${p.aos <= now && now < p.los ? ' style="font-weight:500"' : ""}>
-        <td>${t(p.aos)}${p.aos <= now && now < p.los ? " · ora" : ""}</td><td>${esc(p.satellite)}${p.kind === "iss" ? " · SSTV" : ""}</td><td class="num">${p.max_el}°</td>
-        <td>${dir(p)}</td><td class="num">${Math.round((p.los - p.aos) / 60)} min</td></tr>`).join("")}</tbody></table>`;
+      <table style="margin-top:4px"><thead><tr><th>Quando</th><th>Satellite</th><th class="num">Elev. max</th><th>Direzione</th><th class="num">Durata</th><th></th></tr></thead>
+      <tbody>${m.passes.slice(0, 10).map((p, i) => {
+        const on = p.aos - 180 <= now && now < p.los;
+        return `<tr${on ? ' style="font-weight:500"' : ""}>
+        <td>${t(p.aos)}${p.aos <= now && now < p.los ? " · ora" : ""}</td>
+        <td>${esc(p.satellite)}<span class="hint"> · ${p.kind === "iss" ? "SSTV 145,800 MHz" : "foto LRPT 137 MHz"}</span></td><td class="num">${p.max_el}°</td>
+        <td>${dir(p)}</td><td class="num">${Math.round((p.los - p.aos) / 60)} min</td>
+        <td class="num">${on ? `<button data-i="${i}" title="Ricevi questo passaggio adesso">▶ Ricevi</button>` : ""}</td></tr>`;
+      }).join("")}</tbody></table>`;
+    el.querySelectorAll("button[data-i]").forEach((b) => b.addEventListener("click", async () => {
+      const p = m.passes[+b.dataset.i];
+      try {
+        if (p.kind === "iss") await this._liveStart(145.8, "nfm", null, "sstv", "ISS");
+        else await this._hass.callWS({ type: "spettro/meteo_receive", norad: p.norad });
+      } catch (err) { this._msg(err.message || String(err), true); }
+    }));
   }
 
   _onMeteoLive(m) {
@@ -1515,7 +1549,7 @@ class SpettroPanel extends HTMLElement {
   _renderMeteoList() {
     const el = this.shadowRoot.getElementById("meteolist");
     const list = this._meteoEntries || [];
-    if (!list.length) { el.className = "hint"; el.textContent = "Nessuna immagine ancora: attiva «Ricevi da solo i passaggi» o premi «Ricevi ora» durante un passaggio."; return; }
+    if (!list.length) { el.className = "hint"; el.textContent = "Nessuna immagine ancora: attiva la ricezione automatica dei passaggi, premi ▶ su un passaggio in corso o ascolta una stazione."; return; }
     el.className = "";
     el.innerHTML = `<table><tbody>${list.map((e) => `<tr data-id="${esc(e.id)}"${e.id === this._meteoSel ? ' class="sel"' : ""}>
       <td>${new Date(e.timestamp * 1000).toLocaleString([], { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" })}</td>
@@ -2046,7 +2080,7 @@ class SpettroPanel extends HTMLElement {
     el.className = "";
     el.innerHTML = `<table><thead><tr>${th("timestamp", "Ora")}${th("target_mhz", "MHz")}${th("snr_db", "SNR", "num")}</tr></thead>
       ${rows.map((e) => `<tbody class="entry${e.id === this._archSel ? " sel" : ""}" data-id="${esc(e.id)}"><tr>
-        <td>${fmt(e.timestamp)}${e.auto ? "" : " ✋"}</td><td>${e.target_mhz.toFixed(4)}</td><td class="num">${e.snr_db} dB</td></tr>
+        <td>${fmt(e.timestamp)}${e.auto ? "" : " ✋"}</td><td>${e.target_mhz.toFixed(4)}</td><td class="num" title="${e.scan_snr_db != null ? `Nella scansione il picco stava ${e.scan_snr_db} dB sopra il rumore della zona; l'analisi misura il segnale da vicino` : ""}">${e.snr_db} dB${e.scan_snr_db != null ? `<span class="scan"> · ${e.scan_snr_db}</span>` : ""}</td></tr>
         <tr><td colspan="3" class="kind">${esc(e.kind)}</td></tr></tbody>`).join("")}
       </table>
       <div class="hint" style="margin-top:6px">✋ = analisi avviata a mano.</div>`;
@@ -2099,6 +2133,7 @@ class SpettroPanel extends HTMLElement {
       ["Frequenza centrale", `${r.center_mhz.toFixed(4)} MHz`],
       ["Picco", `${r.peak_mhz.toFixed(4)} MHz · ${r.peak_db} dBFS`],
       ["Sopra il rumore", `${r.snr_db} dB${r.detected ? "" : " (nessun segnale chiaro)"}`],
+      ...(r.scan_snr_db != null ? [["Nella scansione", `${r.scan_snr_db} dB sopra il rumore della zona`]] : []),
       ["Banda occupata 99%", `${r.obw_99_khz} kHz`],
       ["Banda a −3 dB", `${r.bw_3db_khz} kHz`],
       ...(r.tones >= 1 && r.tones <= 4 ? [["Toni distinti", r.tones === 2 ? "2 (FSK?)" : r.tones]] : []),
