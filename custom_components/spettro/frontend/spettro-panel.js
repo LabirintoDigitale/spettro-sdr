@@ -1,7 +1,7 @@
 // Pannello "Spettro" per Home Assistant: grafico dello spettro, waterfall e picchi.
 
 // deve coincidere con VERSION in const.py: se il backend ne riporta un'altra manca un riavvio
-const PANEL_VERSION = "1.11.1";
+const PANEL_VERSION = "1.12.0";
 
 const PRESETS = [
   ["Personalizzato", null, null],
@@ -16,6 +16,8 @@ const PRESETS = [
   ["ISM 868 (863–870)", 863, 870],
   ["GSM 900 (925–960)", 925, 960],
   ["ADS-B (1085–1095)", 1085, 1095],
+  ["TV digitale UHF (470–694)", 470, 694],
+  ["Satellite con LNB (950–1760)", 950, 1760],
   ["Tutto (24–1766)", 24, 1766],
 ];
 const SAMPLE_RATES = [250000, 1024000, 1400000, 1800000, 2048000, 2400000, 2560000, 2880000];
@@ -253,6 +255,7 @@ class SpettroPanel extends HTMLElement {
     if (m.kind === "live_rds") { this._onLiveRds(m.rds); return; }
     if (m.kind === "live_dab") { this._onLiveDab(m); return; }
     if (m.kind === "live_tv") { this._onLiveTv(m); return; }
+    if (m.kind === "live_sat") { this._onLiveSat(m); return; }
     if (m.kind === "live_error") { this._msg(`Analisi continua interrotta: ${m.error}`, true); return; }
     if (m.kind === "analysis") {
       if (m.entry && !this._archive.some((e) => e.id === m.entry.id)) {
@@ -277,6 +280,8 @@ class SpettroPanel extends HTMLElement {
         ? this._maxHold.map((v, i) => Math.max(v, m.values[i] ?? -999))
         : m.values.slice();
       this._lastComplete = m;
+      this._sat = m.sat || null;
+      this._renderSat();
       this._spec = { ...m, cursor: null };
     } else {
       // scansione in corso: si mostra la parte nuova + il resto della scansione precedente
@@ -367,7 +372,9 @@ class SpettroPanel extends HTMLElement {
         #tvlist .tvrow:hover { background:var(--secondary-background-color); }
         #tvlist .tvbar, .meter { height:10px; background:var(--divider-color); border-radius:5px; overflow:hidden; position:relative; }
         #tvlist .tvbar > div, .meter > div { height:100%; border-radius:5px; }
-        #tvlist button { padding:2px 6px; font-size:12px; }
+        #tvlist button, #satout button { padding:2px 6px; font-size:12px; }
+        #satout .satname { font-size:20px; font-weight:500; margin:2px 0; }
+        #satout table td { padding:3px 4px; }
         .meter { height:18px; margin:4px 0 2px; }
         .meter .mark { position:absolute; top:0; bottom:0; width:2px; background:var(--primary-text-color, #000); opacity:.7; border-radius:0; }
         .bignum { font-size:28px; font-weight:500; }
@@ -435,6 +442,10 @@ class SpettroPanel extends HTMLElement {
             <div class="hint" style="margin-top:6px">Multiplex del digitale terrestre trovati nell'ultima scansione: quanto
               ciascuno sta sopra il rumore. ▶ apre il misuratore continuo (modalità, guardia e qualità del segnale).</div>
           </div>
+          <div class="card" id="satcard" style="display:none">
+            <h3>Satellite</h3>
+            <div id="satout"></div>
+          </div>
           <div class="card">
             <h3>Preferiti <span style="color:#e53935">❤</span></h3>
             <div id="favs" class="hint">Nessun preferito: seleziona una frequenza e tocca ♡ nell'Analisi segnale.</div>
@@ -465,6 +476,11 @@ class SpettroPanel extends HTMLElement {
               <input type="checkbox" id="viewonly"> Scansiona solo con il pannello aperto</label>
             <label class="chk" style="margin-top:4px" title="Quando un passo della scansione trova un picco sopra la soglia, la scansione si ferma, il picco viene registrato e analizzato (per la «Durata analisi» delle Avanzate) e poi si riprende">
               <input type="checkbox" id="autoana"> Analizza subito i picchi trovati</label>
+            <label class="chk" style="margin-top:4px" title="La chiavetta è collegata al cavo della parabola: tra 950 e 2150 MHz ci sono i transponder della TV satellitare, e Spettro riconosce il satellite">
+              <input type="checkbox" id="lnb"> LNB satellitare sul cavo (parabola)</label>
+            <div class="hint" id="lnbwarn" style="display:none;margin:2px 0 0 24px">⚠ L'LNB va alimentato a 13/18 V da un decoder o da un
+              alimentatore da linea, ma quella tensione <b>non deve arrivare alla chiavetta</b> (la brucia): usa uno splitter con
+              l'uscita protetta o un condensatore di blocco. La chiavetta arriva a ~1766 MHz.</div>
             <div class="grid2" style="margin-top:8px">
               <label title="Un picco già analizzato non viene rianalizzato in automatico prima di questo tempo (0 = ogni volta)">Rianalizza dopo (min)<input id="reana" type="number" step="1" min="0"></label>
               <label title="Le analisi archiviate più vecchie vengono cancellate">Archivio: cancella dopo (h)<input id="archhours" type="number" step="1" min="1"></label>
@@ -509,7 +525,7 @@ class SpettroPanel extends HTMLElement {
     this._menu.hass = this._hass;
     this._menu.narrow = this._narrow;
 
-    const form = ["start", "stop", "interval", "gain", "threshold", "viewonly", "autoana", "reana", "archhours", "limstep", "maxstep", "limsweep", "maxsweep",
+    const form = ["start", "stop", "interval", "gain", "threshold", "viewonly", "autoana", "lnb", "reana", "archhours", "limstep", "maxstep", "limsweep", "maxsweep",
       "rate", "fft", "settle", "ppm", "anadur"];
     for (const id of form) $(id).addEventListener("input", () => {
       this._formDirty = true;
@@ -520,6 +536,7 @@ class SpettroPanel extends HTMLElement {
       if (p[1] === null) return;
       $("start").value = p[1];
       $("stop").value = p[2];
+      if (p[1] === 950) { $("lnb").checked = true; $("lnbwarn").style.display = ""; }
       this._formDirty = true;
     });
     $("apply").addEventListener("click", () => this._apply());
@@ -562,6 +579,7 @@ class SpettroPanel extends HTMLElement {
       }
     });
     for (const id of ["autoana", "limstep", "limsweep"]) $(id).addEventListener("change", () => this._syncLimits());
+    $("lnb").addEventListener("change", (e) => { $("lnbwarn").style.display = e.target.checked ? "" : "none"; });
     $("archfilter").addEventListener("change", (ev) => {
       this._archFilter = ev.target.value;
       try { localStorage.setItem("spettro.archFilter", this._archFilter); } catch (e) { /* non disponibile */ }
@@ -607,6 +625,9 @@ class SpettroPanel extends HTMLElement {
     $("anadur").value = String(s.analysis_s ?? 2);
     $("viewonly").checked = !!s.only_when_viewed;
     $("autoana").checked = !!s.auto_analyze;
+    $("lnb").checked = !!s.lnb;
+    $("lnbwarn").style.display = s.lnb ? "" : "none";
+    this._lnb = !!s.lnb;
     $("reana").value = s.reanalyze_min ?? 30;
     $("archhours").value = s.archive_hours ?? 24;
     $("limstep").checked = !!s.auto_limit_step;
@@ -639,6 +660,7 @@ class SpettroPanel extends HTMLElement {
       analysis_s: parseFloat($("anadur").value) || 2,
       only_when_viewed: $("viewonly").checked,
       auto_analyze: $("autoana").checked,
+      lnb: $("lnb").checked,
       reanalyze_min: Math.max(0, parseFloat($("reana").value) || 0),
       archive_hours: Math.max(1, parseFloat($("archhours").value) || 24),
       auto_limit_step: $("limstep").checked,
@@ -1149,17 +1171,19 @@ class SpettroPanel extends HTMLElement {
       this._liveRds = null;
       this._dabState = null;
       this._tvTrend = [];
+      this._satMax = null;
       this._dabFallback = false;
       $("liveslide").style.display = "none";
       $("liveslide").removeAttribute("src");
       this._closeDec();
       $("liverds").innerHTML = live.mode === "wfm" ? `<div class="hint" style="margin-top:6px">In attesa dei dati RDS…</div>`
         : live.mode === "dab" ? `<div class="hint" style="margin-top:6px">Aggancio del multiplex DAB…</div>`
-        : live.mode === "tv" ? `<div class="hint" style="margin-top:6px">Ricerca del multiplex TV…</div>` : "";
+        : live.mode === "tv" ? `<div class="hint" style="margin-top:6px">Ricerca del multiplex TV…</div>`
+        : live.mode === "sat" ? `<div class="hint" style="margin-top:6px">Misura del transponder…</div>` : "";
     }
-    const digital = live.mode === "dab" || live.mode === "tv";
+    const digital = live.mode === "dab" || live.mode === "tv" || live.mode === "sat";
     $("livemode").style.display = digital ? "none" : "";
-    $("livelisten").style.display = live.mode === "tv" ? "none" : "";
+    $("livelisten").style.display = live.mode === "tv" || live.mode === "sat" ? "none" : "";
     this._updateFavBtn();
     if (!digital) $("livemode").value = live.mode;
     this._liveTitle();
@@ -1172,6 +1196,12 @@ class SpettroPanel extends HTMLElement {
       const ens = this._dabState && this._dabState.info && this._dabState.info.ensemble;
       this.shadowRoot.getElementById("livetitle").textContent =
         `DAB ${live.channel || ""} · «${live.service || live.sid}»${ens ? ` (${ens})` : ""}`;
+      return;
+    }
+    if (live.mode === "sat") {
+      this.shadowRoot.getElementById("livetitle").textContent = live.ku_mhz
+        ? `SAT ${live.satellite} · ${(live.ku_mhz / 1000).toFixed(3)} GHz ${live.polarization ? live.polarization.split(" ")[0] : ""} (cavo ${live.freq_mhz.toFixed(0)} MHz)`
+        : `SAT · cavo ${live.freq_mhz.toFixed(1)} MHz`;
       return;
     }
     if (live.mode === "tv") {
@@ -1235,7 +1265,7 @@ class SpettroPanel extends HTMLElement {
     this._drawTvTrend();
   }
 
-  _drawTvTrend() {
+  _drawTvTrend(vmin = 0, vmax = 32, lines = [10, 20, 30], unit = "dB") {
     const c = this.shadowRoot.getElementById("tvtrend");
     if (!c) return;
     const dpr = window.devicePixelRatio || 1;
@@ -1243,9 +1273,9 @@ class SpettroPanel extends HTMLElement {
     c.width = w; c.height = h;
     const g = c.getContext("2d");
     const data = this._tvTrend || [];
-    const y = (v) => h - (Math.max(0, Math.min(32, v)) / 32) * h;
+    const y = (v) => h - ((Math.max(vmin, Math.min(vmax, v)) - vmin) / (vmax - vmin)) * h;
     g.strokeStyle = "rgba(255,255,255,.25)"; g.setLineDash([4 * dpr, 4 * dpr]);
-    for (const v of [10, 20, 30]) { g.beginPath(); g.moveTo(0, y(v)); g.lineTo(w, y(v)); g.stroke(); }
+    for (const v of lines) { g.beginPath(); g.moveTo(0, y(v)); g.lineTo(w, y(v)); g.stroke(); }
     g.setLineDash([]); g.strokeStyle = "#ffd54f"; g.lineWidth = 2 * dpr; g.beginPath();
     let pen = false;
     data.forEach((v, i) => {
@@ -1256,7 +1286,76 @@ class SpettroPanel extends HTMLElement {
     });
     g.stroke();
     g.fillStyle = "rgba(255,255,255,.6)"; g.font = `${10 * dpr}px sans-serif`;
-    for (const v of [10, 20, 30]) g.fillText(`${v} dB`, 4 * dpr, y(v) + 11 * dpr);
+    for (const v of lines) g.fillText(`${v} ${unit}`, 4 * dpr, y(v) + 11 * dpr);
+  }
+
+  _kuText(mhz) {
+    // con l'LNB sul cavo la frequenza vera del satellite è quella del cavo + l'oscillatore dell'LNB
+    if (!this._lnb || mhz < 950 || mhz > 2150) return "";
+    const r = this._sat;
+    if (r && r.found) return ` · ${((mhz + r.lo_mhz - r.lo_offset_mhz) / 1000).toFixed(3)} GHz su ${r.satellite}`;
+    return ` · ${((mhz + 9750) / 1000).toFixed(3)} GHz (banda bassa) o ${((mhz + 10600) / 1000).toFixed(3)} GHz (alta)`;
+  }
+
+  _renderSat() {
+    // satellite riconosciuto dalle gobbe dei transponder nella scansione (LNB sul cavo)
+    const card = this.shadowRoot.getElementById("satcard");
+    if (!card) return;
+    const r = this._sat;
+    card.style.display = r ? "" : "none";
+    if (!r) return;
+    const out = this.shadowRoot.getElementById("satout");
+    if (!r.found) {
+      out.innerHTML = `<div class="hint">${esc(r.reason || "Nessun satellite riconosciuto.")} Controlla che l'LNB sia alimentato e la
+        parabola puntata; con la scansione 950–1760 MHz servono almeno 3 transponder visibili.</div>`;
+      return;
+    }
+    const ghz = (f) => (f / 1000).toFixed(3);
+    const tps = r.transponders.slice().sort((a, b) => a.if_mhz - b.if_mhz);
+    out.innerHTML = `<div class="satname">${r.confident ? "" : "forse "}${esc(r.satellite)}</div>
+      <div class="hint">banda ${esc(r.band)} (oscillatore ${r.lo_mhz} MHz) · polarizzazione ${esc(r.polarization)} ·
+        ${r.present}/${r.transponders.length} transponder visibili · LNB spostato di ${r.lo_offset_mhz} MHz</div>
+      ${r.confident ? "" : `<div class="hint">Riconoscimento incerto: in alternativa ${esc(r.ranking.filter((x) => x.satellite !== r.satellite).slice(0, 2)
+        .map((x) => x.satellite).join(" o "))}.</div>`}
+      <table style="margin-top:6px"><thead><tr><th>Ku (GHz)</th><th>Cavo (MHz)</th><th class="num">Msym/s</th><th class="num">sopra rumore</th><th></th></tr></thead>
+      <tbody>${tps.map((t) => `<tr data-f="${t.if_mhz}"${t.above_db < 3 ? ' style="opacity:.5"' : ""}><td>${ghz(t.ku_mhz)}</td><td>${t.if_mhz.toFixed(0)}</td>
+        <td class="num">${(t.sr / 1000).toFixed(1)}</td><td class="num">${t.above_db.toFixed(0)} dB</td>
+        <td class="num"><button title="Misuratore continuo del transponder">▶</button></td></tr>`).join("")}</tbody></table>
+      <div class="hint" style="margin-top:6px">Transponder del piano di ${esc(r.satellite)} nella banda vista dalla chiavetta (in grigio quelli
+        spenti o troppo deboli). ▶ resta sul transponder e ne misura il livello di continuo, per rifinire il puntamento.</div>`;
+    out.querySelectorAll("tr[data-f]").forEach((tr) => {
+      const f = Number(tr.dataset.f) * 1e6;
+      tr.addEventListener("click", (e) => {
+        this._select(f);
+        if (e.target.closest("button")) this._liveStart(f / 1e6, "sat");
+      });
+    });
+  }
+
+  _onLiveSat(m) {
+    if (!this._live) this._setLive({ freq_mhz: m.freq_mhz, mode: "sat" });
+    if (this._live.mode !== "sat") return;
+    const $ = (id) => this.shadowRoot.getElementById(id);
+    $("livelo").textContent = ((m.freq_mhz * 1e6 - m.span_hz / 2) / 1e6).toFixed(3);
+    $("livehi").textContent = ((m.freq_mhz * 1e6 + m.span_hz / 2) / 1e6).toFixed(3);
+    $("livelevel").textContent = `livello ${m.level_db} dBFS`;
+    this._drawLiveRow(m.row);
+    const trend = this._tvTrend || (this._tvTrend = []);
+    trend.push(m.level_db);
+    if (trend.length > 150) trend.shift();
+    this._satMax = Math.max(this._satMax ?? -999, m.level_db);
+    const pct = Math.max(0, Math.min(100, ((m.level_db + 50) / 50) * 100));
+    const maxPct = Math.max(0, Math.min(100, ((this._satMax + 50) / 50) * 100));
+    $("liverds").innerHTML = `<h3 style="margin:10px 0 4px">Puntamento parabola</h3>
+      <div class="row" style="justify-content:space-between;align-items:baseline">
+        <span>Livello del transponder</span><span class="bignum">${m.level_db.toFixed(1)} dBFS</span></div>
+      <div class="meter"><div style="width:${pct}%;background:#039be5"></div>
+        <div class="mark" style="left:${maxPct}%" title="massimo raggiunto"></div></div>
+      <div class="hint">La tacca è il massimo raggiunto (${this._satMax.toFixed(1)} dBFS): sposta la parabola di pochi millimetri alla volta,
+        aspetta un paio di secondi e torna dove il livello era più alto. Vicino a 0 dBFS la chiavetta satura: abbassa il guadagno.</div>
+      <canvas class="trend" id="tvtrend"></canvas>
+      <div class="hint">Andamento del livello (ultimi ~2 minuti).</div>`;
+    this._drawTvTrend(-50, 0, [-40, -30, -20, -10], "dBFS");
   }
 
   _renderTv() {
@@ -1620,7 +1719,7 @@ class SpettroPanel extends HTMLElement {
   _select(f) {
     this._sel = f;
     const $ = (id) => this.shadowRoot.getElementById(id);
-    $("selinfo").textContent = `Selezionato: ${(f / 1e6).toFixed(4)} MHz`;
+    $("selinfo").textContent = `Selezionato: ${(f / 1e6).toFixed(4)} MHz${this._kuText(f / 1e6)}`;
     $("analyze").disabled = !!this._analyzing || !!this._live;
     $("livebtn").disabled = false;
     $("fav").disabled = false;

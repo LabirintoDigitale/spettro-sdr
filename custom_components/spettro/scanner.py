@@ -21,7 +21,7 @@ from typing import Any
 
 import numpy as np
 
-from . import dab, dvbt, rds
+from . import dab, dvbt, rds, satellite
 from .analysis import analyze_iq
 from .dabplus import DabLiveReceiver
 from .archive import SpikeArchive
@@ -91,6 +91,7 @@ class ScanSettings:
     auto_limit_sweep: bool = False  # limita i picchi analizzati per scansione completa
     auto_max_per_sweep: int = 20
     analysis_s: float = 2.0  # durata della registrazione di ogni analisi, manuale o automatica
+    lnb: bool = False  # c'è un LNB satellitare sul cavo: 950–2150 MHz sono transponder TV
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> ScanSettings:
@@ -514,10 +515,11 @@ class SpectrumScanner:
 
     # --- analisi continua (in diretta) --------------------------------------
 
-    @staticmethod
-    def live_mode_for(freq_hz: float) -> str:
+    def live_mode_for(self, freq_hz: float) -> str:
         """Demodulazione predefinita per la frequenza: FM larga per la radio, AM per la banda aerea."""
         mhz = freq_hz / 1e6
+        if self.settings.lnb and satellite.IF_MIN <= mhz <= satellite.IF_MAX:
+            return "sat"
         tv = dvbt.channel_for(mhz)
         if tv and tv[2] == 8:
             return "tv"
@@ -548,9 +550,11 @@ class SpectrumScanner:
                 self.status["live"] = None
                 raise RuntimeError("La frequenza non è in un canale TV (UHF 21–48 o VHF D–H2)")
             self.status["live"].update(channel=dvbt.channel_label(tv[0]), freq_mhz=tv[1])
+        if mode == "sat":
+            self.status["live"].update(self._sat_transponder(freq_hz / 1e6))
         self._update_active()  # la scansione si ferma al passo successivo e libera la chiavetta
         run = (self._live_dab_run(freq_hz, sid) if mode == "dab"
-               else self._live_tv_run(freq_hz) if mode == "tv" else self._live_run(freq_hz, mode))
+               else self._live_tv_run(freq_hz, mode == "sat") if mode in ("tv", "sat") else self._live_run(freq_hz, mode))
         self._live_task = asyncio.get_running_loop().create_task(run, name="spettro_live")
         if self.viewers <= 0:
             self._schedule_live_stop()
@@ -705,10 +709,25 @@ class SpectrumScanner:
             self.status["live"] = None
             self._update_active()
 
-    async def _live_tv_run(self, freq_hz: float) -> None:
-        """Misuratore di campo TV: chiavetta al centro del canale, livello e qualità del multiplex di continuo."""
+    def _sat_transponder(self, if_mhz: float) -> dict[str, Any]:
+        """Transponder riconosciuto nell'ultima scansione più vicino alla frequenza (sul cavo), se c'è."""
+        sat = (self.last_complete or {}).get("sat") or {}
+        near = [t for t in sat.get("transponders", []) if abs(t["if_mhz"] - if_mhz) <= t["sr"] / 1000 * 0.6]
+        if not sat.get("found") or not near:
+            return {"satellite": None, "ku_mhz": None}
+        t = min(near, key=lambda t: abs(t["if_mhz"] - if_mhz))
+        return {"satellite": sat["satellite"], "ku_mhz": t["ku_mhz"], "polarization": sat["polarization"],
+                "freq_mhz": t["if_mhz"]}
+
+    async def _live_tv_run(self, freq_hz: float, sat: bool = False) -> None:
+        """Misuratore di campo: TV terrestre (livello e qualità del multiplex) o transponder satellitare (livello)."""
         loop = asyncio.get_running_loop()
-        name, center_mhz, bw = dvbt.channel_for(freq_hz / 1e6) or ("?", freq_hz / 1e6, 8)
+        if sat:
+            live = self.status["live"] or {}
+            freq_hz = (live.get("freq_mhz") or freq_hz / 1e6) * 1e6  # centro del transponder, se riconosciuto
+            name, center_mhz, bw = "sat", freq_hz / 1e6, 0
+        else:
+            name, center_mhz, bw = dvbt.channel_for(freq_hz / 1e6) or ("?", freq_hz / 1e6, 8)
         center = center_mhz * 1e6
         rate = dab.RATE
         discard = RCV_BUF + 2 * READ_LIMIT + int(rate * 2 * max(self.settings.settle_ms, 100) / 1000)
@@ -721,7 +740,8 @@ class SpectrumScanner:
             a = np.frombuffer(raw, dtype=np.uint8).astype(np.float32) - 127.5
             iq = a[0::2] + 1j * a[1::2]
             level = 10 * math.log10(float(np.mean(a * a)) * 2 / 127.5**2 + 1e-20)
-            return dvbt.measure(iq, rate, bw, known), dvbt.spectrum_row(iq), round(level, 1)
+            m = None if sat else dvbt.measure(iq, rate, bw, known)
+            return m, dvbt.spectrum_row(iq), round(level, 1)
 
         try:
             async with self._radio:
@@ -749,6 +769,11 @@ class SpectrumScanner:
                             misses += 1
                             if misses >= 3:
                                 known = None  # forse è cambiato: si torna a cercare tutte le modalità
+                        if sat:
+                            self._emit({"kind": "live_sat", "freq_mhz": center_mhz, "row": row, "span_hz": rate,
+                                        "level_db": level, "flatness_db": round(float(np.percentile(row, 90)
+                                                                                        - np.percentile(row, 10)), 1)})
+                            continue
                         self._emit({"kind": "live_tv", "freq_mhz": center_mhz, "channel": dvbt.channel_label(name),
                                     "row": row, "span_hz": rate, "level_db": level,
                                     "tv": m, "quality": dvbt.quality_label(m) if m else None})
@@ -976,6 +1001,9 @@ class SpectrumScanner:
             "sweep_s": sweep_s,
         }
         self.last_spectrum = payload
+        if complete and self.settings.lnb:
+            freqs = (f_start + np.arange(len(data)) * bin_hz) / 1e6
+            payload["sat"] = satellite.identify(freqs, data)
         if complete:
             self.last_complete = payload
             self.history.append(payload)

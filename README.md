@@ -17,6 +17,7 @@ Integrazione custom per **Home Assistant** che trasforma una chiavetta RTL-SDR c
 - **RDS delle radio FM**: per le stazioni FM broadcast l'analisi decodifica anche i dati digitali RDS trasmessi sulla sottoportante a 57 kHz: nome della stazione (PS), testo (RadioText, di solito titolo e artista), tipo di programma, codice PI, frequenze alternative, ora trasmessa, informazioni sul traffico e se la stazione è stereo (pilota a 19 kHz). Il nome compare anche nel tipo rilevato e nell'archivio. Il nome arriva già con 1 s di registrazione, il testo completo di solito con 2–5 s (*Durata analisi*); con segnale debole i caratteri non ricevuti sono indicati con «·».
 - **DAB / DAB+ (radio digitale)**: i multiplex della banda III (174–240 MHz, canali 5A…13F, in Italia soprattutto il 12) compaiono come blocchi piatti larghi 1,5 MHz e l'analisi li riconosce con il loro canale. Sintonizzandosi al centro del canale decodifica il canale di servizio (FIC: sincronismo sulle trame da 96 ms, demodulazione OFDM/DQPSK, Viterbi, CRC) e mostra **nome del multiplex**, codice EId e l'**elenco delle radio** con il tipo (DAB o DAB+); il nome finisce anche nel tipo rilevato e nell'archivio. Serve il sample rate di 2,048 MS/s (quello predefinito). Per ogni radio si vede anche la velocità (kbit/s).
 - **TV digitale (DVB-T/T2)**: riconosce i multiplex TV dei canali UHF 21–48 dalla struttura dei simboli OFDM e ne misura standard, modalità, intervallo di guardia e qualità (MER stimato), con una scheda dei canali trovati e un misuratore continuo per puntare l'antenna. Vedi [Misuratore di campo TV](#misuratore-di-campo-tv).
+- **TV satellitare**: con la chiavetta sul cavo della parabola riconosce il satellite (Hotbird, Astra…) dalla posizione dei transponder e misura il livello per puntare la parabola. Vedi [Satellite](#satellite-parabola-con-lnb).
 - **Preferiti**: con il cuoricino ♡ accanto ad *Analizza* la frequenza selezionata (dal grafico o dall'archivio) entra nei preferiti e il cuore diventa ❤. La scheda *Preferiti* li elenca con il nome: quello RDS per le radio FM, altrimenti *NONAME 1*, *NONAME 2*…; con ✏ lo cambi a mano (un nome scritto da te non viene mai sostituito dall'RDS; lasciandolo vuoto torna automatico). Toccando la riga si seleziona la frequenza, ▶ avvia l'analisi continua, ❤ la toglie. I preferiti sono salvati in Home Assistant, quindi uguali su telefono e computer.
 - **Analisi continua (in diretta)**: dal pulsante *▶ Analisi continua* o dai preferiti la chiavetta resta sintonizzata fissa sulla frequenza (la scansione si sospende e alla fine riparte, solo se era attiva) e il pannello mostra in diretta la cascata che scorre, il livello del segnale e l'**audio** (FM larga, FM stretta o AM, con *Ascolta*/*Muto*). Per le radio FM l'**RDS si aggiorna** ogni secondo, con lo storico dei testi ricevuti (titoli, conduttori…). In diretta si usa 1,024 MS/s (circa 2 MB/s in rete); l'elaborazione avviene sul computer di Home Assistant. Se tutti i pannelli vengono chiusi l'analisi continua si ferma da sola dopo 30 s, per liberare la chiavetta.
 - **Ascolto**: la registrazione viene demodulata in FM larga (radio), FM stretta (voce) e AM; il pannello propone la più adatta in un lettore audio e si può passare alle altre.
@@ -136,6 +137,25 @@ La TV digitale terrestre (DVB-T/DVB-T2) non si può guardare con la chiavetta in
 - **Livello in ingresso −20,8 dBFS**: lontano dalla saturazione (0 dBFS), quindi il guadagno va bene.
 
 I nomi dei canali (Rai 1, Canale 5…) non si vedono: viaggiano dentro il flusso dati, che senza l'intero multiplex non si decodifica. Con una guardia corta (es. DVB-T2 32k 1/128) la stima del MER resta per difetto e il pannello la indica con «≥».
+
+## Satellite (parabola con LNB)
+
+Collegando la chiavetta al cavo della parabola, Spettro diventa un **sat finder** che riconosce il satellite: utile per puntare la parabola su **Hotbird 13°E**, **Astra 19,2°E** o gli altri satelliti visibili dall'Italia (Eutelsat 5°W, 7°E, 9°E, 16°E, Astra 4,8°E, 23,5°E, 28,2°E).
+
+**Collegamento**
+
+- La parabola riceve 10,7–12,75 GHz; l'LNB li abbassa sul cavo a **950–2150 MHz** e la chiavetta arriva a circa **1766 MHz**. Si vedono quindi quasi tutta la *banda bassa* (10,70–11,52 GHz) e una parte della *banda alta* (11,70–12,37 GHz, con il tono a 22 kHz).
+- L'LNB va **alimentato** a 13 V (polarizzazione verticale) o 18 V (orizzontale): da un decoder con uno splitter satellitare, oppure con un alimentatore da linea (*power inserter*).
+- ⚠ **La tensione dell'LNB non deve arrivare alla chiavetta**, che si brucerebbe: usa uno splitter con il passaggio di corrente solo dal lato del decoder, oppure un condensatore di blocco (*DC block*). Il cavo ha l'attacco F e la chiavetta di solito SMA o MCX: serve un adattatore.
+
+**Uso**
+
+1. Nella scheda *Scansione* scegli il preset **Satellite con LNB (950–1760)**: si spunta anche **LNB satellitare sul cavo**. Poi premi *Applica*.
+2. I transponder (larghi 27–36 MHz) compaiono nello spettro come **gobbe piatte**. A fine scansione la scheda **Satellite** dice quale satellite è, con la **banda** e la **polarizzazione** in uso e di quanto è spostato l'oscillatore dell'LNB. Se non è sicura, indica anche le alternative.
+3. Sotto c'è l'elenco dei transponder di quel satellite nella banda vista, con la frequenza vera (GHz), quella sul cavo, il symbol rate e quanto stanno sopra il rumore.
+4. Con **▶** su un transponder parte la **misura continua del livello**, con il massimo raggiunto e il grafico degli ultimi due minuti: si sposta la parabola di pochi millimetri alla volta e ci si ferma dove il livello è più alto.
+
+**Come funziona**: dentro un transponder non si legge nulla (la chiavetta ne riceve 2 MHz su 30, e il DVB-S non ha l'intervallo di guardia usato per la TV terrestre), ma ogni satellite ha il suo **piano di frequenze**. Spettro confronta le gobbe della scansione con i transponder di ciascun satellite, per entrambe le bande e polarizzazioni e con l'oscillatore dell'LNB spostato fino a ±8 MHz, e sceglie quello che spiega meglio dove cadono le gobbe. I piani vengono dal file `satellites.xml` dei decoder Enigma2 (ottobre 2026): se un satellite cambia i transponder il riconoscimento può peggiorare. Programmi, nomi dei canali e qualità del segnale (MER) non si possono misurare.
 
 ## Requisiti
 

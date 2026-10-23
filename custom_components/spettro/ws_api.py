@@ -106,6 +106,7 @@ def ws_subscribe(hass: HomeAssistant, connection: websocket_api.ActiveConnection
         vol.Optional("only_when_viewed"): bool,
         vol.Optional("analysis_s"): vol.All(vol.Coerce(float), vol.Range(min=0.2, max=ANALYSIS_MAX_S)),
         vol.Optional("auto_analyze"): bool,
+        vol.Optional("lnb"): bool,
         vol.Optional("archive_hours"): vol.All(vol.Coerce(float), vol.Range(min=1, max=24 * 90)),
         vol.Optional("reanalyze_min"): vol.All(vol.Coerce(float), vol.Range(min=0, max=7 * 24 * 60)),
         vol.Optional("auto_limit_step"): bool,
@@ -323,7 +324,7 @@ async def ws_favorite_remove(hass: HomeAssistant, connection: websocket_api.Acti
     {
         vol.Required("type"): "spettro/live_start",
         vol.Required("freq_mhz"): vol.All(vol.Coerce(float), vol.Range(min=24, max=1766)),
-        vol.Optional("mode"): vol.Any(None, vol.In(["wfm", "nfm", "am", "dab", "tv"])),
+        vol.Optional("mode"): vol.Any(None, vol.In(["wfm", "nfm", "am", "dab", "tv", "sat"])),
         vol.Optional("sid"): vol.Any(None, str),
     }
 )
