@@ -43,6 +43,7 @@ CMD_SET_FREQ_CORRECTION = 0x05
 CMD_SET_AGC_MODE = 0x08
 CMD_SET_DIRECT_SAMPLING = 0x09
 HF_MAX_HZ = 24e6  # sotto questa frequenza (onde corte) si usa il direct sampling, se attivo
+DIRECT_SETTLE_S = 0.3  # campioni scartati dopo un cambio di direct sampling
 
 TUNER_NAMES = {
     0: "Sconosciuto",
@@ -243,6 +244,7 @@ class SpectrumScanner:
         self._meteo_done: set[tuple[int, float]] = set()  # passaggi già ricevuti (norad, aos)
         self._radio = asyncio.Lock()  # una sola connessione rtl_tcp alla volta
         self._direct: dict[int, int] = {}  # direct sampling attivo per connessione
+        self._rate = 2_048_000  # sample rate della connessione in corso
         self._listeners: list[Callable[[dict[str, Any]], None]] = []
         self._task: asyncio.Task | None = None
         self._wake = asyncio.Event()
@@ -422,7 +424,7 @@ class SpectrumScanner:
                 try:
                     self.status["tuner"] = TUNER_NAMES.get(tuner, f"Tipo {tuner}")
                     await self._configure(writer, rate)
-                    await self._tune(writer, center)
+                    await self._tune(writer, center, reader)
                     async with asyncio.timeout(IO_TIMEOUT + ANALYSIS_MAX_S):
                         await self._discard(reader, discard_bytes)
                         raw = await reader.readexactly(capture_bytes)
@@ -517,7 +519,7 @@ class SpectrumScanner:
         center = self._tune_center(freq_hz, rate)
         self._set_status(auto_mhz=round(freq_hz / 1e6, 4))
         try:
-            await self._tune(writer, center)
+            await self._tune(writer, center, reader)
             duration = min(self.settings.analysis_s, ANALYSIS_MAX_S)
             async with asyncio.timeout(IO_TIMEOUT + duration):
                 await self._discard(reader, discard)
@@ -640,7 +642,7 @@ class SpectrumScanner:
                 try:
                     self.status["tuner"] = TUNER_NAMES.get(tuner, f"Tipo {tuner}")
                     await self._configure(writer, LIVE_RATE)
-                    await self._tune(writer, center)
+                    await self._tune(writer, center, reader)
                     async with asyncio.timeout(IO_TIMEOUT):
                         await self._discard(reader, discard)
                     demod = LiveDemod(LIVE_RATE, freq_hz - center, mode)
@@ -709,7 +711,7 @@ class SpectrumScanner:
                 try:
                     self.status["tuner"] = TUNER_NAMES.get(tuner, f"Tipo {tuner}")
                     await self._configure(writer, dab.RATE)
-                    await self._tune(writer, center)
+                    await self._tune(writer, center, reader)
                     async with asyncio.timeout(IO_TIMEOUT):
                         await self._discard(reader, discard)
                     while True:
@@ -795,7 +797,7 @@ class SpectrumScanner:
                 try:
                     self.status["tuner"] = TUNER_NAMES.get(tuner, f"Tipo {tuner}")
                     await self._configure(writer, rate)
-                    await self._tune(writer, center)
+                    await self._tune(writer, center, reader)
                     async with asyncio.timeout(IO_TIMEOUT):
                         await self._discard(reader, discard)
                     while True:
@@ -948,7 +950,7 @@ class SpectrumScanner:
                     while True:
                         freq = freqs[fi]
                         center = freq + weather.CENTER_OFFSET
-                        await self._tune(writer, center)
+                        await self._tune(writer, center, reader)
                         async with asyncio.timeout(IO_TIMEOUT):
                             await self._discard(reader, discard)
                         rx = weather.MeteorReceiver(freq)
@@ -1115,20 +1117,33 @@ class SpectrumScanner:
         writer.write(struct.pack(">BI", cmd, value & 0xFFFFFFFF))
         await writer.drain()
 
-    async def _tune(self, writer: asyncio.StreamWriter, freq_hz: float) -> None:
-        """Sintonizza; sotto i 24 MHz accende il direct sampling (onde corte senza sintonizzatore)."""
+    async def _tune(self, writer: asyncio.StreamWriter, freq_hz: float, reader: asyncio.StreamReader) -> None:
+        """Sintonizza; sotto i 24 MHz accende il direct sampling (onde corte senza sintonizzatore).
+
+        Cambiare il direct sampling reinizializza il sintonizzatore: il guadagno torna quello di
+        fabbrica e per qualche istante i campioni non valgono. Si reimposta il guadagno e si scartano.
+        """
         mode = self.settings.hf_sampling if freq_hz < HF_MAX_HZ else 0
-        if self._direct.get(id(writer), -1) != mode:
+        changed = self._direct.get(id(writer), -1) != mode
+        if changed:
             await self._send(writer, CMD_SET_DIRECT_SAMPLING, mode)
             self._direct[id(writer)] = mode
+            await self._set_gain(writer)
         await self._send(writer, CMD_SET_FREQ, int(round(freq_hz)))
+        if changed:
+            await self._discard(reader, int(self._rate * 2 * DIRECT_SETTLE_S) // 2 * 2)
 
     async def _configure(self, writer: asyncio.StreamWriter, rate: int) -> None:
         """Sample rate, correzione ppm e guadagno presi dalle impostazioni."""
         s = self.settings
         self._direct = {id(writer): -1}  # nuova connessione: il direct sampling va reimpostato alla prima sintonia
+        self._rate = rate
         await self._send(writer, CMD_SET_SAMPLE_RATE, rate)
         await self._send(writer, CMD_SET_FREQ_CORRECTION, int(s.ppm))
+        await self._set_gain(writer)
+
+    async def _set_gain(self, writer: asyncio.StreamWriter) -> None:
+        s = self.settings
         await self._send(writer, CMD_SET_AGC_MODE, 0)
         if s.gain_db is None:
             await self._send(writer, CMD_SET_GAIN_MODE, 0)
@@ -1181,7 +1196,7 @@ class SpectrumScanner:
                 if not self._active.is_set():
                     raise ScanPaused
                 center = f_start + (i * keep + keep / 2) * bin_hz
-                await self._tune(writer, center)
+                await self._tune(writer, center, reader)
                 async with asyncio.timeout(IO_TIMEOUT):
                     await self._discard(reader, discard_bytes)
                     raw = await reader.readexactly(capture_bytes)
