@@ -169,3 +169,7 @@ HACS mostra come versione l'ultima **release** GitHub. Per pubblicarne una basta
 ## Licenza
 
 MIT
+
+---
+
+[![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/W4M829BGBC)
