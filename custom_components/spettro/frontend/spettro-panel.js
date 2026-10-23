@@ -1,7 +1,7 @@
 // Pannello "Spettro" per Home Assistant: grafico dello spettro, waterfall e picchi.
 
 // deve coincidere con VERSION in const.py: se il backend ne riporta un'altra manca un riavvio
-const PANEL_VERSION = "1.14.1";
+const PANEL_VERSION = "1.14.2";
 
 const PRESETS = [
   ["Personalizzato", null, null],
@@ -2184,8 +2184,9 @@ class SpettroPanel extends HTMLElement {
         </div>
       </div>
       ${r.audio ? `<div class="row">
-          <select id="audmode">${[["wfm", "FM larga (radio)"], ["nfm", "FM stretta (voce)"], ["am", "AM"]]
-            .map(([k, t]) => `<option value="${k}"${k === (r.audio_mode || "nfm") ? " selected" : ""}>${t}</option>`).join("")}</select>
+          <select id="audmode">${[["wfm", "FM larga (radio)"], ["nfm", "FM stretta (voce)"], ["am", "AM"], ["usb", "USB (onde corte)"], ["lsb", "LSB (onde corte)"]]
+            .filter(([k]) => r.audio[k])
+            .map(([k, t]) => `<option value="${k}"${k === (r.audio_mode || (r.audio.usb ? "usb" : "nfm")) ? " selected" : ""}>${t}</option>`).join("")}</select>
           <audio id="player" controls preload="auto" style="flex:1;min-width:200px;height:36px"></audio>
         </div>
         ${r.audio_mode ? "" : `<div class="hint">Segnale digitale: demodulato si sente solo rumore.</div>`}` : ""}

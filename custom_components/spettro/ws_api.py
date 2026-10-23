@@ -330,7 +330,7 @@ async def ws_favorite_remove(hass: HomeAssistant, connection: websocket_api.Acti
 @websocket_api.websocket_command(
     {
         vol.Required("type"): "spettro/live_start",
-        vol.Required("freq_mhz"): vol.All(vol.Coerce(float), vol.Range(min=24, max=1766)),
+        vol.Required("freq_mhz"): vol.All(vol.Coerce(float), vol.Range(min=0.5, max=2200)),
         vol.Optional("mode"): vol.Any(None, vol.In(["wfm", "nfm", "am", "usb", "lsb", "dab", "tv", "sat"])),
         vol.Optional("sid"): vol.Any(None, str),
         vol.Optional("decoder"): vol.Any(None, vol.In(["sstv", "fax"])),
