@@ -41,8 +41,10 @@ async def aircraft_info(http_get: HttpGet, icao: str) -> dict[str, Any] | None:
 def _airport(a: dict[str, Any] | None) -> dict[str, Any] | None:
     if not a:
         return None
+    lat, lon = a.get("latitude"), a.get("longitude")
     return {"iata": a.get("iata_code"), "icao": a.get("icao_code"), "name": a.get("name"),
-            "city": a.get("municipality"), "country": a.get("country_name")}
+            "city": a.get("municipality"), "country": a.get("country_name"),
+            "lat": float(lat) if lat is not None else None, "lon": float(lon) if lon is not None else None}
 
 
 async def route_info(http_get: HttpGet, callsign: str) -> dict[str, Any] | None:

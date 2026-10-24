@@ -1,7 +1,7 @@
 // Pannello "Spettro" per Home Assistant: grafico dello spettro, waterfall e picchi.
 
 // deve coincidere con VERSION in const.py: se il backend ne riporta un'altra manca un riavvio
-const PANEL_VERSION = "1.22.0";
+const PANEL_VERSION = "1.22.1";
 
 const PRESETS = [
   ["Personalizzato", null, null],
@@ -1577,17 +1577,38 @@ class SpettroPanel extends HTMLElement {
     list.innerHTML = `<table class="digitab" style="margin-top:8px"><thead><tr>
         <th>Volo / compagnia</th><th class="num">Quota</th><th class="num">Velocità</th><th class="num">Distanza</th><th>Direz.</th></tr></thead>
       <tbody>${ac.map((a) => { const ap = (x) => x ? `${esc(x.city || x.name || x.iata || "?")}${x.iata ? ` (${esc(x.iata)})` : ""}` : "?";
-        const route = a.route && (a.route.origin || a.route.destination) ? `${ap(a.route.origin)} → ${ap(a.route.destination)}` : null;
+        const route = this._routeOriented(a);
         const model = a.type || [a.manufacturer, a.icao_type].filter(Boolean).join(" ") || null;
         return `<tr${a.emergency ? ' style="color:#e53935;font-weight:600"' : ""}>
         <td>${a.photo ? `<img src="${esc(a.photo)}" alt="" referrerpolicy="no-referrer" loading="lazy" style="float:right;height:40px;border-radius:4px;margin:0 0 2px 8px">` : ""}<b>${esc(a.call || a.icao)}</b>${a.airline || a.owner ? `<br><span class="hint">${esc(a.airline || a.owner)}${a.flight ? ` · volo ${esc(a.flight)}` : ""}</span>` : ""}
           <span class="hint"> ${a.icao}${a.registration ? ` · ${esc(a.registration)}` : ""}${a.country ? ` · ${esc(a.country)}` : ""}${model ? ` · ${esc(model)}` : (a.category ? ` · ${esc(a.category)}` : "")}${a.emergency ? ` · ⚠ EMERGENZA ${esc(a.emergency)}` : ""}</span>
           ${route ? `<br><span class="hint">🛫 ${route}</span>` : ""}</td>
         <td class="num">${a.alt_m != null ? `${a.alt_m.toLocaleString("it-IT")} m` : "—"}</td>
-        <td class="num">${a.speed_kmh != null ? `${a.speed_kmh} km/h` : "—"}</td>
+        <td class="num">${a.speed_kmh != null ? `${a.speed_kmh} km/h` : "—"}${a.track != null ? `<br><span class="hint">vola verso ${dir(a.track)}</span>` : ""}</td>
         <td class="num">${a.km != null ? `${a.km.toLocaleString("it-IT")} km` : "—"}</td>
         <td>${a.bearing != null ? `${dir(a.bearing)} ${a.bearing}°` : "—"}</td></tr>`; }).join("")}</tbody></table>
       <div class="hint" style="margin-top:4px">Compagnia, paese e categoria sono ricavati senza internet. Con «Dettagli da internet» si aggiungono modello, immatricolazione e rotta (adsbdb.com). La posizione c'è solo per gli aerei che la trasmettono. Radar centrato su di te, nord in alto.</div>`;
+  }
+
+  _routeOriented(a) {
+    // la rotta dal database è la coppia fissa della sigla del volo e non sa il verso di oggi:
+    // si guarda verso quale dei due aeroporti punta davvero l'aereo (dalla sua rotta e posizione)
+    const r = a.route;
+    if (!r || (!r.origin && !r.destination)) return null;
+    const ap = (x) => x ? `${esc(x.city || x.name || x.iata || "?")}${x.iata ? ` (${esc(x.iata)})` : ""}` : "?";
+    let from = r.origin, to = r.destination;
+    const brg = (la1, lo1, la2, lo2) => {
+      const t = Math.PI / 180, y = Math.sin((lo2 - lo1) * t) * Math.cos(la2 * t);
+      const x = Math.cos(la1 * t) * Math.sin(la2 * t) - Math.sin(la1 * t) * Math.cos(la2 * t) * Math.cos((lo2 - lo1) * t);
+      return (Math.atan2(y, x) / t + 360) % 360;
+    };
+    const diff = (b) => Math.abs(((a.track - b + 540) % 360) - 180);
+    if (a.track != null && a.lat != null && from && to && from.lat != null && to.lat != null) {
+      const toDest = diff(brg(a.lat, a.lon, to.lat, to.lon));
+      const toOrig = diff(brg(a.lat, a.lon, from.lat, from.lon));
+      if (toOrig < toDest) { from = r.destination; to = r.origin; } // sta volando la tratta inversa
+    }
+    return `${ap(from)} → ${ap(to)}`;
   }
 
   _updateAdsbTrails(ac) {
