@@ -1,7 +1,7 @@
 // Pannello "Spettro" per Home Assistant: grafico dello spettro, waterfall e picchi.
 
 // deve coincidere con VERSION in const.py: se il backend ne riporta un'altra manca un riavvio
-const PANEL_VERSION = "1.21.1";
+const PANEL_VERSION = "1.22.0";
 
 const PRESETS = [
   ["Personalizzato", null, null],
@@ -1568,8 +1568,9 @@ class SpettroPanel extends HTMLElement {
     const radar = $("adsbradar");
     radar.style.display = running ? "" : "none";
     const list = $("adsblist");
-    if (!running) { list.innerHTML = ""; return; }
+    if (!running) { list.innerHTML = ""; this._adsbTrails = {}; return; }
     const ac = m.aircraft || [];
+    this._updateAdsbTrails(ac);
     this._drawAdsbRadar(ac, m.home);
     if (!ac.length) { list.innerHTML = `<div class="hint" style="margin-top:8px">In ascolto… gli aerei compaiono quando passano in portata (quota alta = più lontano si sente). Serve un'antenna sui 1090 MHz.</div>`; return; }
     const dir = (b) => b == null ? "" : ["N", "NE", "E", "SE", "S", "SO", "O", "NO"][Math.round(b / 45) % 8];
@@ -1579,7 +1580,7 @@ class SpettroPanel extends HTMLElement {
         const route = a.route && (a.route.origin || a.route.destination) ? `${ap(a.route.origin)} → ${ap(a.route.destination)}` : null;
         const model = a.type || [a.manufacturer, a.icao_type].filter(Boolean).join(" ") || null;
         return `<tr${a.emergency ? ' style="color:#e53935;font-weight:600"' : ""}>
-        <td><b>${esc(a.call || a.icao)}</b>${a.airline || a.owner ? `<br><span class="hint">${esc(a.airline || a.owner)}${a.flight ? ` · volo ${esc(a.flight)}` : ""}</span>` : ""}
+        <td>${a.photo ? `<img src="${esc(a.photo)}" alt="" referrerpolicy="no-referrer" loading="lazy" style="float:right;height:40px;border-radius:4px;margin:0 0 2px 8px">` : ""}<b>${esc(a.call || a.icao)}</b>${a.airline || a.owner ? `<br><span class="hint">${esc(a.airline || a.owner)}${a.flight ? ` · volo ${esc(a.flight)}` : ""}</span>` : ""}
           <span class="hint"> ${a.icao}${a.registration ? ` · ${esc(a.registration)}` : ""}${a.country ? ` · ${esc(a.country)}` : ""}${model ? ` · ${esc(model)}` : (a.category ? ` · ${esc(a.category)}` : "")}${a.emergency ? ` · ⚠ EMERGENZA ${esc(a.emergency)}` : ""}</span>
           ${route ? `<br><span class="hint">🛫 ${route}</span>` : ""}</td>
         <td class="num">${a.alt_m != null ? `${a.alt_m.toLocaleString("it-IT")} m` : "—"}</td>
@@ -1587,6 +1588,26 @@ class SpettroPanel extends HTMLElement {
         <td class="num">${a.km != null ? `${a.km.toLocaleString("it-IT")} km` : "—"}</td>
         <td>${a.bearing != null ? `${dir(a.bearing)} ${a.bearing}°` : "—"}</td></tr>`; }).join("")}</tbody></table>
       <div class="hint" style="margin-top:4px">Compagnia, paese e categoria sono ricavati senza internet. Con «Dettagli da internet» si aggiungono modello, immatricolazione e rotta (adsbdb.com). La posizione c'è solo per gli aerei che la trasmettono. Radar centrato su di te, nord in alto.</div>`;
+  }
+
+  _updateAdsbTrails(ac) {
+    const now = Date.now();
+    const tr = (this._adsbTrails = this._adsbTrails || {});
+    for (const a of ac) {
+      if (a.km == null || a.bearing == null) continue;
+      const t = (tr[a.icao] = tr[a.icao] || []);
+      const last = t[t.length - 1];
+      // nuovo punto solo se l'aereo si è spostato un po' (evita di accumulare punti fermi)
+      if (!last || Math.abs(last.km - a.km) > 0.3 || Math.abs(((last.bearing - a.bearing + 540) % 360) - 180) > 0.5) {
+        t.push({ km: a.km, bearing: a.bearing, alt: a.alt_m || 0, t: now });
+        if (t.length > 120) t.shift();
+      }
+    }
+    // scie vecchie (aereo uscito dalla portata) si cancellano dopo un po'
+    for (const icao of Object.keys(tr)) {
+      tr[icao] = tr[icao].filter((p) => now - p.t < 90000);
+      if (!tr[icao].length) delete tr[icao];
+    }
   }
 
   _drawAdsbRadar(ac, home) {
@@ -1614,6 +1635,20 @@ class SpettroPanel extends HTMLElement {
     g.fillText("N", cx, pad / 2); g.fillText("S", cx, W - pad / 2); g.fillText("E", W - pad / 2, cy); g.fillText("O", pad / 2, cy);
     // casa
     g.fillStyle = fg; g.beginPath(); g.arc(cx, cy, 3 * dpr, 0, 2 * Math.PI); g.fill();
+    // scie: il percorso recente di ogni aereo, che svanisce verso la coda
+    const tr = this._adsbTrails || {};
+    g.lineWidth = 2 * dpr; g.lineCap = "round";
+    for (const pts of Object.values(tr)) {
+      for (let i = 1; i < pts.length; i++) {
+        const q = pts[i - 1], p = pts[i];
+        const pt = (o) => { const ang = (o.bearing - 90) * Math.PI / 180, d = rad * Math.min(o.km, rr) / rr;
+          return [cx + d * Math.cos(ang), cy + d * Math.sin(ang)]; };
+        const [x0, y0] = pt(q), [x1, y1] = pt(p);
+        const hue = Math.max(0, Math.min(240, p.alt / 12000 * 240));
+        g.strokeStyle = `hsla(${hue},70%,55%,${(0.12 + 0.5 * i / pts.length).toFixed(2)})`;
+        g.beginPath(); g.moveTo(x0, y0); g.lineTo(x1, y1); g.stroke();
+      }
+    }
     for (const a of withPos) {
       const ang = (a.bearing - 90) * Math.PI / 180;
       const d = rad * a.km / rr;
