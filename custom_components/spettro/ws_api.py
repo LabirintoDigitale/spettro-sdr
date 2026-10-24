@@ -48,6 +48,7 @@ def async_setup(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, ws_subscribe)
     websocket_api.async_register_command(hass, ws_set_config)
     websocket_api.async_register_command(hass, ws_scan_now)
+    websocket_api.async_register_command(hass, ws_dab_scan)
     websocket_api.async_register_command(hass, ws_set_enabled)
     websocket_api.async_register_command(hass, ws_analyze)
     websocket_api.async_register_command(hass, ws_ask_ai)
@@ -144,6 +145,24 @@ def ws_set_config(hass: HomeAssistant, connection: websocket_api.ActiveConnectio
     scanner.update_settings(ScanSettings.from_dict(merged))
     hass.async_create_task(scanner.prune_archive())  # le ore di conservazione possono essere cambiate
     connection.send_result(msg["id"], merged)
+
+
+@websocket_api.websocket_command({vol.Required("type"): "spettro/dab_scan", vol.Optional("stop", default=False): bool})
+@websocket_api.async_response
+async def ws_dab_scan(hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]) -> None:
+    """Ricerca di tutti i multiplex DAB, canale per canale (o la ferma)."""
+    _entry, scanner = _scanner(hass, connection, msg)
+    if scanner is None:
+        return
+    try:
+        if msg["stop"]:
+            await scanner.dab_scan_stop()
+        else:
+            scanner.dab_scan_start()
+    except RuntimeError as err:
+        connection.send_error(msg["id"], "dab_scan_failed", str(err))
+        return
+    connection.send_result(msg["id"], {})
 
 
 @websocket_api.websocket_command({vol.Required("type"): "spettro/scan_now"})
@@ -339,7 +358,7 @@ async def ws_favorite_remove(hass: HomeAssistant, connection: websocket_api.Acti
         vol.Required("freq_mhz"): vol.All(vol.Coerce(float), vol.Range(min=0.5, max=2200)),
         vol.Optional("mode"): vol.Any(None, vol.In(["wfm", "nfm", "am", "usb", "lsb", "cw", "dab", "tv", "sat"])),
         vol.Optional("sid"): vol.Any(None, str),
-        vol.Optional("decoder"): vol.Any(None, vol.In(["sstv", "fax", "cw", "rtty45", "rtty50", "ft8", "wspr"])),
+        vol.Optional("decoder"): vol.Any(None, vol.In(["sstv", "fax", "cw", "rtty45", "rtty50", "ft8", "wspr", "dati"])),
         vol.Optional("bw"): vol.Any(None, vol.All(vol.Coerce(float), vol.Range(min=100, max=50000))),
         vol.Optional("title"): vol.Any(None, str),
     }

@@ -13,6 +13,7 @@ from collections import deque
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, fields
 from datetime import UTC, datetime, timedelta
+import json
 import logging
 import math
 import socket
@@ -22,7 +23,7 @@ from typing import Any
 
 import numpy as np
 
-from . import dab, dvbt, rds, satellite, slots, textdec, weather
+from . import dab, dvbt, rds, satellite, slots, textdec, verify, weather
 from .analysis import encode_png
 from .fax import FaxDecoder
 from .sstv import SstvDecoder, ToneTracker
@@ -77,6 +78,9 @@ IMAGE_DECODERS = ("sstv", "fax")
 SLOT_DECODERS = ("ft8", "wspr")  # modi digitali a periodi UTC
 KEEP_RUNNING = IMAGE_DECODERS + SLOT_DECODERS  # questi continuano anche a pannello chiuso
 DIGI_LOG = 600  # messaggi FT8/WSPR tenuti in memoria
+DAB_SCAN_S = 1.2  # registrazione per ogni canale nella ricerca dei multiplex DAB
+DATA_WINDOW_S = 2.0  # "Riconosci dati": finestra di IQ esaminata
+DATA_EVERY_S = 1.5  # ogni quanto (le finestre si sovrappongono: i pacchetti a cavallo non si perdono)
 TEXT_KEEP = 4000  # caratteri di testo decodificato tenuti nello stato (per chi apre il pannello dopo)
 ANALYSIS_MAX_S = 5  # durata massima di una registrazione per l'analisi
 TV_LIVE_S = 0.4  # campioni di ogni misura del multiplex TV in diretta
@@ -308,6 +312,10 @@ class SpectrumScanner:
         self._listeners: list[Callable[[dict[str, Any]], None]] = []
         self._task: asyncio.Task | None = None
         self._wake = asyncio.Event()
+        self._one_shot = False  # un solo giro chiesto a mano mentre la scansione è spenta
+        self.dab_list: list[dict[str, Any]] = []  # multiplex DAB trovati dalla ricerca canale per canale
+        self.dab_scan_time: float | None = None
+        self._dab_task: asyncio.Task | None = None
         self._active = asyncio.Event()
         self._sweep_id = 0
         self.last_spectrum: dict[str, Any] | None = None
@@ -373,6 +381,9 @@ class SpectrumScanner:
             out.append({"kind": "meteo_log", "log": list(self.meteo_log)})
         if self.digi_log:
             out.append({"kind": "digi_log", "log": list(self.digi_log)})
+        if self.dab_list or self._dab_task is not None:
+            out.append({"kind": "dab_scan", "done": self._dab_task is None, "found": self.dab_list,
+                        "time": self.dab_scan_time})
         live = self.status["live"]
         if live and live.get("mode") == "dab" and (self.last_slide or self.last_dab):
             # un pannello aperto a diretta già avviata riceve subito nome, testo e immagine
@@ -408,6 +419,8 @@ class SpectrumScanner:
             return "analysis"
         if self.status["live"]:
             return "live"
+        if self._one_shot:
+            return None  # "Scansiona ora": un giro anche con la scansione spenta
         if not self.enabled:
             return "disabled"
         if self.settings.only_when_viewed and self.viewers <= 0:
@@ -438,11 +451,13 @@ class SpectrumScanner:
 
     def start(self) -> None:
         if self._task is None or self._task.done():
+            asyncio.get_running_loop().create_task(self._load_dab())
             self._task = asyncio.get_running_loop().create_task(self._run(), name="spettro_scanner")
         if self.meteo is not None and (self._meteo_loop_task is None or self._meteo_loop_task.done()):
             self._meteo_loop_task = asyncio.get_running_loop().create_task(self._meteo_loop(), name="spettro_meteo")
 
     async def stop(self) -> None:
+        await self.dab_scan_stop()
         await self.live_stop()
         await self.meteo_stop()
         if self._meteo_loop_task is not None:
@@ -467,7 +482,107 @@ class SpectrumScanner:
         self.start()
 
     def scan_now(self) -> None:
+        if self._pause_reason() in ("disabled", "no_viewers"):
+            self._one_shot = True
+            self._update_active()
         self._wake.set()
+
+    # --- ricerca dei multiplex DAB ------------------------------------------
+
+    def _dab_file(self) -> Any:
+        return self.archive.path.parent / "spettro_dab.json" if self.archive is not None else None
+
+    async def _load_dab(self) -> None:
+        path = self._dab_file()
+        if path is None:
+            return
+
+        def read() -> dict[str, Any] | None:
+            try:
+                return json.loads(path.read_text())
+            except (OSError, ValueError):
+                return None
+
+        data = await asyncio.get_running_loop().run_in_executor(None, read)
+        if data and not self.dab_list:
+            self.dab_list, self.dab_scan_time = data.get("found", []), data.get("time")
+
+    def dab_scan_start(self) -> None:
+        """Prova tutti i canali della banda III: per ognuno nome del multiplex e radio (scansione sospesa).
+
+        Usa sempre 2,048 MS/s, qualunque sia il sample rate della scansione.
+        """
+        if self._dab_task is not None:
+            raise RuntimeError("Ricerca DAB già in corso")
+        if self.analyzing or self._live_task is not None:
+            raise RuntimeError("Ferma prima l'analisi in corso")
+        self._dab_task = asyncio.get_running_loop().create_task(self._dab_scan_run(), name="spettro_dab_scan")
+
+    async def dab_scan_stop(self) -> None:
+        task = self._dab_task
+        if task is not None:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+    async def _dab_scan_run(self) -> None:
+        loop = asyncio.get_running_loop()
+        found: list[dict[str, Any]] = []
+        chans = list(dab.CHANNELS.items())
+        discard = RCV_BUF + 2 * READ_LIMIT + int(dab.RATE * 2 * max(self.settings.settle_ms, 100) / 1000)
+        discard -= discard % 2
+        self.analyzing = True
+        self._update_active()
+        error = None
+        try:
+            async with self._radio:
+                reader, writer, _tuner = await _open(self.host, self.port)
+                try:
+                    await self._configure(writer, dab.RATE)
+                    for i, (ch, mhz) in enumerate(chans):
+                        self._emit({"kind": "dab_scan", "done": False, "progress": i / len(chans), "channel": ch,
+                                    "found": found})
+                        await self._tune(writer, mhz * 1e6, reader)
+                        async with asyncio.timeout(IO_TIMEOUT + DAB_SCAN_S):
+                            await self._discard(reader, discard)
+                            raw = await reader.readexactly(int(dab.RATE * DAB_SCAN_S) * 2)
+                        # mentre si decodifica si continua a leggere (e buttare) il flusso: altrimenti i campioni
+                        # accumulati finirebbero attribuiti al canale successivo
+                        job = loop.run_in_executor(None, _dab_probe, raw)
+                        while not job.done():
+                            try:
+                                async with asyncio.timeout(0.1):
+                                    await reader.read(READ_LIMIT)
+                            except TimeoutError:
+                                pass
+                        res = await job
+                        if res:
+                            found.append({"channel": ch, "mhz": mhz, **res})
+                finally:
+                    writer.close()
+                    try:
+                        await writer.wait_closed()
+                    except OSError:
+                        pass
+        except (OSError, TimeoutError, asyncio.IncompleteReadError, RtlTcpError) as err:
+            error = str(err) or type(err).__name__
+        finally:
+            self.analyzing = False
+            self._dab_task = None
+            self._update_active()
+        if error is None or found:
+            self.dab_list, self.dab_scan_time = found, time.time()
+            path = self._dab_file()
+            if path is not None:
+                text = json.dumps({"found": found, "time": self.dab_scan_time})
+                try:
+                    await loop.run_in_executor(None, path.write_text, text)
+                except OSError as err:
+                    _LOGGER.warning("Impossibile salvare i multiplex DAB: %s", err)
+        self._emit({"kind": "dab_scan", "done": True, "progress": 1.0, "found": self.dab_list,
+                    "time": self.dab_scan_time, "error": error})
 
     async def analyze(self, freq_hz: float, duration_s: float) -> dict[str, Any]:
         """Mette in pausa la scansione, registra il segnale a frequenza fissa e lo misura."""
@@ -658,6 +773,8 @@ class SpectrumScanner:
             raise RuntimeError("Morse e RTTY si decodificano in CW o SSB (USB/LSB)")
         if decoder in SLOT_DECODERS and mode != "usb":
             raise RuntimeError("FT8 e WSPR si ricevono in USB")
+        if decoder == "dati" and mode != "nfm":
+            raise RuntimeError("Il riconoscimento dei dati funziona in FM stretta")
         if bw is not None and mode in BANDWIDTHS:
             bw = min(BANDWIDTHS[mode][1], key=lambda b: abs(b - bw))
         else:
@@ -719,6 +836,9 @@ class SpectrumScanner:
         slot = (slots.SlotDecoder(decoder, freq_hz, self.meteo.location if self.meteo else None)
                 if decoder in SLOT_DECODERS else None)
         slot_tasks: set[asyncio.Task] = set()
+        data_raw: deque[bytes] = deque()  # ultimi secondi di IQ per "Riconosci dati"
+        data_task: asyncio.Task | None = None
+        last_data = loop.time()
         log = self._log_start("ISS", "iss", auto) if title == "ISS" else None
         center = float(round(freq_hz + LIVE_RATE / 8))
         discard = RCV_BUF + 2 * READ_LIMIT + int(LIVE_RATE * 2 * max(self.settings.settle_ms, 100) / 1000)
@@ -748,6 +868,15 @@ class SpectrumScanner:
                             extra = {"text": out["text"], "text_info": text.status()["info"]}
                             if out["text"] and self.status["live"]:
                                 self.status["live"]["text"] = (self.status["live"]["text"] + out["text"])[-TEXT_KEEP:]
+                        if decoder == "dati":
+                            data_raw.append(raw)
+                            while len(data_raw) * CHUNK > DATA_WINDOW_S * LIVE_RATE:
+                                data_raw.popleft()
+                            if loop.time() - last_data >= DATA_EVERY_S and (data_task is None or data_task.done()):
+                                last_data = loop.time()
+                                data_task = loop.create_task(self._live_data(b"".join(data_raw), freq_hz - center))
+                                slot_tasks.add(data_task)
+                                data_task.add_done_callback(slot_tasks.discard)
                         if slot is not None:
                             extra = {"digi": slot.status()}
                             for start, seg in out["slots"]:
@@ -1191,6 +1320,41 @@ class SpectrumScanner:
         self._emit({"kind": "meteo_image", "entry": entry})
         return entry
 
+    async def _live_data(self, raw: bytes, offset_hz: float) -> None:
+        """Parametri e protocolli del segnale in ascolto, su una finestra di IQ (a parte, nell'executor)."""
+        home = self.meteo.location if self.meteo else None
+
+        def work() -> dict[str, Any]:
+            a = np.frombuffer(raw, dtype=np.uint8).astype(np.float32) - 127.5
+            return verify.live_identify((a[0::2] + 1j * a[1::2]).astype(np.complex64), LIVE_RATE, offset_hz, home)
+
+        try:
+            res = await asyncio.get_running_loop().run_in_executor(None, work)
+        except Exception:  # noqa: BLE001 - una finestra andata male non deve fermare l'ascolto
+            _LOGGER.exception("Riconoscimento dei dati non riuscito")
+            return
+        live = self.status["live"]
+        if not live:
+            return
+        log = live.setdefault("data_log", [])
+        new = []
+        for v in res["found"]:
+            if not v.get("log"):
+                continue  # riepiloghi (DMR, POCSAG): solo nello stato attuale, non nel registro
+            for line in v["lines"]:
+                item = {"protocol": v["protocol"], "line": line, "time": time.time()}
+                # le finestre si sovrappongono: la stessa trama si vede due volte
+                if not any(x["protocol"] == item["protocol"] and x["line"] == line and item["time"] - x["time"] < 10
+                           for x in log[-50:]):
+                    log.append(item)
+                    new.append(item)
+        del log[:-200]
+        live["data_params"] = res["params"]
+        live["data_protocols"] = sorted({v["protocol"] for v in res["found"]} | set(live.get("data_protocols", [])))
+        self._emit({"kind": "live_data", "params": res["params"],
+                    "params_text": verify.params_text(res["params"]) if res["params"] else None,
+                    "found": [v["kind"] for v in res["found"]], "new": new, "protocols": live["data_protocols"]})
+
     async def _decode_slot(self, slot: slots.SlotDecoder, start: float, seg: np.ndarray) -> None:
         """Un periodo FT8/WSPR decodificato a parte: la lettura dei campioni non si ferma."""
         try:
@@ -1227,6 +1391,9 @@ class SpectrumScanner:
                 _LOGGER.exception("Errore imprevisto durante la scansione")
                 self.status["error"] = str(err)
 
+            if self._one_shot:
+                self._one_shot = False
+                self._update_active()  # fatto il giro chiesto: si torna in pausa
             try:
                 await self.prune_archive()
             except OSError as err:
@@ -1484,6 +1651,19 @@ class _ImageListener:
         if img.ndim == 2:  # radiofax: in scala di grigi, ridotto a metà
             img = np.stack([img[::2, ::2]] * 3, axis=2)
         return encode_png(np.ascontiguousarray(img))
+
+
+def _dab_probe(raw: bytes) -> dict[str, Any] | None:
+    """Un canale DAB registrato: nome del multiplex e servizi, se c'è un multiplex leggibile."""
+    a = np.frombuffer(raw, dtype=np.uint8).astype(np.float32) - 127.5
+    iq = (a[0::2] + 1j * a[1::2]).astype(np.complex64)
+    iq -= iq.mean()
+    res = dab.decode(iq, dab.RATE, 0.0)
+    if not res or not res.get("fib_ok"):
+        return None
+    level = float(10 * np.log10(np.mean(np.abs(iq) ** 2) / 127.5**2 + 1e-20))
+    return {"ensemble": res.get("ensemble"), "eid": res.get("eid"), "services": res.get("services", []),
+            "quality": round(res["fib_ok"] / max(1, res["fib_total"]), 2), "level_db": round(level, 1)}
 
 
 def _live_chunk(demod: LiveDemod, raw: bytes, img: _ImageListener | None = None,

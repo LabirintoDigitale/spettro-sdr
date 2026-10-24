@@ -131,7 +131,7 @@ def ax25(iq: np.ndarray, rate: int, offset_hz: float, home: tuple[float, float] 
         return None
     aprs = any(x["to"].startswith("AP") or x["info"][:1] in "!=/@;)>:`'" for x in out)
     name = "APRS (packet radio AX.25, 1200 baud)" if aprs else "packet radio AX.25 (1200 baud)"
-    return {"protocol": name, "kind": f"{name}: {len(out)} trame decodificate",
+    return {"protocol": name, "kind": f"{name}: {len(out)} trame decodificate", "log": True,
             "lines": [f"{x['path']}: {x['info']}" + (f" ({x['km']} km)" if x.get("km") is not None else "") for x in out]}
 
 
@@ -165,7 +165,8 @@ def ais(iq: np.ndarray, rate: int, offset_hz: float, home: tuple[float, float] |
         out.append(line)
     if not out:
         return None
-    return {"protocol": "AIS (navi)", "kind": f"AIS: identificazione e posizione delle navi, {len(out)} messaggi", "lines": out}
+    return {"protocol": "AIS (navi)", "kind": f"AIS: identificazione e posizione delle navi, {len(out)} messaggi",
+            "lines": out, "log": True}
 
 
 def _signed(bits: str) -> int:
@@ -497,6 +498,91 @@ def hf_text(iq: np.ndarray, rate: int, offset_hz: float, bw_khz: float) -> dict[
     return None
 
 
+# --- parametri di un segnale dati qualsiasi -----------------------------------------------
+
+# velocità dei simboli (baud) note e cosa usa quella velocità
+KNOWN_RATES = (
+    (18000, None, "TETRA (π/4-DQPSK, servizi di emergenza, cifrato)"),
+    (9600, 2, "packet radio 9600 o AIS (GMSK)"),
+    (4800, 4, "DMR, P25 o NXDN (4FSK)"),
+    (4800, 2, "dati 2FSK a 4800 baud"),
+    (3600, 4, "NXDN 4800 (4FSK)"),
+    (2400, 4, "dPMR o NXDN48 (4FSK)"),
+    (2400, 2, "POCSAG 2400 o telemetria"),
+    (1200, 2, "POCSAG 1200, telemetria o packet AFSK"),
+    (512, 2, "POCSAG 512 (cercapersone)"),
+)
+
+
+def fsk_params(iq: np.ndarray, rate: int, offset_hz: float, half_bw: float = 12.5e3) -> dict[str, Any] | None:
+    """Livelli di frequenza, deviazione e velocità dei simboli di un segnale dati, con i protocolli compatibili."""
+    f, fs = _fm(iq, rate, offset_hz, half_bw)
+    decim = max(1, round(rate / AUDIO_FS))
+    z = _channel(iq, rate, offset_hz, decim, half_bw)
+    pw = np.abs(z[1:]) ** 2
+    on = pw > 0.25 * np.median(pw[pw > np.percentile(pw, 50)])
+    if on.sum() < fs * 0.05:
+        return None
+    # livelli: dove la frequenza si ferma più spesso (istogramma della FM demodulata, solo quando trasmette)
+    fs5 = np.convolve(f, np.ones(5) / 5, "same")[on]
+    lo, hi = np.percentile(fs5, [1, 99])
+    levels: list[float] = []
+    if hi - lo > 400:
+        pad = 0.15 * (hi - lo)  # margine: i livelli estremi non devono cadere sul bordo dell'istogramma
+        h, e = np.histogram(fs5, bins=60, range=(lo - pad, hi + pad))
+        h = np.convolve(h, [1, 2, 3, 2, 1], "same").astype(float)
+        peaks = [i for i in range(1, len(h) - 1) if h[i] >= h[i - 1] and h[i] > h[i + 1] and h[i] > 0.3 * h.max()]
+        keep: list[int] = []
+        for i in peaks:
+            if keep and min(h[keep[-1]: i + 1]) > 0.75 * min(h[keep[-1]], h[i]):
+                if h[i] > h[keep[-1]]:
+                    keep[-1] = i
+                continue
+            keep.append(i)
+        levels = [float((e[i] + e[i + 1]) / 2) for i in keep]
+    # velocità dei simboli: riga spettrale dei cambi di frequenza (e dell'inviluppo, per le modulazioni di fase)
+    baud = None
+    best = 0.0
+    seg = 16384  # spettro mediato su più tratti (Welch): il rumore non fa righe false
+    for x in (np.abs(np.diff(f)) * on[1:], np.abs(z[1:]) * on):
+        k = len(x) // seg
+        if k < 2:
+            continue
+        xs = x[: k * seg].reshape(k, seg)
+        xs = xs - xs.mean(axis=1, keepdims=True)
+        spec = (np.abs(np.fft.rfft(xs * np.hanning(seg), axis=1)) ** 2).mean(axis=0)
+        fr = np.fft.rfftfreq(seg, 1 / fs)
+        sel = (fr > 300) & (fr < min(25e3, fs / 2 * 0.9))
+        i = int(np.argmax(spec[sel]))
+        ratio = float(spec[sel][i] / (np.median(spec[sel]) + 1e-12))
+        if ratio > 12 and ratio > best:
+            best, baud = ratio, float(fr[sel][i])
+    n_lv = len(levels) if len(levels) in (2, 4) else None
+    guess = []
+    if baud:
+        for b, n, name in KNOWN_RATES:
+            if abs(baud - b) / b < 0.03 and (n is None or n_lv is None or n == n_lv):
+                guess.append(name)
+    out = {"baud": round(baud) if baud else None, "levels_hz": [round(v) for v in levels],
+           "deviation_khz": round((max(levels) - min(levels)) / 2000, 2) if len(levels) >= 2 else None,
+           "guess": guess}
+    if not n_lv and not guess:
+        return None  # né livelli chiari né una velocità nota: niente di affidabile da dire
+    return out
+
+
+def params_text(p: dict[str, Any]) -> str:
+    parts = []
+    if p.get("levels_hz") and len(p["levels_hz"]) in (2, 4):
+        parts.append(f"{len(p['levels_hz'])}FSK, deviazione ±{p['deviation_khz']:g} kHz")
+    if p.get("baud"):
+        parts.append(f"{p['baud']} simboli/s")
+    text = ", ".join(parts)
+    if p.get("guess"):
+        text += " → compatibile con " + " o ".join(p["guess"])
+    return text
+
+
 # modi digitali che non si decodificano in pochi secondi: si riconoscono dalla frequenza
 FT8_DIALS = (1.840, 3.573, 7.074, 10.136, 14.074, 18.100, 21.074, 24.915, 28.074, 50.313, 144.174)
 FT4_DIALS = (3.575, 7.0475, 10.140, 14.080, 18.104, 21.140, 24.919, 28.180, 50.318)
@@ -551,3 +637,21 @@ def run(iq: np.ndarray, rate: int, center_hz: float, result: dict[str, Any],
         if v:
             return v
     return None
+
+
+def live_identify(iq: np.ndarray, rate: int, offset_hz: float, home: tuple[float, float] | None) -> dict[str, Any]:
+    """Ascolto in diretta: parametri del segnale e tutti i decoder di dati sulla finestra di IQ."""
+    out: dict[str, Any] = {"params": None, "found": []}
+    try:
+        out["params"] = fsk_params(iq, rate, offset_hz)
+    except (ValueError, IndexError):
+        pass
+    for fn in (lambda: ax25(iq, rate, offset_hz, home), lambda: pocsag(iq, rate, offset_hz),
+               lambda: digital_voice(iq, rate, offset_hz), lambda: ais(iq, rate, offset_hz, home)):
+        try:
+            v = fn()
+        except (ValueError, IndexError):
+            v = None
+        if v:
+            out["found"].append(v)
+    return out

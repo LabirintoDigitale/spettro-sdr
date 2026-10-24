@@ -427,6 +427,13 @@ def analyze_iq(
     result["verified"] = None
     if not (result["tv"] or result["dab_channel"] or result["audio_mode"] == "wfm"):
         v = verify.run(iq, rate, center_hz, result, home)
+        if not v and result["detected"] and result["audio_mode"] is None and result["center_mhz"] >= 30 \
+                and result["obw_99_khz"] <= 30:
+            # dati non riconosciuti: almeno livelli, deviazione e velocità dei simboli
+            prm = verify.fsk_params(iq, rate, result["center_mhz"] * 1e6 - center_hz)
+            if prm and (prm["baud"] or prm["guess"]):
+                result["data_params"] = prm
+                result["kind"] += " · " + verify.params_text(prm)
         if v:
             result["verified"] = v
             result["detected"] = True
@@ -461,6 +468,8 @@ def describe(result: dict[str, Any]) -> str:
     if m and m.get("ensemble"):
         lines.append(f"DAB canale {r['dab_channel']} decodificato: multiplex «{m['ensemble']}» (EId {m['eid']}), servizi: "
                      + ", ".join(f"{s['name']} ({s['type']})" for s in m["services"]) + ".")
+    if r.get("data_params"):
+        lines.append("Parametri del segnale dati (FM demodulata): " + verify.params_text(r["data_params"]) + ".")
     v = r.get("verified")
     if v:
         lines.append(f"Protocollo verificato decodificandolo: {v['protocol']}. " + " ".join(v["lines"][:8]))

@@ -1,7 +1,7 @@
 // Pannello "Spettro" per Home Assistant: grafico dello spettro, waterfall e picchi.
 
 // deve coincidere con VERSION in const.py: se il backend ne riporta un'altra manca un riavvio
-const PANEL_VERSION = "1.19.0";
+const PANEL_VERSION = "1.20.0";
 
 const PRESETS = [
   ["Personalizzato", null, null],
@@ -62,6 +62,7 @@ const LIVE_DECODERS = [
   ["rtty50", "Testo RTTY 50 baud (meteo DWD)", ["usb", "lsb", "cw"]],
   ["ft8", "Messaggi FT8", ["usb"]],
   ["wspr", "Radiofari WSPR", ["usb"]],
+  ["dati", "Riconosci e decodifica dati (FSK, DMR, POCSAG, APRS…)", ["nfm"]],
 ];
 const TEXT_DECODERS = ["cw", "rtty45", "rtty50"];
 const SLOT_DECODERS = ["ft8", "wspr"]; // periodi UTC: continuano anche a pannello chiuso
@@ -306,6 +307,16 @@ class SpettroPanel extends HTMLElement {
     if (m.kind === "meteo_passes") { this._meteoPasses = m; this._renderMeteoPasses(); return; }
     if (m.kind === "meteo_live") { this._onMeteoLive(m); return; }
     if (m.kind === "meteo_log") { this._meteoLog = m.log; this._renderMeteoLog(); return; }
+    if (m.kind === "dab_scan") { this._dabScan = m; this._renderDabScan(); return; }
+    if (m.kind === "live_data") {
+      if (!this._live || this._live.decoder !== "dati") return;
+      this._live.data_log = (this._live.data_log || []).concat(m.new).slice(-200);
+      this._live.data_params = m.params;
+      this._live.data_protocols = m.protocols;
+      this._dataNow = m;
+      this._renderData();
+      return;
+    }
     if (m.kind === "digi_log") { this._digiLog = m.log; this._renderDigi(); return; }
     if (m.kind === "live_digi") {
       this._digiLog = (this._digiLog || []).concat(m.decodes).slice(-600);
@@ -519,6 +530,14 @@ class SpettroPanel extends HTMLElement {
             </div>
             <div id="anaout"></div>
           </div>
+        </div>
+        <div class="card" id="dabcard">
+          <h3 style="margin:0">📻 Radio DAB+</h3>
+          <div class="hint">I multiplex vicini (es. 12A–12D) nello spettro si fondono in un unico blocco e la scansione può
+            non vederli tutti: la ricerca prova ogni canale della banda III (5A–13F, circa un minuto, scansione sospesa) e
+            ne legge nome e radio. Il risultato resta salvato.</div>
+          <div class="row" style="margin-top:6px"><button id="dabscan">🔍 Cerca tutti i multiplex DAB</button><span class="hint" id="dabscanst"></span></div>
+          <div id="dablist"></div>
         </div>
         <div class="card" id="meteocard">
           <h3 style="margin:0">🛰️ Satelliti meteo e immagini</h3>
@@ -736,6 +755,14 @@ class SpettroPanel extends HTMLElement {
       try { await this._hass.callWS({ type: "spettro/meteo_config", ...changes }); } catch (err) { this._msg(err.message || String(err), true); }
     };
     $("meteoauto").addEventListener("change", (e) => meteoCfg({ meteo_auto: e.target.checked }));
+    $("dabscan").addEventListener("click", async () => {
+      const running = this._dabScan && !this._dabScan.done;
+      try { await this._hass.callWS({ type: "spettro/dab_scan", stop: !!running }); } catch (err) { this._msg(err.message || String(err), true); }
+    });
+    $("dablist").addEventListener("click", (e) => {
+      const b = e.target.closest("button.dabgo");
+      if (b) this._liveStart(+b.dataset.mhz, "dab", b.dataset.sid);
+    });
     $("isssstv").addEventListener("change", (e) => meteoCfg({ iss_sstv: e.target.checked }));
     $("imglisten").addEventListener("click", () => {
       const [name, mhz, mode, dec, bw] = IMG_PRESETS[+$("imgpreset").value];
@@ -1394,7 +1421,10 @@ class SpettroPanel extends HTMLElement {
       $("livebw").value = String(live.bw || bws[0]);
     }
     if (!live.decoder) { $("liveimg").innerHTML = ""; this._liveImgPreview = null; this._liveText = null; }
-    else if (SLOT_DECODERS.includes(live.decoder)) {
+    else if (live.decoder === "dati") {
+      if (!was || was.decoder !== live.decoder || was.freq_mhz !== live.freq_mhz) { this._dataNow = null; $("liveimg").innerHTML = ""; }
+      this._renderData();
+    } else if (SLOT_DECODERS.includes(live.decoder)) {
       if (!was || was.decoder !== live.decoder || was.freq_mhz !== live.freq_mhz) { this._digiNote = null; $("liveimg").innerHTML = ""; this._renderDigi(); }
     } else if (TEXT_DECODERS.includes(live.decoder)) {
       if (!was || was.decoder !== live.decoder || was.freq_mhz !== live.freq_mhz || this._liveText == null) {
@@ -1451,6 +1481,49 @@ class SpettroPanel extends HTMLElement {
       if (m.text) this._liveText = (this._liveText + m.text).slice(-4000);
       if (m.text || m.text_info !== this._liveTextInfo) this._renderLiveText(m.text_info);
     }
+  }
+
+  _renderDabScan() {
+    const m = this._dabScan;
+    const $ = (id) => this.shadowRoot.getElementById(id);
+    if (!m) return;
+    const running = !m.done;
+    $("dabscan").textContent = running ? "■ Ferma la ricerca" : "🔍 Cerca tutti i multiplex DAB";
+    $("dabscanst").textContent = running ? `canale ${m.channel || ""} · ${Math.round((m.progress || 0) * 100)}% · ${m.found.length} multiplex trovati`
+      : m.error ? `Ricerca interrotta: ${m.error}` : m.time ? `Ultima ricerca: ${new Date(m.time * 1000).toLocaleString()}` : "";
+    const found = m.found || [];
+    $("dablist").innerHTML = found.length ? found.map((x) => `
+      <h4 class="sub">${esc(x.ensemble || "Multiplex senza nome")} · canale ${esc(x.channel)} (${x.mhz.toFixed(3)} MHz)</h4>
+      <div class="hint">${x.services.length} servizi · qualità ${Math.round(x.quality * 100)}% · livello ${x.level_db} dBFS</div>
+      <table><tbody>${x.services.map((v) => `<tr><td>${esc(v.name || v.sid)}</td>
+        <td class="num">${esc(v.type)}${v.bitrate ? ` · ${v.bitrate} kbit/s` : ""}</td>
+        <td class="num">${v.type === "DAB+" ? `<button class="dabgo" data-mhz="${x.mhz}" data-sid="${esc(v.sid)}" title="Ascolta in diretta">▶</button>` : ""}</td></tr>`).join("")}</tbody></table>`).join("")
+      : running ? "" : `<div class="hint" style="margin-top:6px">Nessun multiplex trovato: controlla l'antenna (serve un'antenna per la banda III, 174–240 MHz).</div>`;
+  }
+
+  _renderData() {
+    const live = this._live;
+    if (!live || live.decoder !== "dati") return;
+    const el = this.shadowRoot.getElementById("liveimg");
+    const p = live.data_params;
+    const now = this._dataNow;
+    const prm = p ? [
+      ["Modulazione", p.levels_hz && [2, 4].includes(p.levels_hz.length) ? `${p.levels_hz.length}FSK (${p.levels_hz.length} livelli di frequenza)` : "non a livelli chiari (fase o analogica)"],
+      ["Livelli", p.levels_hz && p.levels_hz.length ? p.levels_hz.map((v) => `${v > 0 ? "+" : ""}${(v / 1000).toLocaleString("it-IT", { maximumFractionDigits: 2 })} kHz`).join(" · ") : "—"],
+      ["Deviazione", p.deviation_khz != null ? `±${p.deviation_khz.toLocaleString("it-IT")} kHz` : "—"],
+      ["Velocità dei simboli", p.baud ? `${p.baud} simboli/s` : "non misurata"],
+      ["Compatibile con", p.guess && p.guess.length ? p.guess.join("; ") : "nessun protocollo noto"],
+    ] : null;
+    const log = (live.data_log || []).slice().reverse();
+    const hm = (t) => new Date(t * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false });
+    el.innerHTML = `<h3 style="margin:10px 0 4px">Riconoscimento dei dati</h3>
+      <div class="hint">Ogni 1,5 s si misurano gli ultimi 2 s di segnale e si provano i decoder: packet/APRS, POCSAG,
+        DMR/P25/dPMR, AIS. Delle comunicazioni private si conferma solo il tipo.</div>
+      ${live.data_protocols && live.data_protocols.length ? `<div style="margin:6px 0;color:var(--success-color,#43a047);font-weight:600">✓ Confermato: ${esc(live.data_protocols.join(", "))}</div>` : ""}
+      ${now && now.found && now.found.length ? `<div class="hint" style="margin:4px 0">Adesso: ${esc(now.found.join(" · "))}</div>` : ""}
+      ${prm ? `<table><tbody>${prm.map(([k, v]) => `<tr><td>${k}</td><td class="num">${esc(v)}</td></tr>`).join("")}</tbody></table>`
+        : `<div class="hint" style="margin-top:6px">${now ? "In questo momento non c'è un segnale dati riconoscibile (silenzio, voce o rumore)." : "Prima misura tra un paio di secondi…"}</div>`}
+      ${log.length ? `<pre class="livetext">${log.map((x) => `${hm(x.time)}  [${esc(x.protocol)}] ${esc(x.line)}`).join("\n")}</pre>` : ""}`;
   }
 
   _renderDigi(note) {

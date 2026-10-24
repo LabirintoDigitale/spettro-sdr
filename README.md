@@ -14,6 +14,7 @@ Integrazione custom per **Home Assistant** che trasforma una chiavetta RTL-SDR c
 - Preset pronti: radio FM, banda aerea, satelliti meteo, 2 m, marina VHF, 70 cm, LPD/ISM 433, PMR446, ISM 868, GSM 900, ADS-B, tutto.
 - **Zoom** trascinando sul grafico (doppio clic per tornare indietro), lettura frequenza/livello sotto il cursore, pulsante **Scansiona zona** per usare la zona ingrandita come nuovo intervallo.
 - **Analisi segnale**: tocca un picco sul grafico (o una riga della tabella), oppure scrivi la frequenza nel campo **MHz** (anche con la virgola, Invio per confermare; anche fuori dall'intervallo scansionato), e premi **Analizza** o **▶ Analisi continua**. La scansione si sospende per qualche secondo, la chiavetta registra il segnale a frequenza fissa e il pannello mostra una cascata ad alta risoluzione (~1 kHz, ~5 ms per riga) con le misure: frequenza centrale, banda occupata, SNR, toni distinti, trasmissione continua o a burst (durata e ripetizione), frequenza che sale/scende (chirp) o due toni (FSK), più un'ipotesi sul **tipo di segnale** ricavata dalle misure. L'ultima analisi è anche un'entità immagine (**Ultima analisi**). Le analisi fatte a mano salvano anche la **registrazione grezza** (IQ): con **⬇ WAV IQ** o **⬇ cu8** la scarichi per aprirla con altri programmi (SDR#, SDR++, SDRangel, SatDump, Universal Radio Hacker; il nome del file contiene la frequenza centrale) o per mandarla a qualcuno. Sono circa 4 MB al secondo di registrazione; per le analisi automatiche c'è l'opzione nelle *Avanzate*. Il **tipo probabile** distingue anche i segnali digitali a banda stretta dalla fonia, dalla forma dello spettro e dai livelli di frequenza: TETRA (380–400 e 410–430 MHz), DMR/dPMR/NXDN/P25 (4FSK), dati FSK a due toni.
+- **Riconosci e decodifica dati** (ascolto continuo in FM stretta): ogni 1,5 s misura il segnale in ascolto (modulazione 2FSK/4FSK, livelli, deviazione, velocità dei simboli) e dice con quali protocolli è compatibile (per esempio 18000 simboli/s → TETRA, 4FSK a 4800 → DMR/P25/NXDN, 2FSK a 1200 → POCSAG), poi prova i decoder: packet/APRS, POCSAG, DMR/P25/dPMR, AIS. Le trame decodificate (APRS, AIS) restano in un registro sotto la cascata. Le stesse misure compaiono nelle analisi dei segnali dati che non si riescono a decodificare.
 - **Protocollo verificato**: nelle analisi (anche automatiche) Spettro non si ferma all'ipotesi dalle misure ma prova a **decodificare** davvero la registrazione, e se ci riesce il tipo diventa *verificato* (✓ nell'archivio) con i dati letti:
   - **APRS / packet radio** (AX.25 a 1200 baud, es. 144,800 MHz): mittente, percorso e messaggio, con la distanza se c'è la posizione;
   - **ADS-B** (1090 MHz): aerei con nominativo del volo, quota, velocità, posizione e distanza;
@@ -77,7 +78,7 @@ Esempio reale: scansione da 600 a 1500 MHz, poi ingrandita sulla banda GSM 900.
 **3. Impostazioni e segnali rilevati** (terza schermata)
 
 - **Da / A** è l'intervallo scansionato (qui 600–1500 MHz, circa 80 s a 2 MS/s), **Ripeti ogni** la pausa tra due scansioni, **Guadagno** fisso in dB (vuoto = automatico), **Soglia picchi** quanti dB sopra il rumore deve stare un segnale per essere elencato.
-- **Applica** salva e riparte; **Scansiona ora** non aspetta la pausa.
+- **Applica** salva e riparte; **Scansiona ora** non aspetta la pausa e, se la scansione è spenta, fa un giro solo e poi torna in pausa.
 - **Segnali rilevati**: frequenza, livello e dB sopra il rumore, dal più forte. Qui in testa ci sono le celle GSM 900 (933–956 MHz) e poi le portanti LTE 800 (760–821 MHz). Dalla versione 1.4.5 questa tabella è sostituita dalla scheda **Archivio spike**, che elenca i segnali analizzati con le loro analisi.
 
 **4. RDS di una radio FM** (finestra di Spettro, analisi automatica di 5 s su 99,6 MHz)
@@ -129,6 +130,10 @@ Spettro fa anche da **ricevitore di radio digitale DAB+**, tutto dentro Home Ass
 La chiavetta resta sintonizzata al centro del canale a 2,048 MS/s (circa 4 MB/s in rete dal computer con rtl_tcp a quello di Home Assistant). L'integrazione segue le trame da 96 ms, demodula solo i simboli OFDM della radio scelta, ricostruisce il suo sottocanale (de-interleaving temporale, decodifica di Viterbi, Reed-Solomon, superframe DAB+) e manda al pannello i pacchetti audio HE-AAC, il testo DLS e le immagini della slideshow (MOT). Il browser decodifica l'audio: con Home Assistant in **https** usa WebCodecs, in **http** (es. `http://192.168.x.x:8123`) blocchi di mezzo secondo con Web Audio. Se il decoder del browser non applica l'SBR del DAB+ (blocchi da 960 campioni) l'audio si sente comunque alla velocità giusta, a qualità ridotta, e il pannello lo segnala.
 
 **Limiti**: una radio alla volta; le radio DAB classiche (MP2) non si ascoltano; su iPhone/iPad l'audio dipende dal supporto del browser.
+
+### Ricerca di tutti i multiplex
+
+Nello spettro i multiplex vicini (per esempio 12A, 12B, 12C e 12D) si fondono in un blocco unico e la scansione può non vederli tutti come picchi. Nella scheda **📻 Radio DAB+** il pulsante **🔍 Cerca tutti i multiplex DAB** prova uno per uno i 38 canali della banda III (5A–13F, circa un minuto, scansione sospesa): per ogni multiplex trovato mostra nome, qualità, livello e l'elenco delle radio, con ▶ per ascoltarle. Il risultato resta salvato (file `spettro_dab.json` nella configurazione).
 
 ## Misuratore di campo TV
 
