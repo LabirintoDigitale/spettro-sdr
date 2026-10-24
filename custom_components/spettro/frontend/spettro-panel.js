@@ -1,7 +1,7 @@
 // Pannello "Spettro" per Home Assistant: grafico dello spettro, waterfall e picchi.
 
 // deve coincidere con VERSION in const.py: se il backend ne riporta un'altra manca un riavvio
-const PANEL_VERSION = "1.20.1";
+const PANEL_VERSION = "1.20.2";
 
 const PRESETS = [
   ["Personalizzato", null, null],
@@ -386,6 +386,11 @@ class SpettroPanel extends HTMLElement {
         .card { background:var(--card-background-color,#fff); border-radius:var(--ha-card-border-radius,12px);
                 box-shadow:var(--ha-card-box-shadow,none); border:1px solid var(--divider-color); padding:12px; min-width:0; }
         .charts { display:flex; flex-direction:column; gap:6px; }
+        .cardhead { display:flex; align-items:center; gap:8px; }
+        .cardhead > h3, .cardhead > h3:first-child { flex:1; }
+        .cardfold { margin-left:auto; padding:2px 10px; font-size:16px; line-height:1; min-width:34px; }
+        .card.folded > :not(.cardhead) { display:none !important; }
+        .card.folded > .cardhead { margin:0 !important; }
         label.selfreq { display:flex; align-items:center; gap:6px; white-space:nowrap; }
         label.selfreq input { width:130px; }
         h4.sub { margin:14px 0 2px; font-size:14px; font-weight:500; border-top:1px solid var(--divider-color); padding-top:10px; }
@@ -755,6 +760,7 @@ class SpettroPanel extends HTMLElement {
       try { await this._hass.callWS({ type: "spettro/meteo_config", ...changes }); } catch (err) { this._msg(err.message || String(err), true); }
     };
     $("meteoauto").addEventListener("change", (e) => meteoCfg({ meteo_auto: e.target.checked }));
+    this._setupFolds();
     $("dabscan").addEventListener("click", async () => {
       const running = this._dabScan && !this._dabScan.done;
       try { await this._hass.callWS({ type: "spettro/dab_scan", stop: !!running }); } catch (err) { this._msg(err.message || String(err), true); }
@@ -1480,6 +1486,45 @@ class SpettroPanel extends HTMLElement {
       if (this._liveText == null) this._liveText = "";
       if (m.text) this._liveText = (this._liveText + m.text).slice(-4000);
       if (m.text || m.text_info !== this._liveTextInfo) this._renderLiveText(m.text_info);
+    }
+  }
+
+  _setupFolds() {
+    // ogni scheda (tranne grafico e analisi) si chiude e si riapre con il pulsante a destra del titolo; il browser lo ricorda
+    let saved = {};
+    try { saved = JSON.parse(localStorage.getItem("spettro_folded") || "{}"); } catch (err) { /* memoria del browser non disponibile */ }
+    this._folded = saved;
+    for (const card of this.shadowRoot.querySelectorAll(".card:not(.charts)")) {
+      let head = card.firstElementChild;
+      if (!head) continue;
+      if (head.tagName === "H3") {
+        // titolo semplice: diventa una riga con il pulsante
+        const row = document.createElement("div");
+        row.className = "cardhead";
+        card.insertBefore(row, head);
+        row.appendChild(head);
+        head.style.margin = "0";
+        head = row;
+      } else {
+        head.classList.add("cardhead");
+      }
+      card.style.position = "relative";
+      const key = card.id || head.textContent.trim().split(/\s+/).slice(0, 2).join(" ");
+      const btn = document.createElement("button");
+      btn.className = "cardfold";
+      head.appendChild(btn);
+      const apply = () => {
+        const f = !!this._folded[key];
+        card.classList.toggle("folded", f);
+        btn.textContent = f ? "▸" : "▾";
+        btn.title = f ? "Espandi" : "Comprimi";
+      };
+      btn.addEventListener("click", () => {
+        this._folded[key] = !this._folded[key];
+        try { localStorage.setItem("spettro_folded", JSON.stringify(this._folded)); } catch (err) { /* vale fino alla chiusura */ }
+        apply();
+      });
+      apply();
     }
   }
 
