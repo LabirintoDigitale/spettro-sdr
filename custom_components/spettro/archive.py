@@ -61,6 +61,7 @@ class SpikeArchive:
     def _meta(entry_id: str, result: dict[str, Any], size: int) -> dict[str, Any]:
         meta = {"id": entry_id, "timestamp": result["timestamp"], "auto": bool(result.get("auto")), "bytes": size}
         meta.update({k: result.get(k) for k in META_FIELDS})
+        meta["protocol"] = (result.get("verified") or {}).get("protocol")  # protocollo confermato decodificandolo
         return meta
 
     def add(self, result: dict[str, Any], png: bytes, audio: dict[str, bytes], iq: bytes | None = None) -> dict[str, Any]:

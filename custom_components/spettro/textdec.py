@@ -171,6 +171,13 @@ class MorseDecoder:
     def _gap(self, _n: int) -> str:
         return self._char()
 
+    def flush(self) -> str:
+        """Fine dell'audio: l'ultimo segno in corso e il carattere non ancora chiuso."""
+        if self.state:
+            self._mark(self.run)
+            self.state = False
+        return self._char()
+
 
 # --- RTTY ------------------------------------------------------------------------------
 
@@ -243,7 +250,8 @@ class _Uart:
         self.buf = np.zeros(0)
         self.figs = False
         self.err = 0.0  # errori di trama recenti (media mobile)
-        self.chars = 0
+        self.good = 0  # caratteri con il bit di stop giusto
+        self.bad = 0
 
     def errors_pct(self) -> int:
         return round(self.err * 100)
@@ -264,6 +272,10 @@ class _Uart:
                 continue
             ok = c[6] > 0
             self.err = 0.95 * self.err + 0.05 * (0.0 if ok else 1.0)
+            if ok:
+                self.good += 1
+            else:
+                self.bad += 1
             if ok:
                 code = sum((1 << k) for k in range(5) if c[1 + k] > 0)
                 ch = (FIGS if self.figs else LTRS)[code]

@@ -13,7 +13,7 @@ import zlib
 
 import numpy as np
 
-from . import dab, dvbt, rds
+from . import dab, dvbt, rds, verify
 from .demod import MODES, SSB_MODES, _channel, demodulate, fm_multiplex, wfm_audio
 
 FFT_SIZE = 2048  # ~1 kHz di risoluzione e ~1 ms per riga a 2 MS/s
@@ -157,6 +157,9 @@ def classify(r: dict[str, Any]) -> tuple[str, str | None]:
         return "segnale digitale a banda stretta (dati o voce digitale)", None
     if r.get("fsk_levels") == 2 and bw <= 25 and not (87.5 <= f <= 108):
         return "dati in FSK a due toni (cercapersone, telemetria, sensori)", None
+    if f < 30 and bw <= 4:
+        # in onde corte, con righe da ~1 kHz, voce SSB, Morse e telescriventi si somigliano
+        return "segnale stretto in onde corte (voce SSB, Morse o dati): ascoltalo in USB o LSB", "usb" if f >= 10 else "lsb"
     if bw >= VOICE_MAX_KHZ:
         # troppo largo per la fonia analogica: modulazione digitale
         if (880 <= f <= 960 or 1710 <= f <= 1880) and 120 <= bw <= 350:
@@ -177,9 +180,12 @@ def classify(r: dict[str, Any]) -> tuple[str, str | None]:
 
 
 def analyze_iq(
-    raw: bytes, rate: int, center_hz: float, target_hz: float
+    raw: bytes, rate: int, center_hz: float, target_hz: float, home: tuple[float, float] | None = None
 ) -> tuple[dict[str, Any], bytes, dict[str, bytes]]:
-    """Misure del segnale vicino a target_hz, immagine PNG della cascata e audio demodulato (WAV)."""
+    """Misure del segnale vicino a target_hz, immagine PNG della cascata e audio demodulato (WAV).
+
+    home (lat, lon) serve per la distanza delle stazioni decodificate (APRS, aerei, navi).
+    """
     n = FFT_SIZE
     a = np.frombuffer(raw, dtype=np.uint8).astype(np.float32) - 127.5
     iq = a[0::2] + 1j * a[1::2]
@@ -416,6 +422,19 @@ def analyze_iq(
         name, services = info.get("ensemble"), info.get("services") or []
         result["kind"] = f"DAB/DAB+ canale {ch[0]}: multiplex di radio digitali" + (
             f" «{name}» ({len(services)} servizi)" if name else "")
+
+    # verifica del protocollo: si prova a decodificarlo davvero
+    result["verified"] = None
+    if not (result["tv"] or result["dab_channel"] or result["audio_mode"] == "wfm"):
+        v = verify.run(iq, rate, center_hz, result, home)
+        if v:
+            result["verified"] = v
+            result["detected"] = True
+            result["kind"] = v["kind"]
+            if v["protocol"] in ("Morse", "RTTY"):
+                result["audio_mode"] = "cw" if v["protocol"] == "Morse" else "usb"
+            elif v["protocol"] not in ("FT8", "FT4", "WSPR"):
+                result["audio_mode"] = None
     return result, png, audio
 
 
@@ -442,6 +461,9 @@ def describe(result: dict[str, Any]) -> str:
     if m and m.get("ensemble"):
         lines.append(f"DAB canale {r['dab_channel']} decodificato: multiplex «{m['ensemble']}» (EId {m['eid']}), servizi: "
                      + ", ".join(f"{s['name']} ({s['type']})" for s in m["services"]) + ".")
+    v = r.get("verified")
+    if v:
+        lines.append(f"Protocollo verificato decodificandolo: {v['protocol']}. " + " ".join(v["lines"][:8]))
     t = r.get("tv")
     if t:
         lines.append(f"TV digitale canale {r['tv_channel']}: struttura OFDM {t['standard']} riconosciuta dall'intervallo "

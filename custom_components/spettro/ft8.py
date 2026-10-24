@@ -315,7 +315,7 @@ def spectrogram(x: np.ndarray) -> np.ndarray:
     """Potenza (righe = frazioni di simbolo, colonne = frazioni del passo tra i toni)."""
     n = (len(x) - NSPS) // HOP + 1
     idx = np.arange(NSPS)[None, :] + HOP * np.arange(n)[:, None]
-    return np.abs(np.fft.rfft(x[idx] * np.kaiser(NSPS, 4.0), NFFT, axis=1)) ** 2
+    return np.abs(np.fft.rfft(x[idx] * _WINDOW, NFFT, axis=1)) ** 2
 
 
 def decode(x: np.ndarray, hashes: Hashes | None = None, passes: int = 3) -> list[dict[str, Any]]:

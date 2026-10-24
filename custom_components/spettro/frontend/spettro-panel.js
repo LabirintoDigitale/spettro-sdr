@@ -1,7 +1,7 @@
 // Pannello "Spettro" per Home Assistant: grafico dello spettro, waterfall e picchi.
 
 // deve coincidere con VERSION in const.py: se il backend ne riporta un'altra manca un riavvio
-const PANEL_VERSION = "1.18.0";
+const PANEL_VERSION = "1.19.0";
 
 const PRESETS = [
   ["Personalizzato", null, null],
@@ -164,7 +164,7 @@ function archCat(kind) {
   if (/^TV digitale/.test(k)) return "tv";
   if (/^FM a banda larga/.test(k)) return "fm";
   if (/GSM/.test(k)) return "cell";
-  if (/fonia|^AM|portante stabile|non classificato/.test(k)) return "voce";
+  if (/fonia|^AM|portante stabile|non classificato|^segnale stretto in onde corte/.test(k)) return "voce";
   return "dati";
 }
 
@@ -2246,7 +2246,7 @@ class SpettroPanel extends HTMLElement {
     el.innerHTML = `<table><thead><tr>${th("timestamp", "Ora")}${th("target_mhz", "MHz")}${th("snr_db", "SNR", "num")}</tr></thead>
       ${rows.map((e) => `<tbody class="entry${e.id === this._archSel ? " sel" : ""}" data-id="${esc(e.id)}"><tr>
         <td>${fmt(e.timestamp)}${e.auto ? "" : " ✋"}</td><td>${e.target_mhz.toFixed(4)}</td><td class="num" title="${e.scan_snr_db != null ? `Nella scansione il picco stava ${e.scan_snr_db} dB sopra il rumore della zona; l'analisi misura il segnale da vicino` : ""}">${e.snr_db} dB${e.scan_snr_db != null ? `<span class="scan"> · ${e.scan_snr_db}</span>` : ""}</td></tr>
-        <tr><td colspan="3" class="kind">${esc(e.kind)}</td></tr></tbody>`).join("")}
+        <tr><td colspan="3" class="kind">${e.protocol ? "✓ " : ""}${esc(e.kind)}</td></tr></tbody>`).join("")}
       </table>
       <div class="hint" style="margin-top:6px">✋ = analisi avviata a mano.</div>`;
     el.scrollTop = top;
@@ -2294,7 +2294,7 @@ class SpettroPanel extends HTMLElement {
     const im = r.image;
     const pct = (v) => `${Math.round(v * 100)}%`;
     const rows = [
-      ["Tipo probabile", r.kind],
+      [r.verified ? "Tipo (verificato)" : "Tipo probabile", r.kind],
       ["Frequenza centrale", `${r.center_mhz.toFixed(4)} MHz`],
       ["Picco", `${r.peak_mhz.toFixed(4)} MHz · ${r.peak_db} dBFS`],
       ["Sopra il rumore", `${r.snr_db} dB${r.detected ? "" : " (nessun segnale chiaro)"}`],
@@ -2347,6 +2347,11 @@ class SpettroPanel extends HTMLElement {
           <div class="hint" style="margin-top:4px">${m.fib_ok}/${m.fib_total} blocchi informativi integri in ${m.frames} trame${m.fib_ok < m.fib_total * 0.7 ? " · segnale al limite" : ""}</div>`;
       }
     }
+    // protocollo verificato decodificandolo davvero
+    const v = r.verified;
+    const verHtml = v ? `<h3 style="margin:8px 0 4px">✓ ${esc(v.protocol)}</h3>
+        <div class="hint">${["FT8", "FT4", "WSPR"].includes(v.protocol) ? "Riconosciuto dalla frequenza." : "Confermato decodificando la registrazione."}</div>
+        <pre class="livetext" style="max-height:12em">${esc(v.lines.join("\n"))}</pre>` : "";
     // TV digitale: modalità, guardia e qualità del multiplex
     const t = r.tv;
     const tvHtml = t ? `<h3 style="margin:8px 0 4px">TV digitale · canale ${esc(r.tv_channel)}</h3>
@@ -2378,6 +2383,7 @@ class SpettroPanel extends HTMLElement {
         <div>
           <table><tbody>${rows.map(([k, v]) => `<tr><td>${k}</td><td class="num">${esc(v)}</td></tr>`).join("")}</tbody></table>
           <div class="hint" style="margin-top:6px">${r.bands.length ? esc(r.bands.join(" · ")) : "Frequenza non presente nella tabella delle bande."}</div>
+          ${verHtml}
           ${rdsHtml}
           ${dabHtml}
           ${tvHtml}

@@ -499,7 +499,7 @@ class SpectrumScanner:
                     except OSError:
                         pass
             result, png, audio = await asyncio.get_running_loop().run_in_executor(
-                None, analyze_iq, raw, rate, center, freq_hz
+                None, analyze_iq, raw, rate, center, freq_hz, self.meteo.location if self.meteo else None
             )
         finally:
             self.analyzing = False
@@ -595,7 +595,8 @@ class SpectrumScanner:
                 raw = await reader.readexactly(int(rate * duration) * 2)
             # durante il calcolo rtl_tcp continua a inviare: si scarta, altrimenti il passo
             # successivo della scansione leggerebbe campioni vecchi della frequenza analizzata
-            job = asyncio.get_running_loop().run_in_executor(None, analyze_iq, raw, rate, center, freq_hz)
+            job = asyncio.get_running_loop().run_in_executor(None, analyze_iq, raw, rate, center, freq_hz,
+                                                              self.meteo.location if self.meteo else None)
             while True:
                 done, _ = await asyncio.wait([job], timeout=0)
                 if done:
