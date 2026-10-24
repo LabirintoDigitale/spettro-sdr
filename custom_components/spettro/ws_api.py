@@ -339,7 +339,7 @@ async def ws_favorite_remove(hass: HomeAssistant, connection: websocket_api.Acti
         vol.Required("freq_mhz"): vol.All(vol.Coerce(float), vol.Range(min=0.5, max=2200)),
         vol.Optional("mode"): vol.Any(None, vol.In(["wfm", "nfm", "am", "usb", "lsb", "cw", "dab", "tv", "sat"])),
         vol.Optional("sid"): vol.Any(None, str),
-        vol.Optional("decoder"): vol.Any(None, vol.In(["sstv", "fax", "cw", "rtty45", "rtty50"])),
+        vol.Optional("decoder"): vol.Any(None, vol.In(["sstv", "fax", "cw", "rtty45", "rtty50", "ft8", "wspr"])),
         vol.Optional("bw"): vol.Any(None, vol.All(vol.Coerce(float), vol.Range(min=100, max=50000))),
         vol.Optional("title"): vol.Any(None, str),
     }

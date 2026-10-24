@@ -22,7 +22,7 @@ from typing import Any
 
 import numpy as np
 
-from . import dab, dvbt, rds, satellite, textdec, weather
+from . import dab, dvbt, rds, satellite, slots, textdec, weather
 from .analysis import encode_png
 from .fax import FaxDecoder
 from .sstv import SstvDecoder, ToneTracker
@@ -73,7 +73,10 @@ MIN_ERROR_RETRY = 10
 LIVE_RDS_WINDOW_S = 6.0  # multiplex tenuto per decodificare l'RDS in diretta
 LIVE_RDS_EVERY_S = 1.0
 LIVE_NO_VIEWER_STOP_S = 30  # senza pannelli aperti l'analisi continua si ferma da sola
-IMAGE_DECODERS = ("sstv", "fax")  # immagini: la ricezione continua anche a pannello chiuso
+IMAGE_DECODERS = ("sstv", "fax")
+SLOT_DECODERS = ("ft8", "wspr")  # modi digitali a periodi UTC
+KEEP_RUNNING = IMAGE_DECODERS + SLOT_DECODERS  # questi continuano anche a pannello chiuso
+DIGI_LOG = 600  # messaggi FT8/WSPR tenuti in memoria
 TEXT_KEEP = 4000  # caratteri di testo decodificato tenuti nello stato (per chi apre il pannello dopo)
 ANALYSIS_MAX_S = 5  # durata massima di una registrazione per l'analisi
 TV_LIVE_S = 0.4  # campioni di ogni misura del multiplex TV in diretta
@@ -297,6 +300,7 @@ class SpectrumScanner:
         self._meteo_loop_task: asyncio.Task | None = None
         self._meteo_done: set[tuple[int, float]] = set()  # passaggi già ricevuti (norad, aos)
         self.meteo_log: deque[dict[str, Any]] = deque(maxlen=15)  # ultime ricezioni dei satelliti
+        self.digi_log: deque[dict[str, Any]] = deque(maxlen=DIGI_LOG)  # messaggi FT8/WSPR ricevuti (dal più vecchio)
         self._radio = asyncio.Lock()  # una sola connessione rtl_tcp alla volta
         self._direct: dict[int, int] = {}  # direct sampling attivo per connessione
         self._rate = 2_048_000  # sample rate della connessione in corso
@@ -367,6 +371,8 @@ class SpectrumScanner:
             out.append({"kind": "meteo_live", **self.meteo_rx})
         if self.meteo_log:
             out.append({"kind": "meteo_log", "log": list(self.meteo_log)})
+        if self.digi_log:
+            out.append({"kind": "digi_log", "log": list(self.digi_log)})
         live = self.status["live"]
         if live and live.get("mode") == "dab" and (self.last_slide or self.last_dab):
             # un pannello aperto a diretta già avviata riceve subito nome, testo e immagine
@@ -649,6 +655,8 @@ class SpectrumScanner:
             raise RuntimeError("SSTV e radiofax si decodificano in FM stretta, AM o SSB")
         if decoder in textdec.DECODERS and mode not in ("usb", "lsb", "cw"):
             raise RuntimeError("Morse e RTTY si decodificano in CW o SSB (USB/LSB)")
+        if decoder in SLOT_DECODERS and mode != "usb":
+            raise RuntimeError("FT8 e WSPR si ricevono in USB")
         if bw is not None and mode in BANDWIDTHS:
             bw = min(BANDWIDTHS[mode][1], key=lambda b: abs(b - bw))
         else:
@@ -672,7 +680,7 @@ class SpectrumScanner:
                else self._live_tv_run(freq_hz, mode == "sat") if mode in ("tv", "sat")
                else self._live_run(freq_hz, mode, decoder, until, title, auto, bw))
         self._live_task = asyncio.get_running_loop().create_task(run, name="spettro_live")
-        if self.viewers <= 0 and decoder not in IMAGE_DECODERS:
+        if self.viewers <= 0 and decoder not in KEEP_RUNNING:
             self._schedule_live_stop()
         return self.status["live"]
 
@@ -695,7 +703,7 @@ class SpectrumScanner:
         def check() -> None:
             self._live_stop_handle = None
             live = self.status["live"] or {}
-            if self.viewers <= 0 and self._live_task is not None and live.get("decoder") not in IMAGE_DECODERS:
+            if self.viewers <= 0 and self._live_task is not None and live.get("decoder") not in KEEP_RUNNING:
                 _LOGGER.info("Nessun pannello aperto: analisi continua fermata")
                 asyncio.get_running_loop().create_task(self.live_stop())
 
@@ -707,6 +715,9 @@ class SpectrumScanner:
         loop = asyncio.get_running_loop()
         img = _ImageListener(decoder, freq_hz, title) if decoder in IMAGE_DECODERS else None
         text = textdec.DECODERS[decoder]() if decoder in textdec.DECODERS else None
+        slot = (slots.SlotDecoder(decoder, freq_hz, self.meteo.location if self.meteo else None)
+                if decoder in SLOT_DECODERS else None)
+        slot_tasks: set[asyncio.Task] = set()
         log = self._log_start("ISS", "iss", auto) if title == "ISS" else None
         center = float(round(freq_hz + LIVE_RATE / 8))
         discard = RCV_BUF + 2 * READ_LIMIT + int(LIVE_RATE * 2 * max(self.settings.settle_ms, 100) / 1000)
@@ -728,7 +739,7 @@ class SpectrumScanner:
                     while until is None or datetime.now(UTC) < until:
                         async with asyncio.timeout(IO_TIMEOUT):
                             raw = await reader.readexactly(CHUNK * 2)
-                        out = await loop.run_in_executor(None, _live_chunk, demod, raw, img, text)
+                        out = await loop.run_in_executor(None, _live_chunk, demod, raw, img, text, slot, time.time())
                         if img is not None:
                             await self._image_events(img, out)
                         extra: dict[str, Any] = {}
@@ -736,6 +747,12 @@ class SpectrumScanner:
                             extra = {"text": out["text"], "text_info": text.status()["info"]}
                             if out["text"] and self.status["live"]:
                                 self.status["live"]["text"] = (self.status["live"]["text"] + out["text"])[-TEXT_KEEP:]
+                        if slot is not None:
+                            extra = {"digi": slot.status()}
+                            for start, seg in out["slots"]:
+                                task = loop.create_task(self._decode_slot(slot, start, seg))
+                                slot_tasks.add(task)
+                                task.add_done_callback(slot_tasks.discard)
                         self._emit({
                             **extra,
                             "kind": "live",
@@ -770,6 +787,8 @@ class SpectrumScanner:
         finally:
             if rds_task is not None:
                 rds_task.cancel()
+            for task in slot_tasks:
+                task.cancel()
             if log is not None and img is not None:
                 self._log_end(log, ("1 immagine SSTV salvata" if img.saved == 1 else f"{img.saved} immagini SSTV salvate")
                               if img.saved
@@ -1171,6 +1190,16 @@ class SpectrumScanner:
         self._emit({"kind": "meteo_image", "entry": entry})
         return entry
 
+    async def _decode_slot(self, slot: slots.SlotDecoder, start: float, seg: np.ndarray) -> None:
+        """Un periodo FT8/WSPR decodificato a parte: la lettura dei campioni non si ferma."""
+        try:
+            res = await asyncio.get_running_loop().run_in_executor(None, slot.decode, start, seg)
+        except Exception:  # noqa: BLE001 - un periodo andato male non deve fermare l'ascolto
+            _LOGGER.exception("Decodifica %s non riuscita", slot.kind)
+            return
+        self.digi_log.extend(res)
+        self._emit({"kind": "live_digi", "mode": slot.kind, "slot": start, "decodes": res, **slot.status()})
+
     async def _live_rds(self, mpx: np.ndarray, fs: float) -> None:
         result = await asyncio.get_running_loop().run_in_executor(None, rds.decode, mpx, fs)
         if self.status["live"]:
@@ -1457,12 +1486,16 @@ class _ImageListener:
 
 
 def _live_chunk(demod: LiveDemod, raw: bytes, img: _ImageListener | None = None,
-                text: textdec.MorseDecoder | textdec.RttyDecoder | None = None) -> dict[str, Any]:
+                text: textdec.MorseDecoder | textdec.RttyDecoder | None = None,
+                slot: slots.SlotDecoder | None = None, now: float = 0.0) -> dict[str, Any]:
     """Un blocco di byte rtl_tcp elaborato dal demodulatore in diretta (nell'executor)."""
     a = np.frombuffer(raw, dtype=np.uint8).astype(np.float32) - 127.5
     out = demod.process((a[0::2] + 1j * a[1::2]).astype(np.complex64))
     if img is not None:
         out["img_events"] = img.feed(out["pcm"])
+    audio = out.pop("audio")
     if text is not None:
-        out["text"] = text.feed(out.pop("audio"))
+        out["text"] = text.feed(audio)
+    if slot is not None:
+        out["slots"] = slot.feed(audio, now)
     return out

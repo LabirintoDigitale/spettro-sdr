@@ -1,7 +1,7 @@
 // Pannello "Spettro" per Home Assistant: grafico dello spettro, waterfall e picchi.
 
 // deve coincidere con VERSION in const.py: se il backend ne riporta un'altra manca un riavvio
-const PANEL_VERSION = "1.17.0";
+const PANEL_VERSION = "1.18.0";
 
 const PRESETS = [
   ["Personalizzato", null, null],
@@ -21,7 +21,7 @@ const PRESETS = [
   ["Onde corte (0,5–30)", 0.5, 30],
   ["Tutto (24–1766)", 24, 1766],
 ];
-// immagini e testo nell'audio: [nome, MHz di sintonia, modo, decoder]. Il radiofax si riceve in USB 1,9 kHz sotto la
+// immagini, testo e modi digitali: [nome, MHz di sintonia, modo, decoder, larghezza]. Il radiofax si riceve in USB 1,9 kHz sotto la
 // frequenza assegnata, l'RTTY DWD 1,5 kHz sotto (i due toni cadono a 1275 e 1725 Hz); in CW si sintonizza la portante
 const IMG_PRESETS = [
   ["ISS · SSTV 145,800 MHz (FM)", 145.8, "nfm", "sstv"],
@@ -40,6 +40,10 @@ const IMG_PRESETS = [
   ["Telescrivente meteo DWD (RTTY 50 baud) · 7646 kHz", 7.6445, "usb", "rtty50"],
   ["Telescrivente meteo DWD (RTTY 50 baud) · 10100,8 kHz", 10.0993, "usb", "rtty50"],
   ["RTTY radioamatori 20 m · 14,085 MHz (45 baud)", 14.0835, "usb", "rtty45"],
+  ...[["160", 1.84], ["80", 3.573], ["40", 7.074], ["30", 10.136], ["20", 14.074], ["17", 18.1], ["15", 21.074], ["12", 24.915], ["10", 28.074], ["6", 50.313]]
+    .map(([b, f]) => [`FT8 ${b} m · ${f.toLocaleString("it-IT", { minimumFractionDigits: 3 })} MHz`, f, "usb", "ft8", 3500]),
+  ...[["80", 3.5686], ["40", 7.0386], ["30", 10.1387], ["20", 14.0956], ["17", 18.1046], ["15", 21.0946], ["10", 28.1246], ["6", 50.293]]
+    .map(([b, f]) => [`WSPR ${b} m · ${f.toLocaleString("it-IT", { minimumFractionDigits: 4 })} MHz`, f, "usb", "wspr", 3500]),
 ];
 // larghezza del canale in diretta (Hz): predefinita e scelte, come in demod.py
 const BANDWIDTHS = {
@@ -56,8 +60,11 @@ const LIVE_DECODERS = [
   ["cw", "Testo Morse (CW)", ["cw", "usb", "lsb"]],
   ["rtty45", "Testo RTTY 45 baud (radioamatori)", ["usb", "lsb", "cw"]],
   ["rtty50", "Testo RTTY 50 baud (meteo DWD)", ["usb", "lsb", "cw"]],
+  ["ft8", "Messaggi FT8", ["usb"]],
+  ["wspr", "Radiofari WSPR", ["usb"]],
 ];
 const TEXT_DECODERS = ["cw", "rtty45", "rtty50"];
+const SLOT_DECODERS = ["ft8", "wspr"]; // periodi UTC: continuano anche a pannello chiuso
 const SAMPLE_RATES = [250000, 1024000, 1400000, 1800000, 2048000, 2400000, 2560000, 2880000];
 const FFT_SIZES = [256, 512, 1024, 2048, 4096];
 const MAX_HISTORY = 60;
@@ -299,6 +306,13 @@ class SpettroPanel extends HTMLElement {
     if (m.kind === "meteo_passes") { this._meteoPasses = m; this._renderMeteoPasses(); return; }
     if (m.kind === "meteo_live") { this._onMeteoLive(m); return; }
     if (m.kind === "meteo_log") { this._meteoLog = m.log; this._renderMeteoLog(); return; }
+    if (m.kind === "digi_log") { this._digiLog = m.log; this._renderDigi(); return; }
+    if (m.kind === "live_digi") {
+      this._digiLog = (this._digiLog || []).concat(m.decodes).slice(-600);
+      this._digiStatus = m;
+      this._renderDigi(m.decodes.length ? null : `nessun messaggio nell'ultimo periodo`);
+      return;
+    }
     if (m.kind === "meteo_image" || m.kind === "meteo_pruned") { this._loadMeteo(m.entry ? m.entry.id : null); return; }
     if (m.kind === "live_error") { this._msg(`Analisi continua interrotta: ${m.error}`, true); return; }
     if (m.kind === "analysis") {
@@ -371,6 +385,11 @@ class SpettroPanel extends HTMLElement {
         #meteolist tr:hover td { background:var(--secondary-background-color); }
         #meteolist tr.sel td { background:rgba(3,169,244,.16); }
         .meteoimg { width:100%; height:auto; display:block; border-radius:6px; margin-top:8px; background:#000; image-rendering:auto; }
+        .digitab { width:100%; border-collapse:collapse; font-size:13px; }
+        .digitab th, .digitab td { text-align:left; padding:3px 6px; border-bottom:1px solid var(--divider-color,#e0e0e0); white-space:nowrap; }
+        .digitab td.msg { font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; white-space:normal; }
+        .digitab tr.cq td.msg { color:var(--success-color,#43a047); font-weight:600; }
+        .digi { max-height:22em; overflow:auto; }
         .livetext { white-space:pre-wrap; word-break:break-word; font:14px/1.45 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; background:var(--secondary-background-color,#f5f5f5); border-radius:6px; padding:8px; margin:6px 0; min-height:4.5em; max-height:16em; overflow:auto; }
         .meteogrid { display:grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap:4px 12px; margin:6px 0; }
         canvas { display:block; width:100%; }
@@ -517,10 +536,11 @@ class SpettroPanel extends HTMLElement {
           </div>
           <div id="meteopasses" class="hint">Calcolo dei passaggi…</div>
           <div id="meteolog"></div>
-          <h4 class="sub">Stazioni radio con immagini e testo</h4>
-          <div class="hint">Trasmettono da terra a orari propri: radiofax e telescrivente meteo quasi sempre, SSTV e Morse dei
-            radioamatori quando qualcuno trasmette. ▶ Ascolta resta in ascolto: le immagini si salvano (anche a pannello chiuso),
-            il testo Morse/RTTY compare sotto la cascata mentre arriva.</div>
+          <h4 class="sub">Stazioni radio: immagini, testo e modi digitali</h4>
+          <div class="hint">Trasmettono da terra a orari propri: radiofax e telescrivente meteo quasi sempre, FT8 e WSPR dei
+            radioamatori di continuo (di giorno sui 20 m, di sera sui 40 e 80 m), SSTV e Morse quando qualcuno trasmette.
+            ▶ Ascolta resta in ascolto: immagini e messaggi FT8/WSPR si raccolgono anche a pannello chiuso, il testo Morse/RTTY
+            compare sotto la cascata mentre arriva.</div>
           <div class="row" style="margin-top:4px">
             <select id="imgpreset" style="flex:1;min-width:220px">${IMG_PRESETS.filter((p) => !p[0].startsWith("ISS")).map((p) => `<option value="${IMG_PRESETS.indexOf(p)}">${p[0]}</option>`).join("")}</select>
             <button id="imglisten" title="Resta in ascolto su questa frequenza e salva le immagini che arrivano (la scansione si sospende)">▶ Ascolta</button>
@@ -718,9 +738,9 @@ class SpettroPanel extends HTMLElement {
     $("meteoauto").addEventListener("change", (e) => meteoCfg({ meteo_auto: e.target.checked }));
     $("isssstv").addEventListener("change", (e) => meteoCfg({ iss_sstv: e.target.checked }));
     $("imglisten").addEventListener("click", () => {
-      const [name, mhz, mode, dec] = IMG_PRESETS[+$("imgpreset").value];
+      const [name, mhz, mode, dec, bw] = IMG_PRESETS[+$("imgpreset").value];
       this._select(mhz * 1e6);
-      this._liveStart(mhz, mode, null, dec, name.startsWith("ISS") ? "ISS" : null);
+      this._liveStart(mhz, mode, null, dec, name.startsWith("ISS") ? "ISS" : null, bw || null);
     });
     $("meteoel").addEventListener("change", (e) => meteoCfg({ meteo_min_el: Math.max(0, Math.min(90, parseFloat(e.target.value) || 0)) }));
     $("meteodays").addEventListener("change", (e) => meteoCfg({ meteo_days: Math.max(1, parseFloat(e.target.value) || 7) }));
@@ -1374,7 +1394,9 @@ class SpettroPanel extends HTMLElement {
       $("livebw").value = String(live.bw || bws[0]);
     }
     if (!live.decoder) { $("liveimg").innerHTML = ""; this._liveImgPreview = null; this._liveText = null; }
-    else if (TEXT_DECODERS.includes(live.decoder)) {
+    else if (SLOT_DECODERS.includes(live.decoder)) {
+      if (!was || was.decoder !== live.decoder || was.freq_mhz !== live.freq_mhz) { this._digiNote = null; $("liveimg").innerHTML = ""; this._renderDigi(); }
+    } else if (TEXT_DECODERS.includes(live.decoder)) {
       if (!was || was.decoder !== live.decoder || was.freq_mhz !== live.freq_mhz || this._liveText == null) {
         this._liveText = live.text || "";
         this._renderLiveText("in cerca del segnale…");
@@ -1423,11 +1445,55 @@ class SpettroPanel extends HTMLElement {
     $("livelevel").textContent = `livello ${m.level_db} dBFS`;
     this._drawLiveRow(m.row);
     if (this._listen && this._audioCtx) this._playPcm(m.audio);
+    if (m.digi && this._live && SLOT_DECODERS.includes(this._live.decoder)) { this._digiStatus = m.digi; this._renderDigiStatus(); }
     if (m.text_info !== undefined && this._live && TEXT_DECODERS.includes(this._live.decoder)) {
       if (this._liveText == null) this._liveText = "";
       if (m.text) this._liveText = (this._liveText + m.text).slice(-4000);
       if (m.text || m.text_info !== this._liveTextInfo) this._renderLiveText(m.text_info);
     }
+  }
+
+  _renderDigi(note) {
+    const live = this._live;
+    if (!live || !SLOT_DECODERS.includes(live.decoder)) return;
+    if (note !== undefined) this._digiNote = note;
+    const el = this.shadowRoot.getElementById("liveimg");
+    const wspr = live.decoder === "wspr";
+    if (!el.querySelector(".digi")) {
+      el.innerHTML = `<h3 style="margin:10px 0 4px">${wspr ? "Radiofari WSPR" : "Messaggi FT8"}</h3>
+        <div class="hint" id="digistat"></div>
+        <div class="row" style="margin:4px 0">${wspr ? "" : `<label class="chk"><input type="checkbox" id="digicq"> solo chi chiama (CQ)</label>`}
+          <span class="hint">${wspr ? "Ogni 2 minuti pari: nominativo, locatore e potenza di chi trasmette."
+            : "Ogni 15 secondi: i collegamenti dei radioamatori."} L'ora del computer di Home Assistant deve essere giusta (al secondo);
+            l'ascolto continua anche a pannello chiuso.</span></div>
+        <div class="digi"></div>`;
+      const cq = el.querySelector("#digicq");
+      if (cq) cq.addEventListener("change", () => this._renderDigi());
+    }
+    this._renderDigiStatus();
+    const onlyCq = el.querySelector("#digicq")?.checked;
+    const rows = (this._digiLog || []).filter((d) => d.mode === live.decoder && Math.abs(d.rf_hz - d.freq_hz - live.freq_mhz * 1e6) < 50
+      && (!onlyCq || d.cq)).slice(-250).reverse();
+    const hm = (t) => new Date(t * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: wspr ? undefined : "2-digit", hour12: false });
+    const km = (d) => (d.km != null ? `${d.km.toLocaleString("it-IT")} km` : "");
+    const watt = (dbm) => { const w = 10 ** (dbm / 10) / 1000; return w >= 1 ? `${+w.toFixed(1)} W` : `${+(w * 1000).toPrecision(2)} mW`; };
+    el.querySelector(".digi").innerHTML = rows.length ? `<table class="digitab"><thead><tr>${wspr
+      ? "<th>Ora</th><th>SNR</th><th>MHz</th><th>Nominativo</th><th>Locatore</th><th>Potenza</th><th>Distanza</th>"
+      : "<th>Ora</th><th>SNR</th><th>DT</th><th>Hz</th><th>Messaggio</th><th>Distanza</th>"}</tr></thead><tbody>${rows.map((d) => wspr
+      ? `<tr><td>${hm(d.time)}</td><td>${d.snr_db}</td><td>${(d.rf_hz / 1e6).toFixed(6)}</td><td><b>${esc(d.call)}</b></td><td>${esc(d.grid || "")}</td>
+          <td>${d.dbm} dBm (${watt(d.dbm)})</td><td>${km(d)}</td></tr>`
+      : `<tr${d.cq ? ' class="cq"' : ""}><td>${hm(d.time)}</td><td>${d.snr_db}</td><td>${d.dt_s.toFixed(1)}</td><td>${d.freq_hz}</td>
+          <td class="msg">${esc(d.message)}</td><td>${km(d)}</td></tr>`).join("")}</tbody></table>`
+      : `<div class="hint">Nessun messaggio ancora: il primo periodo completo si decodifica ${wspr ? "dopo al massimo 4 minuti" : "entro 30 secondi"}.</div>`;
+  }
+
+  _renderDigiStatus() {
+    const el = this.shadowRoot.getElementById("digistat");
+    const st = this._digiStatus;
+    if (!el || !st) return;
+    const left = st.next_decode ? Math.max(0, Math.round(st.next_decode - Date.now() / 1000)) : null;
+    el.textContent = `${st.slots || 0} periodi decodificati · ${st.decoded || 0} messaggi${left != null ? ` · prossima decodifica tra ${left} s` : ""}`
+      + (this._digiNote ? ` · ${this._digiNote}` : "");
   }
 
   _renderLiveText(info) {
