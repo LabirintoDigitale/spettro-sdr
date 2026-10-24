@@ -49,14 +49,16 @@ _CATEGORY = {
 
 # intervalli di indirizzi ICAO (24 bit) → paese. Dall'allocazione ICAO (Annesso 10, vol. III).
 _COUNTRY_RANGES: tuple[tuple[int, int, str], ...] = (
-    (0x3C0000, 0x3FFFFF, "Germania"), (0x3A0000, 0x3AFFFF, "Francia"), (0x380000, 0x39FFFF, "Francia"),
+    (0x3C0000, 0x3FFFFF, "Germania"), (0x380000, 0x3BFFFF, "Francia"),
     (0x400000, 0x43FFFF, "Regno Unito"), (0x300000, 0x33FFFF, "Italia"), (0x340000, 0x37FFFF, "Spagna"),
-    (0x480000, 0x4BFFFF, "Paesi Bassi"), (0x448000, 0x44FFFF, "Belgio"), (0x450000, 0x457FFF, "Danimarca"),
-    (0x458000, 0x45FFFF, "Portogallo"), (0x460000, 0x467FFF, "Finlandia"), (0x468000, 0x46FFFF, "Grecia"),
-    (0x470000, 0x477FFF, "Ungheria"), (0x478000, 0x47FFFF, "Norvegia"), (0x440000, 0x447FFF, "Austria"),
-    (0x4A0000, 0x4A7FFF, "Svezia"), (0x4B0000, 0x4B7FFF, "Svizzera"), (0x4C0000, 0x4C7FFF, "Portogallo"),
-    (0x4C8000, 0x4CFFFF, "Irlanda"), (0x4CA000, 0x4CAFFF, "Irlanda"), (0x490000, 0x497FFF, "Polonia"),
-    (0x498000, 0x49FFFF, "Rep. Ceca"), (0x4A8000, 0x4AFFFF, "Turchia"), (0x4B8000, 0x4BFFFF, "Croazia"),
+    # sequenza europea di blocchi da 0x8000 indirizzi (ordinata e senza sovrapposizioni)
+    (0x440000, 0x447FFF, "Austria"), (0x448000, 0x44FFFF, "Belgio"), (0x450000, 0x457FFF, "Bulgaria"),
+    (0x458000, 0x45FFFF, "Danimarca"), (0x460000, 0x467FFF, "Finlandia"), (0x468000, 0x46FFFF, "Grecia"),
+    (0x470000, 0x477FFF, "Ungheria"), (0x478000, 0x47FFFF, "Norvegia"), (0x480000, 0x487FFF, "Paesi Bassi"),
+    (0x488000, 0x48FFFF, "Polonia"), (0x490000, 0x497FFF, "Portogallo"), (0x498000, 0x49FFFF, "Rep. Ceca"),
+    (0x4A0000, 0x4A7FFF, "Romania"), (0x4A8000, 0x4AFFFF, "Svezia"), (0x4B0000, 0x4B7FFF, "Svizzera"),
+    (0x4B8000, 0x4BFFFF, "Turchia"), (0x4C0000, 0x4C7FFF, "Serbia"), (0x4CA000, 0x4CAFFF, "Irlanda"),
+    (0x501000, 0x5013FF, "Croazia"), (0x4D0000, 0x4D03FF, "Lussemburgo"), (0x506000, 0x5063FF, "Slovenia"),
     (0x500000, 0x5FFFFF, "Europa (altri)"), (0x140000, 0x15FFFF, "Russia"), (0x100000, 0x1FFFFF, "Russia"),
     (0xA00000, 0xAFFFFF, "Stati Uniti"), (0xC00000, 0xC3FFFF, "Canada"), (0x7C0000, 0x7FFFFF, "Australia"),
     (0x800000, 0x83FFFF, "India"), (0x840000, 0x87FFFF, "Giappone"), (0x780000, 0x7BFFFF, "Cina"),

@@ -1,7 +1,7 @@
 // Pannello "Spettro" per Home Assistant: grafico dello spettro, waterfall e picchi.
 
 // deve coincidere con VERSION in const.py: se il backend ne riporta un'altra manca un riavvio
-const PANEL_VERSION = "1.22.2";
+const PANEL_VERSION = "1.22.3";
 
 const PRESETS = [
   ["Personalizzato", null, null],
@@ -406,6 +406,9 @@ class SpettroPanel extends HTMLElement {
         .digitab { width:100%; border-collapse:collapse; font-size:13px; }
         .digitab th, .digitab td { text-align:left; padding:3px 6px; border-bottom:1px solid var(--divider-color,#e0e0e0); white-space:nowrap; }
         .digitab td.msg { font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; white-space:normal; }
+        #adsblist table { table-layout:fixed; }
+        #adsblist td:first-child, #adsblist th:first-child { white-space:normal; width:44%; word-break:break-word; }
+        #adsblist td.num { white-space:nowrap; }
         .digitab tr.cq td.msg { color:var(--success-color,#43a047); font-weight:600; }
         .digi { max-height:22em; overflow:auto; }
         .livetext { white-space:pre-wrap; word-break:break-word; font:14px/1.45 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; background:var(--secondary-background-color,#f5f5f5); border-radius:6px; padding:8px; margin:6px 0; min-height:4.5em; max-height:16em; overflow:auto; }
