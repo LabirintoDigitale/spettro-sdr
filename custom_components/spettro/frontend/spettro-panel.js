@@ -1,7 +1,7 @@
 // Pannello "Spettro" per Home Assistant: grafico dello spettro, waterfall e picchi.
 
 // deve coincidere con VERSION in const.py: se il backend ne riporta un'altra manca un riavvio
-const PANEL_VERSION = "1.20.2";
+const PANEL_VERSION = "1.21.0";
 
 const PRESETS = [
   ["Personalizzato", null, null],
@@ -308,6 +308,8 @@ class SpettroPanel extends HTMLElement {
     if (m.kind === "meteo_live") { this._onMeteoLive(m); return; }
     if (m.kind === "meteo_log") { this._meteoLog = m.log; this._renderMeteoLog(); return; }
     if (m.kind === "dab_scan") { this._dabScan = m; this._renderDabScan(); return; }
+    if (m.kind === "adsb") { this._adsb = m.done ? null : m; this._renderAdsb(); return; }
+    if (m.kind === "adsb_error") { this._msg(`ADS-B: ${m.error}`, true); return; }
     if (m.kind === "live_data") {
       if (!this._live || this._live.decoder !== "dati") return;
       this._live.data_log = (this._live.data_log || []).concat(m.new).slice(-200);
@@ -544,6 +546,19 @@ class SpettroPanel extends HTMLElement {
           <div class="row" style="margin-top:6px"><button id="dabscan">🔍 Cerca tutti i multiplex DAB</button><span class="hint" id="dabscanst"></span></div>
           <div id="dablist"></div>
         </div>
+        <div class="card" id="adsbcard">
+          <h3 style="margin:0">✈️ Aerei (ADS-B)</h3>
+          <div class="hint">La chiavetta resta su 1090 MHz e raccoglie gli aerei che trasmettono in chiaro la loro posizione
+            (ADS-B): volo, quota, velocità e distanza da te. La scansione è sospesa mentre è attivo. Serve un'antenna per i
+            1090 MHz (un'antennina corta, ~6,9 cm, va bene).</div>
+          <div class="row" style="margin-top:6px;align-items:center">
+            <button class="primary" id="adsbbtn">▶ Avvia</button>
+            <label class="chk" title="Tiene la chiavetta su 1090 MHz anche quando chiudi il pannello, finché non lo fermi"><input type="checkbox" id="adsbcont"> Resta attivo a pannello chiuso</label>
+            <span class="hint" id="adsbstat"></span>
+          </div>
+          <canvas id="adsbradar" style="display:none;width:100%;max-width:420px;margin:10px auto 0;aspect-ratio:1"></canvas>
+          <div id="adsblist"></div>
+        </div>
         <div class="card" id="meteocard">
           <h3 style="margin:0">🛰️ Satelliti meteo e immagini</h3>
           <div id="meteolive"></div>
@@ -768,6 +783,15 @@ class SpettroPanel extends HTMLElement {
     $("dablist").addEventListener("click", (e) => {
       const b = e.target.closest("button.dabgo");
       if (b) this._liveStart(+b.dataset.mhz, "dab", b.dataset.sid);
+    });
+    $("adsbbtn").addEventListener("click", async () => {
+      try {
+        if (this._adsb) await this._hass.callWS({ type: "spettro/adsb", action: "stop" });
+        else await this._hass.callWS({ type: "spettro/adsb", action: "start", continuous: $("adsbcont").checked });
+      } catch (err) { this._msg(err.message || String(err), true); }
+    });
+    $("adsbcont").addEventListener("change", async (e) => {
+      if (this._adsb) try { await this._hass.callWS({ type: "spettro/adsb", action: "start", continuous: e.target.checked }); } catch (err) { this._msg(err.message || String(err), true); }
     });
     $("isssstv").addEventListener("change", (e) => meteoCfg({ iss_sstv: e.target.checked }));
     $("imglisten").addEventListener("click", () => {
@@ -1525,6 +1549,76 @@ class SpettroPanel extends HTMLElement {
         apply();
       });
       apply();
+    }
+  }
+
+  _renderAdsb() {
+    const $ = (id) => this.shadowRoot.getElementById(id);
+    const m = this._adsb;
+    const running = !!m;
+    $("adsbbtn").textContent = running ? "■ Ferma" : "▶ Avvia";
+    $("adsbbtn").classList.toggle("primary", !running);
+    if (m) $("adsbcont").checked = !!m.continuous;
+    $("adsbstat").textContent = running
+      ? `${m.count} aere${m.count === 1 ? "o" : "i"} in vista · ${m.messages} messaggi ricevuti`
+      : "Fermo.";
+    const radar = $("adsbradar");
+    radar.style.display = running ? "" : "none";
+    const list = $("adsblist");
+    if (!running) { list.innerHTML = ""; return; }
+    const ac = m.aircraft || [];
+    this._drawAdsbRadar(ac, m.home);
+    if (!ac.length) { list.innerHTML = `<div class="hint" style="margin-top:8px">In ascolto… gli aerei compaiono quando passano in portata (quota alta = più lontano si sente). Serve un'antenna sui 1090 MHz.</div>`; return; }
+    const dir = (b) => b == null ? "" : ["N", "NE", "E", "SE", "S", "SO", "O", "NO"][Math.round(b / 45) % 8];
+    list.innerHTML = `<table class="digitab" style="margin-top:8px"><thead><tr>
+        <th>Volo</th><th class="num">Quota</th><th class="num">Velocità</th><th class="num">Distanza</th><th>Direz.</th></tr></thead>
+      <tbody>${ac.map((a) => `<tr>
+        <td><b>${esc(a.call || "—")}</b><span class="hint"> ${a.icao}</span></td>
+        <td class="num">${a.alt_m != null ? `${a.alt_m.toLocaleString("it-IT")} m` : "—"}</td>
+        <td class="num">${a.speed_kmh != null ? `${a.speed_kmh} km/h` : "—"}</td>
+        <td class="num">${a.km != null ? `${a.km.toLocaleString("it-IT")} km` : "—"}</td>
+        <td>${a.bearing != null ? `${dir(a.bearing)} ${a.bearing}°` : "—"}</td></tr>`).join("")}</tbody></table>
+      <div class="hint" style="margin-top:4px">La posizione c'è solo per gli aerei che la trasmettono (quasi tutti i voli di linea). Il radar è centrato su di te, nord in alto.</div>`;
+  }
+
+  _drawAdsbRadar(ac, home) {
+    const cv = this.shadowRoot.getElementById("adsbradar");
+    const dpr = window.devicePixelRatio || 1;
+    const size = Math.round((cv.clientWidth || 360) * dpr);
+    if (cv.width !== size) { cv.width = size; cv.height = size; }
+    const g = cv.getContext("2d");
+    const W = cv.width, R = W / 2, cx = R, cy = R, pad = 18 * dpr;
+    g.clearRect(0, 0, W, W);
+    const css = (v, d) => (getComputedStyle(this).getPropertyValue(v).trim() || d);
+    const fg = css("--primary-text-color", "#ddd"), grid = css("--divider-color", "#555"), sec = css("--secondary-text-color", "#999");
+    const withPos = ac.filter((a) => a.km != null && a.bearing != null);
+    const maxKm = Math.max(50, ...withPos.map((a) => a.km));
+    const rings = maxKm <= 50 ? [25, 50] : maxKm <= 120 ? [40, 80, 120] : [Math.round(maxKm / 3), Math.round(2 * maxKm / 3), Math.ceil(maxKm)];
+    const rr = rings[rings.length - 1];
+    const rad = R - pad;
+    g.strokeStyle = grid; g.fillStyle = sec; g.lineWidth = dpr; g.font = `${11 * dpr}px sans-serif`; g.textAlign = "center";
+    for (const km of rings) {
+      g.beginPath(); g.arc(cx, cy, rad * km / rr, 0, 2 * Math.PI); g.stroke();
+      g.fillText(`${km} km`, cx, cy - rad * km / rr - 2 * dpr);
+    }
+    g.beginPath(); g.moveTo(cx, cy - rad); g.lineTo(cx, cy + rad); g.moveTo(cx - rad, cy); g.lineTo(cx + rad, cy); g.stroke();
+    g.fillStyle = sec; g.textBaseline = "middle";
+    g.fillText("N", cx, pad / 2); g.fillText("S", cx, W - pad / 2); g.fillText("E", W - pad / 2, cy); g.fillText("O", pad / 2, cy);
+    // casa
+    g.fillStyle = fg; g.beginPath(); g.arc(cx, cy, 3 * dpr, 0, 2 * Math.PI); g.fill();
+    for (const a of withPos) {
+      const ang = (a.bearing - 90) * Math.PI / 180;
+      const d = rad * a.km / rr;
+      const x = cx + d * Math.cos(ang), y = cy + d * Math.sin(ang);
+      // colore per quota: basso rosso → alto blu
+      const alt = a.alt_m || 0; const hue = Math.max(0, Math.min(240, alt / 12000 * 240));
+      g.fillStyle = `hsl(${hue},70%,55%)`;
+      const tr = (a.track != null ? a.track : a.bearing) - 90;
+      g.save(); g.translate(x, y); g.rotate(tr * Math.PI / 180);
+      g.beginPath(); g.moveTo(7 * dpr, 0); g.lineTo(-4 * dpr, -4 * dpr); g.lineTo(-4 * dpr, 4 * dpr); g.closePath(); g.fill();
+      g.restore();
+      g.fillStyle = fg; g.textAlign = "left"; g.textBaseline = "bottom";
+      g.fillText(a.call || a.icao, x + 6 * dpr, y - 3 * dpr);
     }
   }
 

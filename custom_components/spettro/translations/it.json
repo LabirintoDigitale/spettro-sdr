@@ -29,6 +29,12 @@
       },
       "signals": {
         "name": "Segnali rilevati"
+      },
+      "aircraft_count": {
+        "name": "Aerei in vista (ADS-B)"
+      },
+      "nearest_aircraft": {
+        "name": "Aereo più vicino"
       }
     },
     "switch": {

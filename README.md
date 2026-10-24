@@ -29,6 +29,7 @@ Integrazione custom per **Home Assistant** che trasforma una chiavetta RTL-SDR c
 - **TV digitale (DVB-T/T2)**: riconosce i multiplex TV dei canali UHF 21–48 dalla struttura dei simboli OFDM e ne misura standard, modalità, intervallo di guardia e qualità (MER stimato), con una scheda dei canali trovati e un misuratore continuo per puntare l'antenna. Vedi [Misuratore di campo TV](#misuratore-di-campo-tv).
 - **TV satellitare**: con la chiavetta sul cavo della parabola riconosce il satellite (Hotbird, Astra…) dalla posizione dei transponder e misura il livello per puntare la parabola. Vedi [Satellite](#satellite-parabola-con-lnb).
 - **Satelliti meteo**: calcola i passaggi dei Meteor-M, li riceve da solo e ricostruisce le foto della Terra (LRPT), con anteprima in diretta e archivio. Vedi [Satelliti meteo](#satelliti-meteo-meteor-m).
+- **Aerei (ADS-B)**: gli aerei sui 1090 MHz, con radar e distanza da casa. Vedi [Aerei](#aerei-ads-b-1090-mhz).
 - **FT8 e WSPR**: i messaggi digitali dei radioamatori di tutto il mondo, con la distanza di chi trasmette. Vedi [Modi digitali](#modi-digitali-ft8-e-wspr).
 - **SSTV e radiofax**: immagini dalla ISS e dai radioamatori (SSTV) e carte del tempo in onde corte (radiofax DWD), con ascolto continuo e galleria. Onde corte con il direct sampling della chiavetta. Vedi [Immagini dalla radio](#immagini-dalla-radio-sstv-e-radiofax).
 - **Preferiti**: con il cuoricino ♡ accanto ad *Analizza* la frequenza selezionata (dal grafico o dall'archivio) entra nei preferiti e il cuore diventa ❤. La scheda *Preferiti* li elenca con il nome: quello RDS per le radio FM, altrimenti *NONAME 1*, *NONAME 2*…; con ✏ lo cambi a mano (un nome scritto da te non viene mai sostituito dall'RDS; lasciandolo vuoto torna automatico). Toccando la riga si seleziona la frequenza, ▶ avvia l'analisi continua, ❤ la toglie. I preferiti sono salvati in Home Assistant, quindi uguali su telefono e computer.
@@ -230,6 +231,15 @@ Durante l'analisi continua, accanto al modo, si può scegliere anche una decodif
 - **Testo RTTY 45 baud**: la telescrivente dei radioamatori (spostamento 170 Hz), per esempio intorno a 14,085 MHz, soprattutto durante i contest.
 
 Per l'RTTY si ascolta in **USB**: i due toni e la polarità (normale o invertita) si trovano da soli, basta che cadano nel filtro. Le stazioni pronte sono nell'elenco *Stazioni radio: immagini, testo e modi digitali* della scheda **🛰️ Satelliti meteo e immagini**. A differenza delle immagini, il testo si decodifica solo con il pannello aperto.
+
+## Aerei: ADS-B (1090 MHz)
+
+Gli aerei trasmettono in chiaro la loro posizione sui 1090 MHz (ADS-B), e si ricevono anche con un'antennina corta (~6,9 cm). Nella scheda **✈️ Aerei (ADS-B)** il pulsante **▶ Avvia** tiene la chiavetta su 1090 MHz (scansione sospesa) e mostra gli aerei in vista aggiornati in tempo reale:
+
+- un **radar** centrato su di te (nord in alto) con ogni aereo alla sua direzione e distanza, colorato per quota (basso rosso → alto blu) e con una freccia per la rotta;
+- una **tabella** con volo, quota, velocità, distanza e direzione da casa.
+
+Un aereo sparisce dopo un minuto che non si sente. La posizione viene calcolata da un solo messaggio usando la posizione della stazione (da Home Assistant). Con l'opzione **Resta attivo a pannello chiuso** la chiavetta resta su 1090 MHz finché non premi **■ Ferma**; altrimenti si ferma da sola poco dopo aver chiuso il pannello. Due **sensori** — *Aerei in vista* e *Aereo più vicino* (con volo, quota e distanza negli attributi) — si possono usare in dashboard e automazioni. Il decoder (preambolo a impulsi, 112 bit, CRC a 24 bit, posizione CPR) è lo stesso usato nelle analisi.
 
 ## Modi digitali: FT8 e WSPR
 

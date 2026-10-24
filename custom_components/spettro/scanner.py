@@ -23,6 +23,7 @@ from typing import Any
 
 import numpy as np
 
+from . import adsb as adsb_mod
 from . import dab, dvbt, rds, satellite, slots, textdec, verify, weather
 from .analysis import encode_png
 from .fax import FaxDecoder
@@ -79,6 +80,10 @@ SLOT_DECODERS = ("ft8", "wspr")  # modi digitali a periodi UTC
 KEEP_RUNNING = IMAGE_DECODERS + SLOT_DECODERS  # questi continuano anche a pannello chiuso
 DIGI_LOG = 600  # messaggi FT8/WSPR tenuti in memoria
 DAB_SCAN_S = 1.2  # registrazione per ogni canale nella ricerca dei multiplex DAB
+ADSB_PRUNE_S = 60.0  # un aereo sparisce dalla lista se non si sente da tanto
+ADSB_EMIT_S = 1.0  # ogni quanto si aggiorna il pannello
+ADSB_CHUNK = int(adsb_mod.RATE * 0.25)  # campioni per lettura (0,25 s)
+ADSB_OVERLAP = int(adsb_mod.RATE * 140e-6)  # coda riusata: un messaggio a cavallo non si perde
 DATA_WINDOW_S = 2.0  # "Riconosci dati": finestra di IQ esaminata
 DATA_EVERY_S = 1.5  # ogni quanto (le finestre si sovrappongono: i pacchetti a cavallo non si perdono)
 TEXT_KEEP = 4000  # caratteri di testo decodificato tenuti nello stato (per chi apre il pannello dopo)
@@ -316,6 +321,8 @@ class SpectrumScanner:
         self.dab_list: list[dict[str, Any]] = []  # multiplex DAB trovati dalla ricerca canale per canale
         self.dab_scan_time: float | None = None
         self._dab_task: asyncio.Task | None = None
+        self._adsb_task: asyncio.Task | None = None
+        self.adsb_tracker: adsb_mod.AircraftTracker | None = None  # aerei visti nella sessione in corso
         self._active = asyncio.Event()
         self._sweep_id = 0
         self.last_spectrum: dict[str, Any] | None = None
@@ -339,6 +346,7 @@ class SpectrumScanner:
             "auto_count": None,  # picchi analizzati in automatico nell'ultima scansione
             "version": None,  # versione dell'integrazione, per accorgersi di un riavvio mancato
             "live": None,  # analisi continua in corso: {"freq_mhz", "mode"}
+            "adsb": None,  # ricevitore aerei ADS-B in corso: {"continuous", "aircraft", ...}
         }
         self._update_active(emit=False)
 
@@ -384,6 +392,8 @@ class SpectrumScanner:
         if self.dab_list or self._dab_task is not None:
             out.append({"kind": "dab_scan", "done": self._dab_task is None, "found": self.dab_list,
                         "time": self.dab_scan_time})
+        if self.status["adsb"]:
+            out.append({"kind": "adsb", **self.status["adsb"]})
         live = self.status["live"]
         if live and live.get("mode") == "dab" and (self.last_slide or self.last_dab):
             # un pannello aperto a diretta già avviata riceve subito nome, testo e immagine
@@ -415,6 +425,8 @@ class SpectrumScanner:
     def _pause_reason(self) -> str | None:
         if self.meteo_rx:
             return "satellite"
+        if self._adsb_task is not None:
+            return "adsb"
         if self.analyzing:
             return "analysis"
         if self.status["live"]:
@@ -458,6 +470,7 @@ class SpectrumScanner:
 
     async def stop(self) -> None:
         await self.dab_scan_stop()
+        await self.adsb_stop()
         await self.live_stop()
         await self.meteo_stop()
         if self._meteo_loop_task is not None:
@@ -991,6 +1004,99 @@ class SpectrumScanner:
                 self._live_task = None
             self.status["live"] = None
             self._update_active()
+
+    # --- ricevitore aerei ADS-B (1090 MHz) --------------------------------------
+
+    async def adsb_start(self, continuous: bool = False) -> dict[str, Any]:
+        """Tiene la chiavetta su 1090 MHz e raccoglie gli aerei (scansione sospesa).
+
+        continuous=True: resta sintonizzato anche a pannello chiuso (finché non lo fermi).
+        """
+        if self.analyzing or self._dab_task is not None:
+            raise RuntimeError("C'è un'altra operazione in corso, riprova tra poco")
+        await self.live_stop()
+        if self._adsb_task is not None:
+            self.status["adsb"]["continuous"] = continuous  # già attivo: cambio solo l'opzione
+            self._emit(dict(self.status))
+            return self.status["adsb"]
+        self.adsb_tracker = adsb_mod.AircraftTracker(self.meteo.location if self.meteo else None)
+        self.status["adsb"] = {"continuous": continuous, "aircraft": [], "count": 0, "messages": 0,
+                               "home": list(self.meteo.location) if self.meteo else None}
+        self._adsb_task = asyncio.get_running_loop().create_task(self._adsb_run(), name="spettro_adsb")
+        self._update_active()  # ora la scansione vede il task e si ferma
+        return self.status["adsb"]
+
+    async def adsb_stop(self) -> None:
+        task, self._adsb_task = self._adsb_task, None
+        if task is not None:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+    async def _adsb_run(self) -> None:
+        loop = asyncio.get_running_loop()
+        tracker = self.adsb_tracker
+        rate = adsb_mod.RATE
+        discard = RCV_BUF + 2 * READ_LIMIT + int(rate * 2 * max(self.settings.settle_ms, 100) / 1000)
+        discard -= discard % 2
+        tail = b""
+        last_emit = 0.0
+        no_viewer_since: float | None = None
+
+        def work(raw: bytes) -> list[list[int]]:
+            a = np.frombuffer(raw, dtype=np.uint8).astype(np.float32) - 127.5
+            return adsb_mod.decode_frames((a[0::2] + 1j * a[1::2]).astype(np.complex64), rate)
+
+        try:
+            async with self._radio:
+                reader, writer, tuner = await _open(self.host, self.port)
+                try:
+                    self.status["tuner"] = TUNER_NAMES.get(tuner, f"Tipo {tuner}")
+                    await self._configure(writer, rate)
+                    await self._tune(writer, adsb_mod.FREQ, reader)
+                    async with asyncio.timeout(IO_TIMEOUT):
+                        await self._discard(reader, discard)
+                    while True:
+                        async with asyncio.timeout(IO_TIMEOUT):
+                            raw = await reader.readexactly(ADSB_CHUNK * 2)
+                        frames = await loop.run_in_executor(None, work, tail + raw)
+                        tail = raw[-ADSB_OVERLAP * 2:]
+                        tracker.feed_frames(frames)
+                        tracker.prune(ADSB_PRUNE_S)
+                        if loop.time() - last_emit >= ADSB_EMIT_S:
+                            last_emit = loop.time()
+                            ac = tracker.aircraft()
+                            self.status["adsb"].update(aircraft=ac, count=len(ac), messages=tracker.messages)
+                            self._emit({"kind": "adsb", **self.status["adsb"]})
+                        # a pannello chiuso: se non è "continuo", ci si ferma dopo un po'
+                        if not self.status["adsb"]["continuous"] and self.viewers <= 0:
+                            no_viewer_since = no_viewer_since or loop.time()
+                            if loop.time() - no_viewer_since > LIVE_NO_VIEWER_STOP_S:
+                                _LOGGER.info("Nessun pannello aperto: ricevitore ADS-B fermato")
+                                break
+                        else:
+                            no_viewer_since = None
+                finally:
+                    writer.close()
+                    try:
+                        await writer.wait_closed()
+                    except OSError:
+                        pass
+        except asyncio.CancelledError:
+            raise
+        except (OSError, TimeoutError, asyncio.IncompleteReadError, RtlTcpError) as err:
+            msg = str(err) or type(err).__name__
+            _LOGGER.warning("Ricevitore ADS-B interrotto: %s", msg)
+            self._emit({"kind": "adsb_error", "error": msg})
+        finally:
+            if asyncio.current_task() is self._adsb_task:
+                self._adsb_task = None
+            self.status["adsb"] = None
+            self.adsb_tracker = None
+            self._update_active()
+            self._emit({"kind": "adsb", "done": True})
 
     def _sat_transponder(self, if_mhz: float) -> dict[str, Any]:
         """Transponder riconosciuto nell'ultima scansione più vicino alla frequenza (sul cavo), se c'è."""

@@ -10,7 +10,6 @@ senza mostrare il contenuto.
 from __future__ import annotations
 
 import io
-import math
 import wave
 from typing import Any
 
@@ -18,6 +17,7 @@ import numpy as np
 
 from . import textdec
 from .demod import _channel, demodulate
+from . import adsb as adsb_mod
 from .ft8 import distance_km
 
 AUDIO_FS = 48_000  # FM demodulata per i protocolli a toni e a livelli
@@ -295,153 +295,32 @@ def digital_voice(iq: np.ndarray, rate: int, offset_hz: float) -> dict[str, Any]
 
 # --- ADS-B / Mode S ---------------------------------------------------------------------
 
-def _crc24(bits: list[int]) -> int:
-    poly = 0x1FFF409
-    n = int("".join(map(str, bits)), 2)
-    nb = len(bits)
-    for i in range(nb - 1, 23, -1):
-        if n >> i & 1:
-            n ^= poly << (i - 24)
-    return n & 0xFFFFFF
-
-
-_ADSB_CHARS = "#ABCDEFGHIJKLMNOPQRSTUVWXYZ##### ###############0123456789######"
-
-
-def _nl(lat: float) -> int:
-    if abs(lat) >= 87:
-        return 1
-    a = 1 - math.cos(math.pi / 30)
-    return int(math.floor(2 * math.pi / math.acos(1 - a / math.cos(math.pi / 180 * lat) ** 2)))
-
-
-def _cpr_global(even: tuple[int, int], odd: tuple[int, int], odd_last: bool) -> tuple[float, float] | None:
-    lat0, lon0 = even[0] / 131072, even[1] / 131072
-    lat1, lon1 = odd[0] / 131072, odd[1] / 131072
-    j = math.floor(59 * lat0 - 60 * lat1 + 0.5)
-    la0 = 360 / 60 * ((j % 60) + lat0)
-    la1 = 360 / 59 * ((j % 59) + lat1)
-    la0 -= 360 if la0 >= 270 else 0
-    la1 -= 360 if la1 >= 270 else 0
-    if _nl(la0) != _nl(la1):
-        return None
-    lat = la1 if odd_last else la0
-    nl = _nl(lat)
-    ni = max(nl - (1 if odd_last else 0), 1)
-    m = math.floor(lon0 * (nl - 1) - lon1 * nl + 0.5)
-    lon = 360 / ni * ((m % ni) + (lon1 if odd_last else lon0))
-    lon -= 360 if lon >= 180 else 0
-    return lat, lon
-
-
 def adsb(iq: np.ndarray, rate: int, offset_hz: float, home: tuple[float, float] | None) -> dict[str, Any] | None:
-    """Messaggi ADS-B (1090 MHz) degli aerei: preambolo a impulsi, 112 bit, CRC a 24 bit."""
+    """Messaggi ADS-B (1090 MHz) degli aerei in una registrazione: codice, volo, quota, posizione."""
     if rate < 1_900_000:
         return None
-    n = np.arange(len(iq))
-    m = np.abs(iq * np.exp(-2j * np.pi * offset_hz * n / rate)).astype(np.float32)
-    us = rate / 1e6  # campioni per microsecondo
-    p = [int(round(x * us)) for x in (0, 1, 3.5, 4.5)]
-    q = [int(round(x * us)) for x in (0.5, 1.5, 2.0, 2.5, 3.0, 4.0, 5.0, 5.5)]
-    end = len(m) - int(121 * us)
-    if end <= 0:
+    frames = adsb_mod.decode_frames(iq, rate, offset_hz)
+    if not frames:
         return None
-    hi = np.min(np.stack([m[k: k + end] for k in p]), axis=0)
-    lo = np.mean(np.stack([m[k: k + end] for k in q]), axis=0)
-    cand = np.nonzero(hi > 1.8 * lo)[0]
-    noise = float(np.median(m)) + 1e-9
-    cand = cand[hi[cand] > 3 * noise]
-    planes: dict[str, dict[str, Any]] = {}
-    msgs = 0
-    last = -1000
-    # ogni campione somma la parte di impulsi che cade nel suo intervallo [k, k+1]: a 2 MS/s gli impulsi da
-    # 0,5 µs finiscono a cavallo di due campioni, quindi si ricostruiscono i 224 mezzi bit con i minimi quadrati
-    h = 0.5 * us
-    base = float(np.median(m))
-    nchip = 224
-    for c in cand:
-        if c - last < int(100 * us):
-            continue
-        amp = float(np.mean([m[c + k] for k in p])) - base
-        for shift in (0.0, -0.25, 0.25):
-            t0 = c + shift + 8 * us
-            n0, n1 = int(t0), int(t0 + nchip * h) + 1
-            if n1 >= len(m) or amp <= 0:
-                break
-            edges = t0 + np.arange(nchip + 1) * h
-            lo_e, hi_e = edges[:-1], edges[1:]
-            rows = np.arange(n0, n1)
-            w = np.clip(np.minimum(rows[:, None] + 1, hi_e[None, :]) - np.maximum(rows[:, None], lo_e[None, :]), 0, None)
-            y = (m[n0:n1] - base) / amp
-            chips = np.linalg.solve(w.T @ w + 0.05 * np.eye(nchip), w.T @ y)
-            soft = chips[0::2] - chips[1::2]
-            bits = _adsb_fix((soft > 0).astype(int).tolist(), np.abs(soft))
-            if bits is None:
-                continue
-            last = c
-            msgs += 1
-            _adsb_parse(bits, planes)
-            break
-    if not msgs:
-        return None
+    tr = adsb_mod.AircraftTracker(home)
+    tr.feed_frames(frames)
     lines = []
-    for icao, pl in planes.items():
-        pos = None
-        if "even" in pl and "odd" in pl:
-            pos = _cpr_global(pl["even"], pl["odd"], pl["odd_last"])
-        parts = [f"aereo {icao}"]
-        if pl.get("call"):
-            parts.append(f"volo {pl['call']}")
-        if pl.get("alt_ft") is not None:
-            parts.append(f"quota {round(pl['alt_ft'] * 0.3048):,} m".replace(",", "."))
-        if pl.get("speed_kt") is not None:
-            parts.append(f"{round(pl['speed_kt'] * 1.852)} km/h verso {pl['heading']}°")
-        if pos:
-            parts.append(f"posizione {pos[0]:.3f}, {pos[1]:.3f}")
-            if home:
-                parts.append(f"a {round(distance_km(home, pos))} km")
+    for a in tr.aircraft():
+        parts = [f"aereo {a['icao']}"]
+        if a.get("call"):
+            parts.append(f"volo {a['call']}")
+        if a.get("alt_m") is not None:
+            parts.append(f"quota {a['alt_m']:,} m".replace(",", "."))
+        if a.get("speed_kmh") is not None:
+            parts.append(f"{a['speed_kmh']} km/h verso {a['track']}\u00b0")
+        if a.get("lat") is not None:
+            parts.append(f"posizione {a['lat']:.3f}, {a['lon']:.3f}")
+            if a.get("km") is not None:
+                parts.append(f"a {round(a['km'])} km")
         lines.append(", ".join(parts))
-    n_pl = "1 aereo" if len(planes) == 1 else f"{len(planes)} aerei"
-    return {"protocol": "ADS-B", "kind": f"ADS-B (aerei, 1090 MHz): {n_pl}, {msgs} messaggi decodificati",
-            "lines": lines}
-
-
-def _adsb_fix(bits: list[int], conf: np.ndarray) -> list[int] | None:
-    """Messaggio DF17/18 con CRC giusto, correggendo se serve fino a 2 dei bit meno sicuri."""
-    weak = [int(i) for i in np.argsort(conf[5:])[:10] + 5]  # il tipo (DF) deve essere già giusto
-    if int("".join(map(str, bits[:5])), 2) not in (17, 18):
-        return None
-    tries: list[tuple[int, ...]] = [(), *((i,) for i in weak), *((i, j) for k, i in enumerate(weak) for j in weak[k + 1:])]
-    for flip in tries:
-        b = bits.copy()
-        for i in flip:
-            b[i] ^= 1
-        if _crc24(b) == 0:
-            return b
-    return None
-
-
-def _adsb_parse(bits: list[int], planes: dict[str, dict[str, Any]]) -> None:
-    v = lambda a, b: int("".join(map(str, bits[a:b])), 2)  # noqa: E731
-    icao = f"{v(8, 32):06X}"
-    pl = planes.setdefault(icao, {})
-    me = bits[32:88]
-    tc = int("".join(map(str, me[:5])), 2)
-    mv = lambda a, b: int("".join(map(str, me[a:b])), 2)  # noqa: E731
-    if 1 <= tc <= 4:
-        pl["call"] = "".join(_ADSB_CHARS[mv(8 + 6 * i, 14 + 6 * i)] for i in range(8)).replace("#", "").strip()
-    elif 9 <= tc <= 18:
-        alt = mv(8, 20)
-        if alt & 0x10:
-            pl["alt_ft"] = ((alt >> 5) << 4 | (alt & 0xF)) * 25 - 1000
-        odd = me[21]
-        pl["odd" if odd else "even"] = (mv(22, 39), mv(39, 56))
-        pl["odd_last"] = bool(odd)
-    elif tc == 19 and mv(5, 8) in (1, 2):
-        ew = (mv(14, 24) - 1) * (-1 if me[13] else 1)
-        ns = (mv(25, 35) - 1) * (-1 if me[24] else 1)
-        pl["speed_kt"] = math.hypot(ew, ns)
-        pl["heading"] = round(math.degrees(math.atan2(ew, ns)) % 360)
+    n = tr.messages
+    n_pl = "1 aereo" if len(tr.planes) == 1 else f"{len(tr.planes)} aerei"
+    return {"protocol": "ADS-B", "kind": f"ADS-B (aerei, 1090 MHz): {n_pl}, {n} messaggi decodificati", "lines": lines}
 
 
 # --- onde corte: Morse e RTTY -----------------------------------------------------------

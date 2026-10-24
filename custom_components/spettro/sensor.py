@@ -20,6 +20,8 @@ from .scanner import SpectrumScanner
 @dataclass(frozen=True, kw_only=True)
 class SpettroSensorDescription(SensorEntityDescription):
     value_fn: Callable[[dict[str, Any]], Any]
+    source_kind: str = "spectrum"  # quale tipo di messaggio aggiorna il sensore
+    attrs_fn: Callable[[dict[str, Any]], dict[str, Any]] | None = None
 
 
 SENSORS = (
@@ -47,7 +49,35 @@ SENSORS = (
         state_class=SensorStateClass.MEASUREMENT,
         value_fn=lambda p: len(p["peaks"]),
     ),
+    SpettroSensorDescription(
+        key="aircraft_count",
+        translation_key="aircraft_count",
+        icon="mdi:airplane",
+        state_class=SensorStateClass.MEASUREMENT,
+        source_kind="adsb",
+        value_fn=lambda p: p.get("count", 0),
+    ),
+    SpettroSensorDescription(
+        key="nearest_aircraft",
+        translation_key="nearest_aircraft",
+        icon="mdi:airplane-marker",
+        native_unit_of_measurement="km",
+        state_class=SensorStateClass.MEASUREMENT,
+        suggested_display_precision=1,
+        source_kind="adsb",
+        value_fn=lambda p: next((a["km"] for a in p.get("aircraft", []) if a.get("km") is not None), None),
+        attrs_fn=lambda p: _nearest_attrs(p),
+    ),
 )
+
+
+def _nearest_attrs(p: dict[str, Any]) -> dict[str, Any]:
+    a = next((a for a in p.get("aircraft", []) if a.get("km") is not None), None)
+    if not a:
+        return {}
+    return {"volo": a.get("call"), "icao": a["icao"], "quota_m": a.get("alt_m"),
+            "velocita_kmh": a.get("speed_kmh"), "direzione_da_casa": a.get("bearing"),
+            "latitudine": a.get("lat"), "longitudine": a.get("lon")}
 
 
 async def async_setup_entry(
@@ -79,12 +109,18 @@ class SpettroSensor(SensorEntity):
 
     @callback
     def _handle(self, payload: dict[str, Any]) -> None:
-        if payload.get("kind") == "spectrum" and payload.get("complete"):
+        kind = self.entity_description.source_kind
+        if kind == "spectrum" and payload.get("kind") == "spectrum" and payload.get("complete"):
+            self._update(payload)
+            self.async_write_ha_state()
+        elif kind == "adsb" and payload.get("kind") == "adsb":
             self._update(payload)
             self.async_write_ha_state()
 
     def _update(self, payload: dict[str, Any]) -> None:
         self._attr_native_value = self.entity_description.value_fn(payload)
+        if self.entity_description.attrs_fn is not None:
+            self._attr_extra_state_attributes = self.entity_description.attrs_fn(payload)
         if self.entity_description.key == "main_peak":
             top = payload["peaks"][:10]
             self._attr_extra_state_attributes = {

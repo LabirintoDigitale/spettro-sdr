@@ -49,6 +49,7 @@ def async_setup(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, ws_set_config)
     websocket_api.async_register_command(hass, ws_scan_now)
     websocket_api.async_register_command(hass, ws_dab_scan)
+    websocket_api.async_register_command(hass, ws_adsb)
     websocket_api.async_register_command(hass, ws_set_enabled)
     websocket_api.async_register_command(hass, ws_analyze)
     websocket_api.async_register_command(hass, ws_ask_ai)
@@ -163,6 +164,27 @@ async def ws_dab_scan(hass: HomeAssistant, connection: websocket_api.ActiveConne
         connection.send_error(msg["id"], "dab_scan_failed", str(err))
         return
     connection.send_result(msg["id"], {})
+
+
+@websocket_api.websocket_command({
+    vol.Required("type"): "spettro/adsb",
+    vol.Optional("action", default="start"): vol.In(["start", "stop"]),
+    vol.Optional("continuous", default=False): bool,
+})
+@websocket_api.async_response
+async def ws_adsb(hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]) -> None:
+    """Avvia o ferma il ricevitore aerei ADS-B (1090 MHz)."""
+    _entry, scanner = _scanner(hass, connection, msg)
+    if scanner is None:
+        return
+    try:
+        if msg["action"] == "stop":
+            await scanner.adsb_stop()
+            connection.send_result(msg["id"], {})
+        else:
+            connection.send_result(msg["id"], await scanner.adsb_start(msg["continuous"]))
+    except RuntimeError as err:
+        connection.send_error(msg["id"], "adsb_failed", str(err))
 
 
 @websocket_api.websocket_command({vol.Required("type"): "spettro/scan_now"})
