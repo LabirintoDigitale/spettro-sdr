@@ -1,7 +1,7 @@
 // Pannello "Spettro" per Home Assistant: grafico dello spettro, waterfall e picchi.
 
 // deve coincidere con VERSION in const.py: se il backend ne riporta un'altra manca un riavvio
-const PANEL_VERSION = "1.21.0";
+const PANEL_VERSION = "1.21.1";
 
 const PRESETS = [
   ["Personalizzato", null, null],
@@ -554,6 +554,7 @@ class SpettroPanel extends HTMLElement {
           <div class="row" style="margin-top:6px;align-items:center">
             <button class="primary" id="adsbbtn">▶ Avvia</button>
             <label class="chk" title="Tiene la chiavetta su 1090 MHz anche quando chiudi il pannello, finché non lo fermi"><input type="checkbox" id="adsbcont"> Resta attivo a pannello chiuso</label>
+            <label class="chk" title="Scarica da internet (adsbdb.com) modello, immatricolazione, compagnia e rotta partenza→arrivo"><input type="checkbox" id="adsbonline"> Dettagli da internet</label>
             <span class="hint" id="adsbstat"></span>
           </div>
           <canvas id="adsbradar" style="display:none;width:100%;max-width:420px;margin:10px auto 0;aspect-ratio:1"></canvas>
@@ -787,12 +788,14 @@ class SpettroPanel extends HTMLElement {
     $("adsbbtn").addEventListener("click", async () => {
       try {
         if (this._adsb) await this._hass.callWS({ type: "spettro/adsb", action: "stop" });
-        else await this._hass.callWS({ type: "spettro/adsb", action: "start", continuous: $("adsbcont").checked });
+        else await this._hass.callWS({ type: "spettro/adsb", action: "start", continuous: $("adsbcont").checked, online: $("adsbonline").checked });
       } catch (err) { this._msg(err.message || String(err), true); }
     });
-    $("adsbcont").addEventListener("change", async (e) => {
-      if (this._adsb) try { await this._hass.callWS({ type: "spettro/adsb", action: "start", continuous: e.target.checked }); } catch (err) { this._msg(err.message || String(err), true); }
-    });
+    const adsbOpts = async () => {
+      if (this._adsb) try { await this._hass.callWS({ type: "spettro/adsb", action: "start", continuous: $("adsbcont").checked, online: $("adsbonline").checked }); } catch (err) { this._msg(err.message || String(err), true); }
+    };
+    $("adsbcont").addEventListener("change", adsbOpts);
+    $("adsbonline").addEventListener("change", adsbOpts);
     $("isssstv").addEventListener("change", (e) => meteoCfg({ iss_sstv: e.target.checked }));
     $("imglisten").addEventListener("click", () => {
       const [name, mhz, mode, dec, bw] = IMG_PRESETS[+$("imgpreset").value];
@@ -1558,7 +1561,7 @@ class SpettroPanel extends HTMLElement {
     const running = !!m;
     $("adsbbtn").textContent = running ? "■ Ferma" : "▶ Avvia";
     $("adsbbtn").classList.toggle("primary", !running);
-    if (m) $("adsbcont").checked = !!m.continuous;
+    if (m) { $("adsbcont").checked = !!m.continuous; $("adsbonline").checked = !!m.online; }
     $("adsbstat").textContent = running
       ? `${m.count} aere${m.count === 1 ? "o" : "i"} in vista · ${m.messages} messaggi ricevuti`
       : "Fermo.";
@@ -1571,14 +1574,19 @@ class SpettroPanel extends HTMLElement {
     if (!ac.length) { list.innerHTML = `<div class="hint" style="margin-top:8px">In ascolto… gli aerei compaiono quando passano in portata (quota alta = più lontano si sente). Serve un'antenna sui 1090 MHz.</div>`; return; }
     const dir = (b) => b == null ? "" : ["N", "NE", "E", "SE", "S", "SO", "O", "NO"][Math.round(b / 45) % 8];
     list.innerHTML = `<table class="digitab" style="margin-top:8px"><thead><tr>
-        <th>Volo</th><th class="num">Quota</th><th class="num">Velocità</th><th class="num">Distanza</th><th>Direz.</th></tr></thead>
-      <tbody>${ac.map((a) => `<tr>
-        <td><b>${esc(a.call || "—")}</b><span class="hint"> ${a.icao}</span></td>
+        <th>Volo / compagnia</th><th class="num">Quota</th><th class="num">Velocità</th><th class="num">Distanza</th><th>Direz.</th></tr></thead>
+      <tbody>${ac.map((a) => { const ap = (x) => x ? `${esc(x.city || x.name || x.iata || "?")}${x.iata ? ` (${esc(x.iata)})` : ""}` : "?";
+        const route = a.route && (a.route.origin || a.route.destination) ? `${ap(a.route.origin)} → ${ap(a.route.destination)}` : null;
+        const model = a.type || [a.manufacturer, a.icao_type].filter(Boolean).join(" ") || null;
+        return `<tr${a.emergency ? ' style="color:#e53935;font-weight:600"' : ""}>
+        <td><b>${esc(a.call || a.icao)}</b>${a.airline || a.owner ? `<br><span class="hint">${esc(a.airline || a.owner)}${a.flight ? ` · volo ${esc(a.flight)}` : ""}</span>` : ""}
+          <span class="hint"> ${a.icao}${a.registration ? ` · ${esc(a.registration)}` : ""}${a.country ? ` · ${esc(a.country)}` : ""}${model ? ` · ${esc(model)}` : (a.category ? ` · ${esc(a.category)}` : "")}${a.emergency ? ` · ⚠ EMERGENZA ${esc(a.emergency)}` : ""}</span>
+          ${route ? `<br><span class="hint">🛫 ${route}</span>` : ""}</td>
         <td class="num">${a.alt_m != null ? `${a.alt_m.toLocaleString("it-IT")} m` : "—"}</td>
         <td class="num">${a.speed_kmh != null ? `${a.speed_kmh} km/h` : "—"}</td>
         <td class="num">${a.km != null ? `${a.km.toLocaleString("it-IT")} km` : "—"}</td>
-        <td>${a.bearing != null ? `${dir(a.bearing)} ${a.bearing}°` : "—"}</td></tr>`).join("")}</tbody></table>
-      <div class="hint" style="margin-top:4px">La posizione c'è solo per gli aerei che la trasmettono (quasi tutti i voli di linea). Il radar è centrato su di te, nord in alto.</div>`;
+        <td>${a.bearing != null ? `${dir(a.bearing)} ${a.bearing}°` : "—"}</td></tr>`; }).join("")}</tbody></table>
+      <div class="hint" style="margin-top:4px">Compagnia, paese e categoria sono ricavati senza internet. Con «Dettagli da internet» si aggiungono modello, immatricolazione e rotta (adsbdb.com). La posizione c'è solo per gli aerei che la trasmettono. Radar centrato su di te, nord in alto.</div>`;
   }
 
   _drawAdsbRadar(ac, home) {

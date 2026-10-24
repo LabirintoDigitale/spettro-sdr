@@ -239,6 +239,8 @@ Gli aerei trasmettono in chiaro la loro posizione sui 1090 MHz (ADS-B), e si ric
 - un **radar** centrato su di te (nord in alto) con ogni aereo alla sua direzione e distanza, colorato per quota (basso rosso → alto blu) e con una freccia per la rotta;
 - una **tabella** con volo, quota, velocità, distanza e direzione da casa.
 
+Per ogni aereo, **senza internet**, si ricavano anche la **compagnia** (dalle prime 3 lettere della sigla del volo), il **numero del volo**, il **paese di immatricolazione** (dal codice ICAO dell'aereo), la **categoria** (leggero, pesante, elicottero…) ed eventuali **emergenze** dichiarate. Con l'opzione **Dettagli da internet** (spenta di default) si aggiungono **modello esatto, immatricolazione, operatore e rotta partenza → arrivo**, scaricati da adsbdb.com (API pubblica e gratuita, senza chiave; serve che Home Assistant possa uscire su internet).
+
 Un aereo sparisce dopo un minuto che non si sente. La posizione viene calcolata da un solo messaggio usando la posizione della stazione (da Home Assistant). Con l'opzione **Resta attivo a pannello chiuso** la chiavetta resta su 1090 MHz finché non premi **■ Ferma**; altrimenti si ferma da sola poco dopo aver chiuso il pannello. Due **sensori** — *Aerei in vista* e *Aereo più vicino* (con volo, quota e distanza negli attributi) — si possono usare in dashboard e automazioni. Il decoder (preambolo a impulsi, 112 bit, CRC a 24 bit, posizione CPR) è lo stesso usato nelle analisi.
 
 ## Modi digitali: FT8 e WSPR

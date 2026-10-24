@@ -170,6 +170,7 @@ async def ws_dab_scan(hass: HomeAssistant, connection: websocket_api.ActiveConne
     vol.Required("type"): "spettro/adsb",
     vol.Optional("action", default="start"): vol.In(["start", "stop"]),
     vol.Optional("continuous", default=False): bool,
+    vol.Optional("online", default=False): bool,
 })
 @websocket_api.async_response
 async def ws_adsb(hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]) -> None:
@@ -182,7 +183,7 @@ async def ws_adsb(hass: HomeAssistant, connection: websocket_api.ActiveConnectio
             await scanner.adsb_stop()
             connection.send_result(msg["id"], {})
         else:
-            connection.send_result(msg["id"], await scanner.adsb_start(msg["continuous"]))
+            connection.send_result(msg["id"], await scanner.adsb_start(msg["continuous"], msg["online"]))
     except RuntimeError as err:
         connection.send_error(msg["id"], "adsb_failed", str(err))
 

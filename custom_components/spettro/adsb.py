@@ -17,6 +17,8 @@ from typing import Any
 
 import numpy as np
 
+from . import adsb_db
+
 RATE = 2_400_000  # campionamento del ricevitore ADS-B in diretta (≥ 2 MS/s)
 FREQ = 1_090_000_000.0
 _CHARS = "#ABCDEFGHIJKLMNOPQRSTUVWXYZ##### ###############0123456789######"
@@ -190,6 +192,7 @@ class AircraftTracker:
             call = "".join(_CHARS[mv(8 + 6 * i, 14 + 6 * i)] for i in range(8)).replace("#", "").strip()
             if call:
                 pl["call"] = call
+            pl["cat"] = (tc, mv(5, 8))  # categoria (leggero, pesante, elicottero…)
         elif 5 <= tc <= 18:  # posizione (superficie 5-8, in volo 9-18)
             if 9 <= tc <= 18:
                 alt = _alt_ft(me)
@@ -215,6 +218,9 @@ class AircraftTracker:
             vr = mv(37, 46)
             if vr:
                 pl["vrate_fpm"] = (vr - 1) * 64 * (-1 if me[36] else 1)
+        elif tc == 28 and mv(5, 8) == 1:  # stato dell'aereo: emergenza dichiarata
+            em = mv(8, 11)
+            pl["emergency"] = em if em else None
 
     def prune(self, max_age_s: float, now: float | None = None) -> int:
         now = time.time() if now is None else now
@@ -238,6 +244,14 @@ class AircraftTracker:
                 a["track"] = p.get("track")
             if "vrate_fpm" in p:
                 a["vrate_fpm"] = p["vrate_fpm"]
+            a["country"] = adsb_db.country(p["icao"])
+            name, flight = adsb_db.airline(p.get("call"))
+            a["airline"], a["flight"] = name, flight
+            if "cat" in p:
+                a["category"] = adsb_db.category(*p["cat"])
+            if p.get("emergency"):
+                a["emergency"] = ("generica", "medica", "carburante", "interferenza illecita",
+                                  "nessuna comunicazione", "aereo in difficoltà")[min(p["emergency"] - 1, 5)]
             if "lat" in p:
                 a["lat"], a["lon"] = round(p["lat"], 5), round(p["lon"], 5)
                 if self.home is not None:

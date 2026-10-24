@@ -49,6 +49,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: SpettroConfigEntry) -> b
     await scanner.favorites.async_load()
     await scanner.prune_archive()
     await _setup_meteo(hass, scanner)
+
+    _session = async_get_clientsession(hass)
+
+    async def _http_get(url: str) -> str:
+        async with _session.get(url, timeout=15) as resp:
+            resp.raise_for_status()
+            return await resp.text()
+
+    scanner.http_get = _http_get  # dettagli online degli aerei (ADS-B), se l'utente li attiva
     scanner.status["version"] = VERSION
     entry.runtime_data = scanner
     hass.data[DOMAIN] = entry

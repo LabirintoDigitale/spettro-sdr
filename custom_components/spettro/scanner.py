@@ -24,6 +24,7 @@ from typing import Any
 import numpy as np
 
 from . import adsb as adsb_mod
+from . import adsb_online
 from . import dab, dvbt, rds, satellite, slots, textdec, verify, weather
 from .analysis import encode_png
 from .fax import FaxDecoder
@@ -323,6 +324,9 @@ class SpectrumScanner:
         self._dab_task: asyncio.Task | None = None
         self._adsb_task: asyncio.Task | None = None
         self.adsb_tracker: adsb_mod.AircraftTracker | None = None  # aerei visti nella sessione in corso
+        self.http_get: Callable[[str], Any] | None = None  # richieste HTTP (per i dettagli online degli aerei)
+        self._adsb_ac: dict[str, dict[str, Any]] = {}  # dettagli online per codice ICAO (anche {} = cercato, assente)
+        self._adsb_route: dict[str, dict[str, Any]] = {}  # rotte online per sigla del volo
         self._active = asyncio.Event()
         self._sweep_id = 0
         self.last_spectrum: dict[str, Any] | None = None
@@ -1007,20 +1011,24 @@ class SpectrumScanner:
 
     # --- ricevitore aerei ADS-B (1090 MHz) --------------------------------------
 
-    async def adsb_start(self, continuous: bool = False) -> dict[str, Any]:
+    async def adsb_start(self, continuous: bool = False, online: bool = False) -> dict[str, Any]:
         """Tiene la chiavetta su 1090 MHz e raccoglie gli aerei (scansione sospesa).
 
         continuous=True: resta sintonizzato anche a pannello chiuso (finché non lo fermi).
+        online=True: scarica da internet modello, immatricolazione e rotta (adsbdb.com).
         """
         if self.analyzing or self._dab_task is not None:
             raise RuntimeError("C'è un'altra operazione in corso, riprova tra poco")
+        if online and self.http_get is None:
+            online = False
         await self.live_stop()
         if self._adsb_task is not None:
-            self.status["adsb"]["continuous"] = continuous  # già attivo: cambio solo l'opzione
+            self.status["adsb"]["continuous"] = continuous  # già attivo: cambio solo le opzioni
+            self.status["adsb"]["online"] = online and self.http_get is not None
             self._emit(dict(self.status))
             return self.status["adsb"]
         self.adsb_tracker = adsb_mod.AircraftTracker(self.meteo.location if self.meteo else None)
-        self.status["adsb"] = {"continuous": continuous, "aircraft": [], "count": 0, "messages": 0,
+        self.status["adsb"] = {"continuous": continuous, "online": online, "aircraft": [], "count": 0, "messages": 0,
                                "home": list(self.meteo.location) if self.meteo else None}
         self._adsb_task = asyncio.get_running_loop().create_task(self._adsb_run(), name="spettro_adsb")
         self._update_active()  # ora la scansione vede il task e si ferma
@@ -1068,6 +1076,8 @@ class SpectrumScanner:
                         if loop.time() - last_emit >= ADSB_EMIT_S:
                             last_emit = loop.time()
                             ac = tracker.aircraft()
+                            if self.status["adsb"]["online"]:
+                                self._adsb_enrich(ac)
                             self.status["adsb"].update(aircraft=ac, count=len(ac), messages=tracker.messages)
                             self._emit({"kind": "adsb", **self.status["adsb"]})
                         # a pannello chiuso: se non è "continuo", ci si ferma dopo un po'
@@ -1097,6 +1107,41 @@ class SpectrumScanner:
             self.adsb_tracker = None
             self._update_active()
             self._emit({"kind": "adsb", "done": True})
+
+    def _adsb_enrich(self, aircraft: list[dict[str, Any]]) -> None:
+        """Unisce agli aerei i dettagli online già in cache, e avvia la ricerca di quelli nuovi."""
+        loop = asyncio.get_running_loop()
+        for a in aircraft:
+            info = self._adsb_ac.get(a["icao"])
+            if info:
+                a.update({k: v for k, v in info.items() if v})
+            elif info is None and self.http_get is not None:
+                self._adsb_ac[a["icao"]] = {}  # segnaposto: non richiederlo di nuovo mentre arriva
+                loop.create_task(self._adsb_fetch_ac(a["icao"]))
+            route = self._adsb_route.get(a.get("call") or "")
+            if route:
+                a["route"] = route
+            elif a.get("call") and a["call"] not in self._adsb_route and self.http_get is not None:
+                self._adsb_route[a["call"]] = {}
+                loop.create_task(self._adsb_fetch_route(a["call"]))
+
+    async def _adsb_fetch_ac(self, icao: str) -> None:
+        if self.http_get is None:
+            return
+        info = await adsb_online.aircraft_info(self.http_get, icao)
+        if info is None:
+            self._adsb_ac.pop(icao, None)  # errore di rete: si riproverà
+        else:
+            self._adsb_ac[icao] = info
+
+    async def _adsb_fetch_route(self, callsign: str) -> None:
+        if self.http_get is None:
+            return
+        route = await adsb_online.route_info(self.http_get, callsign)
+        if route is None:
+            self._adsb_route.pop(callsign, None)
+        else:
+            self._adsb_route[callsign] = route
 
     def _sat_transponder(self, if_mhz: float) -> dict[str, Any]:
         """Transponder riconosciuto nell'ultima scansione più vicino alla frequenza (sul cavo), se c'è."""
