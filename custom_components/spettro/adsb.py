@@ -123,35 +123,65 @@ def decode_frames(iq: np.ndarray, rate: int, offset_hz: float = 0.0, carry_us: f
     end = len(m) - int(121 * us)
     if end <= 0:
         return []
-    hi = np.min(np.stack([m[k: k + end] for k in p]), axis=0)
-    lo = np.mean(np.stack([m[k: k + end] for k in q]), axis=0)
+    # correlazione del preambolo senza impilare array (meno memoria/CPU: conta sui computer deboli)
+    hi = m[p[0]: p[0] + end].copy()
+    for k in p[1:]:
+        np.minimum(hi, m[k: k + end], out=hi)
+    lo = m[q[0]: q[0] + end].astype(np.float64)
+    for k in q[1:]:
+        lo += m[k: k + end]
+    lo /= len(q)
     noise = float(np.median(m)) + 1e-9
     cand = np.nonzero((hi > 1.8 * lo) & (hi > 3 * noise))[0]
     h = 0.5 * us
     nchip = 224
     base = float(np.median(m))
+    bit_c = np.arange(112) * us  # inizio di ogni bit rispetto a t0
+    fast = rate >= 2_300_000  # con pochi campioni per bit la decisione dura non è affidabile: solo ricostruzione
     out: list[list[int]] = []
     last = -1000
+
+    def refine(t0: float) -> list[int] | None:
+        """Ricostruzione ai minimi quadrati dei 224 mezzi bit, con correzione di 1-2 bit."""
+        n0, n1 = int(t0), int(t0 + nchip * h) + 1
+        if n1 >= len(m):
+            return None
+        amp = float(np.mean([m[c + k] for k in p])) - base
+        if amp <= 0:
+            return None
+        edges = t0 + np.arange(nchip + 1) * h
+        rows = np.arange(n0, n1)
+        w = np.clip(np.minimum(rows[:, None] + 1, edges[1:][None, :]) - np.maximum(rows[:, None], edges[:-1][None, :]), 0, None)
+        chips = np.linalg.solve(w.T @ w + 0.05 * np.eye(nchip), w.T @ ((m[n0:n1] - base) / amp))
+        soft = chips[0::2] - chips[1::2]
+        return _fix((soft > 0).astype(int).tolist(), np.abs(soft))
+
     for c in cand:
         if c - last < int(100 * us):
             continue
-        amp = float(np.mean([m[c + k] for k in p])) - base
-        for shift in (0.0, -0.25, 0.25):
+        bits = None
+        for shift in (0.0, -0.2, 0.2):
             t0 = c + shift + 8 * us
-            n0, n1 = int(t0), int(t0 + nchip * h) + 1
-            if n1 >= len(m) or amp <= 0:
+            if int(t0 + 112 * us) + 1 >= len(m):
                 break
-            edges = t0 + np.arange(nchip + 1) * h
-            rows = np.arange(n0, n1)
-            w = np.clip(np.minimum(rows[:, None] + 1, edges[1:][None, :]) - np.maximum(rows[:, None], edges[:-1][None, :]), 0, None)
-            y = (m[n0:n1] - base) / amp
-            chips = np.linalg.solve(w.T @ w + 0.05 * np.eye(nchip), w.T @ y)
-            soft = chips[0::2] - chips[1::2]
-            bits = _fix((soft > 0).astype(int).tolist(), np.abs(soft))
+            if fast:
+                # filtro veloce: decisione dura ai centri dei mezzi bit; la parte pesante
+                # (ricostruzione) parte solo se il tipo (DF) è giusto ma il CRC no
+                a = m[(t0 + bit_c + 0.25 * us).astype(np.int64)]
+                b = m[(t0 + bit_c + 0.75 * us).astype(np.int64)]
+                hard = (a > b).astype(np.int64)
+                if (hard[0] << 4 | hard[1] << 3 | hard[2] << 2 | hard[3] << 1 | hard[4]) not in (17, 18):
+                    continue
+                hl = hard.tolist()
+                if _crc24(hl) == 0:
+                    bits = hl
+                    break
+            bits = refine(t0)
             if bits is not None:
-                out.append(bits)
-                last = c
                 break
+        if bits is not None:
+            out.append(bits)
+            last = c
     return out
 
 

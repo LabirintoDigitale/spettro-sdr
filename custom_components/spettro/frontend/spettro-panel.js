@@ -1,7 +1,7 @@
 // Pannello "Spettro" per Home Assistant: grafico dello spettro, waterfall e picchi.
 
 // deve coincidere con VERSION in const.py: se il backend ne riporta un'altra manca un riavvio
-const PANEL_VERSION = "1.22.1";
+const PANEL_VERSION = "1.22.2";
 
 const PRESETS = [
   ["Personalizzato", null, null],
@@ -1614,20 +1614,24 @@ class SpettroPanel extends HTMLElement {
   _updateAdsbTrails(ac) {
     const now = Date.now();
     const tr = (this._adsbTrails = this._adsbTrails || {});
+    const present = new Set();
     for (const a of ac) {
       if (a.km == null || a.bearing == null) continue;
+      present.add(a.icao);
       const t = (tr[a.icao] = tr[a.icao] || []);
       const last = t[t.length - 1];
-      // nuovo punto solo se l'aereo si è spostato un po' (evita di accumulare punti fermi)
-      if (!last || Math.abs(last.km - a.km) > 0.3 || Math.abs(((last.bearing - a.bearing + 540) % 360) - 180) > 0.5) {
+      // un nuovo punto se si è spostato un po', oppure almeno uno ogni ~1,5 s (così la scia resta viva
+      // anche per gli aerei che si allontanano in linea retta)
+      const moved = !last || Math.abs(last.km - a.km) > 0.15 || Math.abs(((last.bearing - a.bearing + 540) % 360) - 180) > 0.25;
+      if (!last || moved || now - last.t > 1500) {
         t.push({ km: a.km, bearing: a.bearing, alt: a.alt_m || 0, t: now });
-        if (t.length > 120) t.shift();
+        if (t.length > 200) t.shift();  // tenuti per numero, non per tempo: non svanisce mentre l'aereo è in vista
       }
     }
-    // scie vecchie (aereo uscito dalla portata) si cancellano dopo un po'
+    // la scia di un aereo resta finché è in vista e per un po' dopo che è sparito, poi si cancella
     for (const icao of Object.keys(tr)) {
-      tr[icao] = tr[icao].filter((p) => now - p.t < 90000);
-      if (!tr[icao].length) delete tr[icao];
+      const seen = tr[icao].length ? tr[icao][tr[icao].length - 1].t : 0;
+      if (!present.has(icao) && now - seen > 30000) delete tr[icao];
     }
   }
 
