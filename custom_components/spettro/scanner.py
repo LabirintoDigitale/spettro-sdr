@@ -293,6 +293,7 @@ class SpectrumScanner:
         self._meteo_task: asyncio.Task | None = None
         self._meteo_loop_task: asyncio.Task | None = None
         self._meteo_done: set[tuple[int, float]] = set()  # passaggi già ricevuti (norad, aos)
+        self.meteo_log: deque[dict[str, Any]] = deque(maxlen=15)  # ultime ricezioni dei satelliti
         self._radio = asyncio.Lock()  # una sola connessione rtl_tcp alla volta
         self._direct: dict[int, int] = {}  # direct sampling attivo per connessione
         self._rate = 2_048_000  # sample rate della connessione in corso
@@ -361,6 +362,8 @@ class SpectrumScanner:
             out.append(self.meteo.snapshot())
         if self.meteo_rx:
             out.append({"kind": "meteo_live", **self.meteo_rx})
+        if self.meteo_log:
+            out.append({"kind": "meteo_log", "log": list(self.meteo_log)})
         live = self.status["live"]
         if live and live.get("mode") == "dab" and (self.last_slide or self.last_dab):
             # un pannello aperto a diretta già avviata riceve subito nome, testo e immagine
@@ -625,7 +628,7 @@ class SpectrumScanner:
 
     async def live_start(self, freq_hz: float, mode: str | None = None, sid: str | None = None,
                          decoder: str | None = None, until: datetime | None = None,
-                         title: str | None = None) -> dict[str, Any]:
+                         title: str | None = None, auto: bool = False) -> dict[str, Any]:
         """Sintonizza la chiavetta fissa su freq_hz (scansione sospesa) e demodula di continuo.
 
         mode "dab" con sid: una radio DAB+ del multiplex (freq_hz = centro del canale).
@@ -656,7 +659,7 @@ class SpectrumScanner:
         self._update_active()  # la scansione si ferma al passo successivo e libera la chiavetta
         run = (self._live_dab_run(freq_hz, sid) if mode == "dab"
                else self._live_tv_run(freq_hz, mode == "sat") if mode in ("tv", "sat")
-               else self._live_run(freq_hz, mode, decoder, until, title))
+               else self._live_run(freq_hz, mode, decoder, until, title, auto))
         self._live_task = asyncio.get_running_loop().create_task(run, name="spettro_live")
         if self.viewers <= 0 and not decoder:
             self._schedule_live_stop()
@@ -688,9 +691,10 @@ class SpectrumScanner:
         self._live_stop_handle = asyncio.get_running_loop().call_later(LIVE_NO_VIEWER_STOP_S, check)
 
     async def _live_run(self, freq_hz: float, mode: str, decoder: str | None = None,
-                        until: datetime | None = None, title: str | None = None) -> None:
+                        until: datetime | None = None, title: str | None = None, auto: bool = False) -> None:
         loop = asyncio.get_running_loop()
         img = _ImageListener(decoder, freq_hz, title) if decoder else None
+        log = self._log_start("ISS", "iss", auto) if title == "ISS" else None
         center = float(round(freq_hz + LIVE_RATE / 8))
         discard = RCV_BUF + 2 * READ_LIMIT + int(LIVE_RATE * 2 * max(self.settings.settle_ms, 100) / 1000)
         discard -= discard % 2
@@ -747,6 +751,10 @@ class SpectrumScanner:
         finally:
             if rds_task is not None:
                 rds_task.cancel()
+            if log is not None and img is not None:
+                self._log_end(log, ("1 immagine SSTV salvata" if img.saved == 1 else f"{img.saved} immagini SSTV salvate")
+                              if img.saved
+                              else "nessuna immagine (la ISS non trasmetteva SSTV)")
             if asyncio.current_task() is self._live_task:
                 self._live_task = None
             self.status["live"] = None
@@ -928,7 +936,7 @@ class SpectrumScanner:
                             continue
                         if p["aos"] - timedelta(seconds=30) <= now < p["los"] - timedelta(seconds=90):
                             self._meteo_done.add(key)
-                            self._meteo_start(p)
+                            self._meteo_start({**p, "auto": True})
                             break
                 if self.settings.iss_sstv and self._meteo_task is None and not self.status["live"]:
                     now = datetime.now(UTC)
@@ -937,13 +945,25 @@ class SpectrumScanner:
                         if p.get("kind") == "iss" and key not in self._meteo_done and p["aos"] <= now < p["los"]:
                             self._meteo_done.add(key)
                             await self.live_start(weather.ISS_FREQ, "nfm", decoder="sstv", until=p["los"],
-                                                  title="ISS")
+                                                  title="ISS", auto=True)
                             break
             except asyncio.CancelledError:
                 raise
             except Exception:  # noqa: BLE001 - il ciclo non deve morire per un errore
                 _LOGGER.exception("Errore nella gestione dei satelliti meteo")
             await asyncio.sleep(15)
+
+    def _log_start(self, satellite: str, kind: str, auto: bool) -> dict[str, Any]:
+        """Nuova riga del registro delle ricezioni dei satelliti (Meteor e ISS)."""
+        entry = {"start": time.time(), "end": None, "satellite": satellite, "kind": kind, "auto": auto,
+                 "result": "in corso"}
+        self.meteo_log.appendleft(entry)
+        self._emit({"kind": "meteo_log", "log": list(self.meteo_log)})
+        return entry
+
+    def _log_end(self, entry: dict[str, Any], result: str) -> None:
+        entry.update(end=time.time(), result=result)
+        self._emit({"kind": "meteo_log", "log": list(self.meteo_log)})
 
     def meteo_pass_now(self, norad: int | None = None) -> dict[str, Any] | None:
         """Passaggio in corso (o che inizia entro 3 minuti), anche sotto l'elevazione minima."""
@@ -999,6 +1019,8 @@ class SpectrumScanner:
         discard = RCV_BUF + 2 * READ_LIMIT + int(rate * 2 * max(self.settings.settle_ms, 100) / 1000)
         discard -= discard % 2
         rx: weather.MeteorReceiver | None = None
+        log = self._log_start(p["satellite"], "meteor", bool(p.get("auto")))
+        saved_rows = 0
         try:
             async with self._radio:
                 reader, writer, tuner = await _open(self.host, self.port)
@@ -1055,20 +1077,24 @@ class SpectrumScanner:
         finally:
             try:
                 if rx is not None and rx.decoder.strips:
-                    await asyncio.shield(self._meteo_save_image(rx, p))
+                    saved_rows = await asyncio.shield(self._meteo_save_image(rx, p))
             finally:
+                st = rx.stats() if rx is not None else {}
+                self._log_end(log, f"foto salvata: {saved_rows} righe ({st.get('vcdu_ok', 0)} trame valide)" if saved_rows
+                              else "segnale agganciato ma nessuna riga d'immagine" if st.get("vcdu_ok")
+                              else "nessun segnale ricevuto (antenna? frequenza?)")
                 if asyncio.current_task() is self._meteo_task:
                     self._meteo_task = None
                 self.meteo_rx = None
                 self._update_active()
                 self._emit({"kind": "meteo_live", "done": True})
 
-    async def _meteo_save_image(self, rx: weather.MeteorReceiver, p: dict[str, Any]) -> None:
+    async def _meteo_save_image(self, rx: weather.MeteorReceiver, p: dict[str, Any]) -> int:
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(None, rx.finish)
         png, ir, name, rows = await loop.run_in_executor(None, rx.images, p["northbound"], 0)
         if not png or rows < 16 or self.meteo_archive is None:
-            return
+            return 0
         st = rx.stats()
         meta = {"timestamp": time.time(), "norad": p["norad"], "satellite": p["satellite"], "max_el": p["max_el"],
                 "aos": p["aos"].timestamp(), "los": p["los"].timestamp(), "northbound": p["northbound"],
@@ -1078,6 +1104,7 @@ class SpectrumScanner:
         self.last_meteo_png = png
         self._emit({"kind": "meteo_image", "entry": entry})
         await self.prune_meteo()
+        return rows
 
     async def prune_meteo(self) -> None:
         if self.meteo_archive is not None:
@@ -1120,6 +1147,7 @@ class SpectrumScanner:
                 "freq_mhz": f_mhz, "source": img.kind, "complete": bool(ev.get("complete")),
                 "aos": None, "los": None, "northbound": False, "vcdu_ok": None, "vcdu_bad": None}
         entry = await loop.run_in_executor(None, self.meteo_archive.add, meta, png, None)
+        img.saved += 1
         self.last_meteo_png = png
         self._emit({"kind": "meteo_image", "entry": entry})
         return entry
@@ -1387,6 +1415,7 @@ class _ImageListener:
         self.dec: SstvDecoder | FaxDecoder = SstvDecoder() if kind == "sstv" else FaxDecoder()
         self.last_preview = 0.0
         self.mode_name: str | None = None
+        self.saved = 0  # immagini salvate durante questo ascolto
 
     def feed(self, pcm: bytes) -> list[dict[str, Any]]:
         return self.dec.feed(self.tracker.feed(pcm))

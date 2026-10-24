@@ -1,7 +1,7 @@
 // Pannello "Spettro" per Home Assistant: grafico dello spettro, waterfall e picchi.
 
 // deve coincidere con VERSION in const.py: se il backend ne riporta un'altra manca un riavvio
-const PANEL_VERSION = "1.16.0";
+const PANEL_VERSION = "1.16.1";
 
 const PRESETS = [
   ["Personalizzato", null, null],
@@ -273,6 +273,7 @@ class SpettroPanel extends HTMLElement {
     if (m.kind === "live_image") { this._onLiveImage(m); return; }
     if (m.kind === "meteo_passes") { this._meteoPasses = m; this._renderMeteoPasses(); return; }
     if (m.kind === "meteo_live") { this._onMeteoLive(m); return; }
+    if (m.kind === "meteo_log") { this._meteoLog = m.log; this._renderMeteoLog(); return; }
     if (m.kind === "meteo_image" || m.kind === "meteo_pruned") { this._loadMeteo(m.entry ? m.entry.id : null); return; }
     if (m.kind === "live_error") { this._msg(`Analisi continua interrotta: ${m.error}`, true); return; }
     if (m.kind === "analysis") {
@@ -488,6 +489,7 @@ class SpettroPanel extends HTMLElement {
             <label style="width:150px">Conserva immagini (giorni)<input id="meteodays" type="number" min="1" max="365" step="1"></label>
           </div>
           <div id="meteopasses" class="hint">Calcolo dei passaggi…</div>
+          <div id="meteolog"></div>
           <h4 class="sub">Stazioni radio con immagini</h4>
           <div class="hint">Trasmettono da terra a orari propri: il radiofax meteo quasi sempre, l'SSTV dei radioamatori quando
             qualcuno trasmette. ▶ Ascolta resta in ascolto (anche a pannello chiuso) e salva ogni immagine che arriva.</div>
@@ -1525,6 +1527,20 @@ class SpettroPanel extends HTMLElement {
         else await this._hass.callWS({ type: "spettro/meteo_receive", norad: p.norad });
       } catch (err) { this._msg(err.message || String(err), true); }
     }));
+  }
+
+  _renderMeteoLog() {
+    // cosa hanno fatto le ricezioni dei satelliti (anche quelle partite da sole mentre non guardavi)
+    const el = this.shadowRoot.getElementById("meteolog");
+    const log = this._meteoLog || [];
+    if (!el) return;
+    if (!log.length) { el.innerHTML = ""; return; }
+    const t = (x) => new Date(x * 1000).toLocaleString([], { weekday: "short", hour: "2-digit", minute: "2-digit" });
+    el.innerHTML = `<div class="hint" style="margin-top:8px">Ultime ricezioni (✋ = avviata a mano):</div>
+      <table><tbody>${log.map((e) => `<tr><td>${t(e.start)}${e.auto ? "" : " ✋"}</td>
+        <td>${esc(e.satellite)}</td>
+        <td class="num">${e.end ? `${Math.max(1, Math.round((e.end - e.start) / 60))} min` : "in corso"}</td>
+        <td>${esc(e.result)}</td></tr>`).join("")}</tbody></table>`;
   }
 
   _onMeteoLive(m) {
