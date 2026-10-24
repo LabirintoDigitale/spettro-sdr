@@ -22,13 +22,36 @@ MODES: dict[str, tuple[float, float, float]] = {
     "am": (32e3, 5e3, 4.5e3),  # banda aerea, onde medie/corte
     "usb": (32e3, 1.5e3, 3e3),  # banda laterale superiore: radioamatori in onde corte, radiofax, SSTV
     "lsb": (32e3, 1.5e3, 3e3),  # banda laterale inferiore (radioamatori sotto i 10 MHz)
+    "cw": (32e3, 250.0, 1.5e3),  # telegrafia: canale stretto, la portante diventa un tono a CW_TONE Hz
 }
-SSB_MODES = ("usb", "lsb")
+SSB_MODES = ("usb", "lsb", "cw")  # modi "a battimento": si filtra la banda e la si porta in audio
+CW_TONE = 700.0
+# larghezza del canale (Hz) predefinita e scelte possibili, come nei ricevitori web
+BANDWIDTHS: dict[str, tuple[float, tuple[float, ...]]] = {
+    "nfm": (15000.0, (6250.0, 12500.0, 15000.0, 25000.0)),
+    "am": (10000.0, (3000.0, 6000.0, 10000.0, 15000.0)),
+    "usb": (2800.0, (1800.0, 2400.0, 2800.0, 3500.0)),
+    "lsb": (2800.0, (1800.0, 2400.0, 2800.0, 3500.0)),
+    "cw": (500.0, (250.0, 500.0, 1000.0)),
+}
+
+
+def ssb_params(mode: str, bw: float | None = None) -> tuple[float, float, float]:
+    """Centro del filtro rispetto alla portante, battimento (BFO) e mezza banda per USB, LSB e CW.
+
+    USB/LSB: la banda audio (da 100 Hz a 100 Hz + banda) sta sopra o sotto la portante; CW: filtro
+    stretto centrato sulla portante, che si sente come un tono a CW_TONE Hz.
+    """
+    bw = bw or BANDWIDTHS[mode][0]
+    if mode == "cw":
+        return 0.0, CW_TONE, bw / 2
+    center = 100.0 + bw / 2
+    return (center, center, bw / 2) if mode == "usb" else (-center, -center, bw / 2)
 
 
 def ssb_shift(mode: str) -> float:
-    """SSB: il canale (0–3 kHz audio) è centrato 1,5 kHz sopra (USB) o sotto (LSB) la portante."""
-    return 1500.0 if mode == "usb" else -1500.0
+    """Centro del canale USB/LSB rispetto alla portante (larghezza predefinita)."""
+    return ssb_params(mode)[0]
 DEEMPHASIS_S = 50e-6  # de-enfasi della FM broadcast in Europa
 
 
@@ -98,9 +121,9 @@ def demodulate(iq: np.ndarray, rate: int, offset_hz: float, mode: str) -> bytes:
     decim = max(1, int(round(rate / target)))
     mid_rate = rate / decim
     if mode in SSB_MODES:
-        shift = ssb_shift(mode)
-        z = _channel(iq, rate, offset_hz + shift, decim, half_bw)
-        x = (z * np.exp(2j * np.pi * shift * np.arange(len(z)) / mid_rate)).real.astype(np.float64)
+        fshift, bfo, half_bw = ssb_params(mode)
+        z = _channel(iq, rate, offset_hz + fshift, decim, half_bw)
+        x = (z * np.exp(2j * np.pi * bfo * np.arange(len(z)) / mid_rate)).real.astype(np.float64)
         return _wav(_to_audio(x, mid_rate, audio_bw, deemph=False))
     z = _channel(iq, rate, offset_hz, decim, half_bw)
     if mode == "am":

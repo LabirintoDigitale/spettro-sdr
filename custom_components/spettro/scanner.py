@@ -22,12 +22,13 @@ from typing import Any
 
 import numpy as np
 
-from . import dab, dvbt, rds, satellite, weather
+from . import dab, dvbt, rds, satellite, textdec, weather
 from .analysis import encode_png
 from .fax import FaxDecoder
 from .sstv import SstvDecoder, ToneTracker
 from .analysis import analyze_iq
 from .dabplus import DabLiveReceiver
+from .demod import BANDWIDTHS
 from .archive import SpikeArchive
 from .live import CHUNK, LIVE_RATE, LiveDemod
 from .orbit import passes as orbit_passes
@@ -72,6 +73,8 @@ MIN_ERROR_RETRY = 10
 LIVE_RDS_WINDOW_S = 6.0  # multiplex tenuto per decodificare l'RDS in diretta
 LIVE_RDS_EVERY_S = 1.0
 LIVE_NO_VIEWER_STOP_S = 30  # senza pannelli aperti l'analisi continua si ferma da sola
+IMAGE_DECODERS = ("sstv", "fax")  # immagini: la ricezione continua anche a pannello chiuso
+TEXT_KEEP = 4000  # caratteri di testo decodificato tenuti nello stato (per chi apre il pannello dopo)
 ANALYSIS_MAX_S = 5  # durata massima di una registrazione per l'analisi
 TV_LIVE_S = 0.4  # campioni di ogni misura del multiplex TV in diretta
 SPIKE_TOL_HZ = 100e3  # due picchi così vicini sono lo stesso segnale
@@ -628,12 +631,13 @@ class SpectrumScanner:
 
     async def live_start(self, freq_hz: float, mode: str | None = None, sid: str | None = None,
                          decoder: str | None = None, until: datetime | None = None,
-                         title: str | None = None, auto: bool = False) -> dict[str, Any]:
+                         title: str | None = None, auto: bool = False, bw: float | None = None) -> dict[str, Any]:
         """Sintonizza la chiavetta fissa su freq_hz (scansione sospesa) e demodula di continuo.
 
         mode "dab" con sid: una radio DAB+ del multiplex (freq_hz = centro del canale).
         decoder "sstv"/"fax": immagini nell'audio, salvate nella galleria; continua anche senza
-        pannelli aperti (fino a `until`, se c'è).
+        pannelli aperti (fino a `until`, se c'è). decoder "cw"/"rtty45"/"rtty50": testo Morse o RTTY.
+        bw: larghezza del canale in Hz (None = quella predefinita del modo).
         """
         if self.analyzing:
             raise RuntimeError("C'è un'analisi in corso, riprova tra qualche secondo")
@@ -641,10 +645,17 @@ class SpectrumScanner:
             raise RuntimeError("Scegli una radio del multiplex")
         await self.live_stop()
         mode = mode or self.live_mode_for(freq_hz)
-        if decoder and mode not in ("nfm", "am", "usb", "lsb"):
+        if decoder in IMAGE_DECODERS and mode not in ("nfm", "am", "usb", "lsb"):
             raise RuntimeError("SSTV e radiofax si decodificano in FM stretta, AM o SSB")
+        if decoder in textdec.DECODERS and mode not in ("usb", "lsb", "cw"):
+            raise RuntimeError("Morse e RTTY si decodificano in CW o SSB (USB/LSB)")
+        if bw is not None and mode in BANDWIDTHS:
+            bw = min(BANDWIDTHS[mode][1], key=lambda b: abs(b - bw))
+        else:
+            bw = None
         self.status["live"] = {"freq_mhz": round(freq_hz / 1e6, 4), "mode": mode, "sid": sid, "decoder": decoder,
-                               "until": until.timestamp() if until else None, "title": title}
+                               "until": until.timestamp() if until else None, "title": title,
+                               "bw": bw or (BANDWIDTHS[mode][0] if mode in BANDWIDTHS else None), "text": ""}
         if mode == "dab":
             ch = dab.channel_for(freq_hz / 1e6)
             self.status["live"]["channel"] = ch[0] if ch else None
@@ -659,9 +670,9 @@ class SpectrumScanner:
         self._update_active()  # la scansione si ferma al passo successivo e libera la chiavetta
         run = (self._live_dab_run(freq_hz, sid) if mode == "dab"
                else self._live_tv_run(freq_hz, mode == "sat") if mode in ("tv", "sat")
-               else self._live_run(freq_hz, mode, decoder, until, title, auto))
+               else self._live_run(freq_hz, mode, decoder, until, title, auto, bw))
         self._live_task = asyncio.get_running_loop().create_task(run, name="spettro_live")
-        if self.viewers <= 0 and not decoder:
+        if self.viewers <= 0 and decoder not in IMAGE_DECODERS:
             self._schedule_live_stop()
         return self.status["live"]
 
@@ -684,16 +695,18 @@ class SpectrumScanner:
         def check() -> None:
             self._live_stop_handle = None
             live = self.status["live"] or {}
-            if self.viewers <= 0 and self._live_task is not None and not live.get("decoder"):
+            if self.viewers <= 0 and self._live_task is not None and live.get("decoder") not in IMAGE_DECODERS:
                 _LOGGER.info("Nessun pannello aperto: analisi continua fermata")
                 asyncio.get_running_loop().create_task(self.live_stop())
 
         self._live_stop_handle = asyncio.get_running_loop().call_later(LIVE_NO_VIEWER_STOP_S, check)
 
     async def _live_run(self, freq_hz: float, mode: str, decoder: str | None = None,
-                        until: datetime | None = None, title: str | None = None, auto: bool = False) -> None:
+                        until: datetime | None = None, title: str | None = None, auto: bool = False,
+                        bw: float | None = None) -> None:
         loop = asyncio.get_running_loop()
-        img = _ImageListener(decoder, freq_hz, title) if decoder else None
+        img = _ImageListener(decoder, freq_hz, title) if decoder in IMAGE_DECODERS else None
+        text = textdec.DECODERS[decoder]() if decoder in textdec.DECODERS else None
         log = self._log_start("ISS", "iss", auto) if title == "ISS" else None
         center = float(round(freq_hz + LIVE_RATE / 8))
         discard = RCV_BUF + 2 * READ_LIMIT + int(LIVE_RATE * 2 * max(self.settings.settle_ms, 100) / 1000)
@@ -708,17 +721,23 @@ class SpectrumScanner:
                     await self._tune(writer, center, reader)
                     async with asyncio.timeout(IO_TIMEOUT):
                         await self._discard(reader, discard)
-                    demod = LiveDemod(LIVE_RATE, freq_hz - center, mode)
+                    demod = LiveDemod(LIVE_RATE, freq_hz - center, mode, bw)
                     mpx: list[np.ndarray] = []
                     keep = int(LIVE_RDS_WINDOW_S * demod.mid)
                     last_rds = loop.time()
                     while until is None or datetime.now(UTC) < until:
                         async with asyncio.timeout(IO_TIMEOUT):
                             raw = await reader.readexactly(CHUNK * 2)
-                        out = await loop.run_in_executor(None, _live_chunk, demod, raw, img)
+                        out = await loop.run_in_executor(None, _live_chunk, demod, raw, img, text)
                         if img is not None:
                             await self._image_events(img, out)
+                        extra: dict[str, Any] = {}
+                        if text is not None:
+                            extra = {"text": out["text"], "text_info": text.status()["info"]}
+                            if out["text"] and self.status["live"]:
+                                self.status["live"]["text"] = (self.status["live"]["text"] + out["text"])[-TEXT_KEEP:]
                         self._emit({
+                            **extra,
                             "kind": "live",
                             "freq_mhz": round(freq_hz / 1e6, 4),
                             "mode": mode,
@@ -1437,10 +1456,13 @@ class _ImageListener:
         return encode_png(np.ascontiguousarray(img))
 
 
-def _live_chunk(demod: LiveDemod, raw: bytes, img: _ImageListener | None = None) -> dict[str, Any]:
+def _live_chunk(demod: LiveDemod, raw: bytes, img: _ImageListener | None = None,
+                text: textdec.MorseDecoder | textdec.RttyDecoder | None = None) -> dict[str, Any]:
     """Un blocco di byte rtl_tcp elaborato dal demodulatore in diretta (nell'executor)."""
     a = np.frombuffer(raw, dtype=np.uint8).astype(np.float32) - 127.5
     out = demod.process((a[0::2] + 1j * a[1::2]).astype(np.complex64))
     if img is not None:
         out["img_events"] = img.feed(out["pcm"])
+    if text is not None:
+        out["text"] = text.feed(out.pop("audio"))
     return out

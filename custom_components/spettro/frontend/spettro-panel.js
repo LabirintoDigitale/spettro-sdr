@@ -1,7 +1,7 @@
 // Pannello "Spettro" per Home Assistant: grafico dello spettro, waterfall e picchi.
 
 // deve coincidere con VERSION in const.py: se il backend ne riporta un'altra manca un riavvio
-const PANEL_VERSION = "1.16.1";
+const PANEL_VERSION = "1.17.0";
 
 const PRESETS = [
   ["Personalizzato", null, null],
@@ -21,7 +21,8 @@ const PRESETS = [
   ["Onde corte (0,5–30)", 0.5, 30],
   ["Tutto (24–1766)", 24, 1766],
 ];
-// immagini nell'audio: [nome, MHz di sintonia, modo, decoder]. Il radiofax si riceve in USB 1,9 kHz sotto la frequenza assegnata
+// immagini e testo nell'audio: [nome, MHz di sintonia, modo, decoder]. Il radiofax si riceve in USB 1,9 kHz sotto la
+// frequenza assegnata, l'RTTY DWD 1,5 kHz sotto (i due toni cadono a 1275 e 1725 Hz); in CW si sintonizza la portante
 const IMG_PRESETS = [
   ["ISS · SSTV 145,800 MHz (FM)", 145.8, "nfm", "sstv"],
   ["SSTV radioamatori 20 m · 14,230 MHz (USB)", 14.23, "usb", "sstv"],
@@ -32,7 +33,31 @@ const IMG_PRESETS = [
   ["Radiofax meteo DWD · 13882,5 kHz", 13.8806, "usb", "fax"],
   ["Radiofax meteo Northwood (UK) · 4610 kHz", 4.6081, "usb", "fax"],
   ["Radiofax meteo Northwood (UK) · 8040 kHz", 8.0381, "usb", "fax"],
+  ["Morse · radiofari NCDXF 14,100 MHz (CW)", 14.1, "cw", "cw"],
+  ["Morse · radioamatori 40 m · 7,025 MHz (CW)", 7.025, "cw", "cw"],
+  ["Morse · radioamatori 20 m · 14,040 MHz (CW)", 14.04, "cw", "cw"],
+  ["Telescrivente meteo DWD (RTTY 50 baud) · 4583 kHz", 4.5815, "usb", "rtty50"],
+  ["Telescrivente meteo DWD (RTTY 50 baud) · 7646 kHz", 7.6445, "usb", "rtty50"],
+  ["Telescrivente meteo DWD (RTTY 50 baud) · 10100,8 kHz", 10.0993, "usb", "rtty50"],
+  ["RTTY radioamatori 20 m · 14,085 MHz (45 baud)", 14.0835, "usb", "rtty45"],
 ];
+// larghezza del canale in diretta (Hz): predefinita e scelte, come in demod.py
+const BANDWIDTHS = {
+  nfm: [15000, [6250, 12500, 15000, 25000]],
+  am: [10000, [3000, 6000, 10000, 15000]],
+  usb: [2800, [1800, 2400, 2800, 3500]],
+  lsb: [2800, [1800, 2400, 2800, 3500]],
+  cw: [500, [250, 500, 1000]],
+};
+// decoder dell'audio in diretta: [valore, nome, modi in cui funziona]
+const LIVE_DECODERS = [
+  ["sstv", "Immagini SSTV", ["nfm", "am", "usb", "lsb"]],
+  ["fax", "Radiofax meteo", ["nfm", "am", "usb", "lsb"]],
+  ["cw", "Testo Morse (CW)", ["cw", "usb", "lsb"]],
+  ["rtty45", "Testo RTTY 45 baud (radioamatori)", ["usb", "lsb", "cw"]],
+  ["rtty50", "Testo RTTY 50 baud (meteo DWD)", ["usb", "lsb", "cw"]],
+];
+const TEXT_DECODERS = ["cw", "rtty45", "rtty50"];
 const SAMPLE_RATES = [250000, 1024000, 1400000, 1800000, 2048000, 2400000, 2560000, 2880000];
 const FFT_SIZES = [256, 512, 1024, 2048, 4096];
 const MAX_HISTORY = 60;
@@ -346,6 +371,7 @@ class SpettroPanel extends HTMLElement {
         #meteolist tr:hover td { background:var(--secondary-background-color); }
         #meteolist tr.sel td { background:rgba(3,169,244,.16); }
         .meteoimg { width:100%; height:auto; display:block; border-radius:6px; margin-top:8px; background:#000; image-rendering:auto; }
+        .livetext { white-space:pre-wrap; word-break:break-word; font:14px/1.45 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; background:var(--secondary-background-color,#f5f5f5); border-radius:6px; padding:8px; margin:6px 0; min-height:4.5em; max-height:16em; overflow:auto; }
         .meteogrid { display:grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap:4px 12px; margin:6px 0; }
         canvas { display:block; width:100%; }
         #spec { height:340px; cursor:crosshair; touch-action:none; }
@@ -460,8 +486,9 @@ class SpettroPanel extends HTMLElement {
               <div class="livehead">
                 <span class="dot">● IN DIRETTA</span>
                 <span class="title" id="livetitle"></span>
-                <select id="livemode" title="Demodulazione"><option value="wfm">FM larga (radio)</option><option value="nfm">FM stretta (voce)</option><option value="am">AM</option><option value="usb">USB</option><option value="lsb">LSB</option></select>
-                <select id="livedec" title="Immagini nell'audio"><option value="">Nessuna decodifica</option><option value="sstv">Immagini SSTV</option><option value="fax">Radiofax meteo</option></select>
+                <select id="livemode" title="Demodulazione"><option value="wfm">FM larga (radio)</option><option value="nfm">FM stretta (voce)</option><option value="am">AM</option><option value="usb">USB</option><option value="lsb">LSB</option><option value="cw">CW (Morse)</option></select>
+                <select id="livebw" title="Larghezza del filtro: più stretto toglie rumore e disturbi vicini, più largo fa passare tutto il segnale"></select>
+                <select id="livedec" title="Decodifica dell'audio: immagini o testo"><option value="">Nessuna decodifica</option>${LIVE_DECODERS.map(([v, t]) => `<option value="${v}">${t}</option>`).join("")}</select>
                 <button id="livelisten">🔇 Ascolta</button>
                 <button class="primary" id="livestop">■ Ferma</button>
               </div>
@@ -490,9 +517,10 @@ class SpettroPanel extends HTMLElement {
           </div>
           <div id="meteopasses" class="hint">Calcolo dei passaggi…</div>
           <div id="meteolog"></div>
-          <h4 class="sub">Stazioni radio con immagini</h4>
-          <div class="hint">Trasmettono da terra a orari propri: il radiofax meteo quasi sempre, l'SSTV dei radioamatori quando
-            qualcuno trasmette. ▶ Ascolta resta in ascolto (anche a pannello chiuso) e salva ogni immagine che arriva.</div>
+          <h4 class="sub">Stazioni radio con immagini e testo</h4>
+          <div class="hint">Trasmettono da terra a orari propri: radiofax e telescrivente meteo quasi sempre, SSTV e Morse dei
+            radioamatori quando qualcuno trasmette. ▶ Ascolta resta in ascolto: le immagini si salvano (anche a pannello chiuso),
+            il testo Morse/RTTY compare sotto la cascata mentre arriva.</div>
           <div class="row" style="margin-top:4px">
             <select id="imgpreset" style="flex:1;min-width:220px">${IMG_PRESETS.filter((p) => !p[0].startsWith("ISS")).map((p) => `<option value="${IMG_PRESETS.indexOf(p)}">${p[0]}</option>`).join("")}</select>
             <button id="imglisten" title="Resta in ascolto su questa frequenza e salva le immagini che arrivano (la scansione si sospende)">▶ Ascolta</button>
@@ -645,7 +673,12 @@ class SpettroPanel extends HTMLElement {
     });
     $("livelisten").addEventListener("click", () => this._setListen(!this._listen));
     $("livemode").addEventListener("change", (e) => {
-      if (this._live) this._liveStart(this._live.freq_mhz, e.target.value, null, this._live.decoder || null);
+      if (!this._live) return;
+      const dec = LIVE_DECODERS.find(([v]) => v === this._live.decoder);
+      this._liveStart(this._live.freq_mhz, e.target.value, null, dec && dec[2].includes(e.target.value) ? dec[0] : null);
+    });
+    $("livebw").addEventListener("change", (e) => {
+      if (this._live) this._liveStart(this._live.freq_mhz, this._live.mode, null, this._live.decoder || null, this._live.title, +e.target.value);
     });
     const typed = () => {
       // frequenza scritta a mano (anche con la virgola): si seleziona e si inquadra sul grafico
@@ -667,7 +700,7 @@ class SpettroPanel extends HTMLElement {
     $("selfreq").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); typed(); $("selfreq").blur(); } });
     $("selfreq").addEventListener("change", typed);
     $("livedec").addEventListener("change", (e) => {
-      if (this._live) this._liveStart(this._live.freq_mhz, this._live.mode, null, e.target.value || null);
+      if (this._live) this._liveStart(this._live.freq_mhz, this._live.mode, null, e.target.value || null, null, this._live.bw);
     });
     $("resume").addEventListener("click", async () => {
       try {
@@ -1281,13 +1314,13 @@ class SpettroPanel extends HTMLElement {
 
   }
 
-  async _liveStart(mhz, mode = null, sid = null, decoder = null, title = null) {
+  async _liveStart(mhz, mode = null, sid = null, decoder = null, title = null, bw = null) {
     if (mhz == null) return;
     this._setListen(true); // il tocco sul pulsante permette di avviare l'audio
     this._liveRestart = true; // la diretta precedente si ferma: l'audio resta acceso
     try {
       await this._hass.callWS({ type: "spettro/live_start", freq_mhz: mhz, ...(mode ? { mode } : {}), ...(sid ? { sid } : {}),
-        ...(decoder ? { decoder } : {}), ...(title ? { title } : {}) });
+        ...(decoder ? { decoder } : {}), ...(title ? { title } : {}), ...(bw ? { bw } : {}) });
       this.shadowRoot.querySelector(".ana").scrollIntoView({ behavior: "smooth", block: "start" });
     } catch (err) {
       this._setListen(false);
@@ -1328,10 +1361,26 @@ class SpettroPanel extends HTMLElement {
     const digital = live.mode === "dab" || live.mode === "tv" || live.mode === "sat";
     $("livemode").style.display = digital ? "none" : "";
     $("livelisten").style.display = live.mode === "tv" || live.mode === "sat" ? "none" : "";
-    $("livedec").style.display = ["nfm", "am", "usb", "lsb"].includes(live.mode) ? "" : "none";
+    $("livedec").style.display = ["nfm", "am", "usb", "lsb", "cw"].includes(live.mode) ? "" : "none";
+    for (const o of $("livedec").options) {
+      const d = LIVE_DECODERS.find(([v]) => v === o.value);
+      o.hidden = o.disabled = !!d && !d[2].includes(live.mode);
+    }
     $("livedec").value = live.decoder || "";
-    if (!live.decoder) { $("liveimg").innerHTML = ""; this._liveImgPreview = null; }
-    else if (!was || was.decoder !== live.decoder || was.freq_mhz !== live.freq_mhz) {
+    const bws = BANDWIDTHS[live.mode];
+    $("livebw").style.display = bws ? "" : "none";
+    if (bws) {
+      $("livebw").innerHTML = bws[1].map((b) => `<option value="${b}">${b >= 1000 ? `${(b / 1000).toLocaleString("it-IT")} kHz` : `${b} Hz`}</option>`).join("");
+      $("livebw").value = String(live.bw || bws[0]);
+    }
+    if (!live.decoder) { $("liveimg").innerHTML = ""; this._liveImgPreview = null; this._liveText = null; }
+    else if (TEXT_DECODERS.includes(live.decoder)) {
+      if (!was || was.decoder !== live.decoder || was.freq_mhz !== live.freq_mhz || this._liveText == null) {
+        this._liveText = live.text || "";
+        this._renderLiveText("in cerca del segnale…");
+      }
+    } else if (!was || was.decoder !== live.decoder || was.freq_mhz !== live.freq_mhz) {
+      this._liveText = null;
       this._liveImgPreview = null;
       $("liveimg").innerHTML = `<div class="hint" style="margin-top:6px">In ascolto: ${live.decoder === "fax" ? "una carta inizia con il tono di avvio" : "ogni immagine SSTV inizia con il codice VIS"}…</div>`;
     }
@@ -1374,6 +1423,36 @@ class SpettroPanel extends HTMLElement {
     $("livelevel").textContent = `livello ${m.level_db} dBFS`;
     this._drawLiveRow(m.row);
     if (this._listen && this._audioCtx) this._playPcm(m.audio);
+    if (m.text_info !== undefined && this._live && TEXT_DECODERS.includes(this._live.decoder)) {
+      if (this._liveText == null) this._liveText = "";
+      if (m.text) this._liveText = (this._liveText + m.text).slice(-4000);
+      if (m.text || m.text_info !== this._liveTextInfo) this._renderLiveText(m.text_info);
+    }
+  }
+
+  _renderLiveText(info) {
+    this._liveTextInfo = info;
+    const el = this.shadowRoot.getElementById("liveimg");
+    const dec = LIVE_DECODERS.find(([v]) => v === this._live.decoder);
+    let box = el.querySelector(".livetext");
+    if (!box) {
+      el.innerHTML = `<h3 style="margin:10px 0 4px">${dec ? dec[1] : "Testo"}</h3>
+        <div class="hint" id="livetextinfo"></div>
+        <pre class="livetext"></pre>
+        <div class="row"><button id="livetextcopy">📋 Copia</button><button id="livetextclear">Pulisci</button>
+          <span class="hint">${this._live.decoder === "cw" ? "Tono e velocità si trovano da soli: sintonizza la portante, in CW stretto (500 Hz) si legge meglio."
+            : "I due toni e la polarità si trovano da soli: basta che cadano nel filtro (USB, 2,8 kHz)."}</span></div>`;
+      box = el.querySelector(".livetext");
+      el.querySelector("#livetextcopy").addEventListener("click", async () => {
+        try { await navigator.clipboard.writeText(this._liveText || ""); this._msg("Testo copiato."); }
+        catch (err) { this._msg("Copia non riuscita: seleziona il testo a mano.", true); }
+      });
+      el.querySelector("#livetextclear").addEventListener("click", () => { this._liveText = ""; box.textContent = ""; });
+    }
+    el.querySelector("#livetextinfo").textContent = info || "";
+    const atEnd = box.scrollTop + box.clientHeight >= box.scrollHeight - 20;
+    box.textContent = this._liveText || "";
+    if (atEnd) box.scrollTop = box.scrollHeight;
   }
 
   _onLiveTv(m) {
@@ -2239,7 +2318,7 @@ class SpettroPanel extends HTMLElement {
         </div>
       </div>
       ${r.audio ? `<div class="row">
-          <select id="audmode">${[["wfm", "FM larga (radio)"], ["nfm", "FM stretta (voce)"], ["am", "AM"], ["usb", "USB (onde corte)"], ["lsb", "LSB (onde corte)"]]
+          <select id="audmode">${[["wfm", "FM larga (radio)"], ["nfm", "FM stretta (voce)"], ["am", "AM"], ["usb", "USB (onde corte)"], ["lsb", "LSB (onde corte)"], ["cw", "CW (Morse)"]]
             .filter(([k]) => r.audio[k])
             .map(([k, t]) => `<option value="${k}"${k === (r.audio_mode || (r.audio.usb ? "usb" : "nfm")) ? " selected" : ""}>${t}</option>`).join("")}</select>
           <audio id="player" controls preload="auto" style="flex:1;min-width:200px;height:36px"></audio>

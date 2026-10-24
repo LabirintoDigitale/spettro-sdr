@@ -337,9 +337,10 @@ async def ws_favorite_remove(hass: HomeAssistant, connection: websocket_api.Acti
     {
         vol.Required("type"): "spettro/live_start",
         vol.Required("freq_mhz"): vol.All(vol.Coerce(float), vol.Range(min=0.5, max=2200)),
-        vol.Optional("mode"): vol.Any(None, vol.In(["wfm", "nfm", "am", "usb", "lsb", "dab", "tv", "sat"])),
+        vol.Optional("mode"): vol.Any(None, vol.In(["wfm", "nfm", "am", "usb", "lsb", "cw", "dab", "tv", "sat"])),
         vol.Optional("sid"): vol.Any(None, str),
-        vol.Optional("decoder"): vol.Any(None, vol.In(["sstv", "fax"])),
+        vol.Optional("decoder"): vol.Any(None, vol.In(["sstv", "fax", "cw", "rtty45", "rtty50"])),
+        vol.Optional("bw"): vol.Any(None, vol.All(vol.Coerce(float), vol.Range(min=100, max=50000))),
         vol.Optional("title"): vol.Any(None, str),
     }
 )
@@ -351,7 +352,8 @@ async def ws_live_start(hass: HomeAssistant, connection: websocket_api.ActiveCon
         return
     try:
         live = await scanner.live_start(msg["freq_mhz"] * 1e6, msg.get("mode"), msg.get("sid"),
-                                        decoder=msg.get("decoder"), title=msg.get("title"))
+                                        decoder=msg.get("decoder"), title=msg.get("title"),
+                                        bw=msg.get("bw"))
     except RuntimeError as err:
         connection.send_error(msg["id"], "live_failed", str(err))
         return

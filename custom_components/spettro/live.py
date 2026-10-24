@@ -12,7 +12,7 @@ from typing import Any
 
 import numpy as np
 
-from .demod import AUDIO_RATE, DEEMPHASIS_S, MARGIN_OUT, MODES, SSB_MODES, _channel, ssb_shift
+from .demod import AUDIO_RATE, BANDWIDTHS, DEEMPHASIS_S, MARGIN_OUT, MODES, SSB_MODES, _channel, ssb_params
 
 LIVE_RATE = 1_024_000  # 4 × 256 kHz e 32 × 32 kHz: tutte le decimazioni sono intere
 CHUNK_S = 0.25
@@ -31,11 +31,20 @@ def _lowpass(cutoff: float, fs: float, taps: int) -> np.ndarray:
 class LiveDemod:
     """Stato della demodulazione di un segnale in diretta."""
 
-    def __init__(self, rate: int, offset_hz: float, mode: str) -> None:
+    def __init__(self, rate: int, offset_hz: float, mode: str, bw: float | None = None) -> None:
         target, self.half_bw, audio_bw = MODES[mode]
         self.rate, self.offset, self.mode = rate, offset_hz, mode
-        self.shift = ssb_shift(mode) if mode in SSB_MODES else 0.0
-        self.offset += self.shift  # SSB: si filtra la banda audio, non la portante
+        self.bw = bw if bw and mode in BANDWIDTHS else (BANDWIDTHS[mode][0] if mode in BANDWIDTHS else None)
+        self.shift = self.bfo = 0.0
+        if mode in SSB_MODES:
+            # SSB e CW: si filtra la banda utile (non la portante) e la si porta in audio col battimento
+            self.shift, self.bfo, self.half_bw = ssb_params(mode, self.bw)
+            audio_bw = (abs(self.shift) + self.half_bw + 200) if mode != "cw" else 1500.0
+        elif self.bw:
+            self.half_bw = self.bw / 2
+            if mode == "am":
+                audio_bw = min(self.bw / 2, 7500.0)
+        self.offset += self.shift
         self.out_index = 0
         self.decim = max(1, int(round(rate / target)))
         self.mid = rate / self.decim
@@ -63,9 +72,9 @@ class LiveDemod:
         self.first += len(iq)
         self.tail = buf[-2 * self.margin :]
 
-        if self.shift:
+        if self.bfo:
             n = self.out_index + np.arange(len(z))
-            x = (z * np.exp(2j * np.pi * self.shift * n / self.mid)).real.astype(np.float64)
+            x = (z * np.exp(2j * np.pi * self.bfo * n / self.mid)).real.astype(np.float64)
             self.out_index += len(z)
         elif self.mode == "am":
             x = np.abs(z).astype(np.float64)
@@ -91,6 +100,7 @@ class LiveDemod:
         level = float(10 * np.log10(np.mean(np.abs(z) ** 2) / 127.5**2 + 1e-20))
         return {
             "pcm": pcm.tobytes(),
+            "audio": y,  # prima del controllo di volume: per i decoder di testo
             "mpx": x if self.mode == "wfm" else None,
             "row": np.round(row, 1).tolist(),
             "span_hz": self.mid,

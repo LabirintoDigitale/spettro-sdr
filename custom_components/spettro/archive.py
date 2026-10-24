@@ -14,7 +14,7 @@ from pathlib import Path
 import time
 from typing import Any
 
-AUDIO_MODES = ("wfm", "nfm", "am", "usb", "lsb")  # audio demodulato salvato con ogni analisi
+AUDIO_MODES = ("wfm", "nfm", "am", "usb", "lsb", "cw")  # audio demodulato salvato con ogni analisi
 
 # campi dell'analisi copiati nell'indice (quello che serve a elenchi e tabella dei picchi)
 META_FIELDS = ("target_mhz", "center_mhz", "kind", "snr_db", "peak_db", "obw_99_khz", "duty_cycle", "audio_mode",
