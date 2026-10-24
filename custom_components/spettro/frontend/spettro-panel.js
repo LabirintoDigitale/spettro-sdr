@@ -1,7 +1,7 @@
 // Pannello "Spettro" per Home Assistant: grafico dello spettro, waterfall e picchi.
 
 // deve coincidere con VERSION in const.py: se il backend ne riporta un'altra manca un riavvio
-const PANEL_VERSION = "1.20.0";
+const PANEL_VERSION = "1.20.1";
 
 const PRESETS = [
   ["Personalizzato", null, null],
@@ -1728,7 +1728,21 @@ class SpettroPanel extends HTMLElement {
     if (!m.passes.length) { el.innerHTML = `<div class="hint">${head}<br>Nessun passaggio sopra l'elevazione minima nelle prossime 36 ore.</div>`; return; }
     const now = Date.now() / 1000;
     el.className = "";
-    el.innerHTML = `<div class="hint">${head}</div>
+    let show = false;
+    if (this._showPassesOnce != null) show = this._showPassesOnce;
+    else try { show = localStorage.getItem("spettro_show_passes") === "1"; } catch (err) { /* memoria del browser non disponibile */ }
+    const nextI = m.passes.findIndex((p) => p.los > now);
+    const next = m.passes[nextI];
+    const nextOn = next && next.aos - 180 <= now;
+    const summary = next ? `${nextOn ? "In corso" : "Prossimo"}: <b>${esc(next.satellite)}</b> ${nextOn ? "" : `${t(next.aos)} `}· elevazione ${next.max_el}°
+        ${nextOn ? `<button data-i="${nextI}" title="Ricevi questo passaggio adesso">▶ Ricevi</button>` : ""}` : "";
+    const toggle = `<button id="passtoggle">${show ? "Nascondi orari" : "📅 Mostra orari"}</button>`;
+    if (!show) {
+      el.innerHTML = `<div class="hint">${head}</div>
+        <div class="row" style="margin-top:4px;align-items:center"><span>${summary}</span>${toggle}</div>`;
+    }
+    if (show) el.innerHTML = `<div class="hint">${head}</div>
+      <div class="row" style="margin-top:4px">${toggle}</div>
       <table style="margin-top:4px"><thead><tr><th>Quando</th><th>Satellite</th><th class="num">Elev. max</th><th>Direzione</th><th class="num">Durata</th><th></th></tr></thead>
       <tbody>${m.passes.slice(0, 10).map((p, i) => {
         const on = p.aos - 180 <= now && now < p.los;
@@ -1738,6 +1752,11 @@ class SpettroPanel extends HTMLElement {
         <td>${dir(p)}</td><td class="num">${Math.round((p.los - p.aos) / 60)} min</td>
         <td class="num">${on ? `<button data-i="${i}" title="Ricevi questo passaggio adesso">▶ Ricevi</button>` : ""}</td></tr>`;
       }).join("")}</tbody></table>`;
+    el.querySelector("#passtoggle").addEventListener("click", () => {
+      try { localStorage.setItem("spettro_show_passes", show ? "0" : "1"); } catch (err) { /* resta solo per questa volta */ }
+      this._showPassesOnce = !show;
+      this._renderMeteoPasses();
+    });
     el.querySelectorAll("button[data-i]").forEach((b) => b.addEventListener("click", async () => {
       const p = m.passes[+b.dataset.i];
       try {
