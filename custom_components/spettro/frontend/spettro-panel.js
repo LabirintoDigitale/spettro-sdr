@@ -1,7 +1,7 @@
 // Pannello "Spettro" per Home Assistant: grafico dello spettro, waterfall e picchi.
 
 // deve coincidere con VERSION in const.py: se il backend ne riporta un'altra manca un riavvio
-const PANEL_VERSION = "1.22.3";
+const PANEL_VERSION = "1.23.0";
 
 const PRESETS = [
   ["Personalizzato", null, null],
@@ -406,9 +406,13 @@ class SpettroPanel extends HTMLElement {
         .digitab { width:100%; border-collapse:collapse; font-size:13px; }
         .digitab th, .digitab td { text-align:left; padding:3px 6px; border-bottom:1px solid var(--divider-color,#e0e0e0); white-space:nowrap; }
         .digitab td.msg { font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; white-space:normal; }
-        #adsblist table { table-layout:fixed; }
-        #adsblist td:first-child, #adsblist th:first-child { white-space:normal; width:44%; word-break:break-word; }
-        #adsblist td.num { white-space:nowrap; }
+        #adsblist .plane { display:flex; flex-wrap:wrap; gap:4px 14px; align-items:baseline; padding:8px 0; border-bottom:1px solid var(--divider-color,#e0e0e0); }
+        #adsblist .pleft { flex:1 1 180px; min-width:0; }
+        #adsblist .pleft > div { word-break:break-word; }
+        #adsblist .pphoto { float:right; height:44px; border-radius:4px; margin:0 0 4px 10px; }
+        #adsblist .pright { display:flex; flex-wrap:wrap; gap:2px 14px; font-variant-numeric:tabular-nums; }
+        #adsblist .pv { white-space:nowrap; }
+        #adsblist .plane.emg { color:#e53935; font-weight:600; }
         .digitab tr.cq td.msg { color:var(--success-color,#43a047); font-weight:600; }
         .digi { max-height:22em; overflow:auto; }
         .livetext { white-space:pre-wrap; word-break:break-word; font:14px/1.45 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; background:var(--secondary-background-color,#f5f5f5); border-radius:6px; padding:8px; margin:6px 0; min-height:4.5em; max-height:16em; overflow:auto; }
@@ -1577,20 +1581,26 @@ class SpettroPanel extends HTMLElement {
     this._drawAdsbRadar(ac, m.home);
     if (!ac.length) { list.innerHTML = `<div class="hint" style="margin-top:8px">In ascolto… gli aerei compaiono quando passano in portata (quota alta = più lontano si sente). Serve un'antenna sui 1090 MHz.</div>`; return; }
     const dir = (b) => b == null ? "" : ["N", "NE", "E", "SE", "S", "SO", "O", "NO"][Math.round(b / 45) % 8];
-    list.innerHTML = `<table class="digitab" style="margin-top:8px"><thead><tr>
-        <th>Volo / compagnia</th><th class="num">Quota</th><th class="num">Velocità</th><th class="num">Distanza</th><th>Direz.</th></tr></thead>
-      <tbody>${ac.map((a) => { const ap = (x) => x ? `${esc(x.city || x.name || x.iata || "?")}${x.iata ? ` (${esc(x.iata)})` : ""}` : "?";
-        const route = this._routeOriented(a);
-        const model = a.type || [a.manufacturer, a.icao_type].filter(Boolean).join(" ") || null;
-        return `<tr${a.emergency ? ' style="color:#e53935;font-weight:600"' : ""}>
-        <td>${a.photo ? `<img src="${esc(a.photo)}" alt="" referrerpolicy="no-referrer" loading="lazy" style="float:right;height:40px;border-radius:4px;margin:0 0 2px 8px">` : ""}<b>${esc(a.call || a.icao)}</b>${a.airline || a.owner ? `<br><span class="hint">${esc(a.airline || a.owner)}${a.flight ? ` · volo ${esc(a.flight)}` : ""}</span>` : ""}
-          <span class="hint"> ${a.icao}${a.registration ? ` · ${esc(a.registration)}` : ""}${a.country ? ` · ${esc(a.country)}` : ""}${model ? ` · ${esc(model)}` : (a.category ? ` · ${esc(a.category)}` : "")}${a.emergency ? ` · ⚠ EMERGENZA ${esc(a.emergency)}` : ""}</span>
-          ${route ? `<br><span class="hint">🛫 ${route}</span>` : ""}</td>
-        <td class="num">${a.alt_m != null ? `${a.alt_m.toLocaleString("it-IT")} m` : "—"}</td>
-        <td class="num">${a.speed_kmh != null ? `${a.speed_kmh} km/h` : "—"}${a.track != null ? `<br><span class="hint">vola verso ${dir(a.track)}</span>` : ""}</td>
-        <td class="num">${a.km != null ? `${a.km.toLocaleString("it-IT")} km` : "—"}</td>
-        <td>${a.bearing != null ? `${dir(a.bearing)} ${a.bearing}°` : "—"}</td></tr>`; }).join("")}</tbody></table>
-      <div class="hint" style="margin-top:4px">Compagnia, paese e categoria sono ricavati senza internet. Con «Dettagli da internet» si aggiungono modello, immatricolazione e rotta (adsbdb.com). La posizione c'è solo per gli aerei che la trasmettono. Radar centrato su di te, nord in alto.</div>`;
+    const ap = (x) => x ? `${esc(x.city || x.name || x.iata || "?")}${x.iata ? ` (${esc(x.iata)})` : ""}` : "?";
+    list.innerHTML = `<div class="planes">${ac.map((a) => {
+      const route = this._routeOriented(a);
+      const model = a.type || [a.manufacturer, a.icao_type].filter(Boolean).join(" ") || null;
+      const val = (v, cls) => `<span class="pv${cls ? " " + cls : ""}">${v}</span>`;
+      return `<div class="plane${a.emergency ? " emg" : ""}">
+        <div class="pleft">
+          ${a.photo ? `<img class="pphoto" src="${esc(a.photo)}" alt="" referrerpolicy="no-referrer" loading="lazy">` : ""}
+          <div><b>${esc(a.call || a.icao)}</b>${a.airline || a.owner ? ` · <span class="hint">${esc(a.airline || a.owner)}${a.flight ? ` volo ${esc(a.flight)}` : ""}</span>` : ""}</div>
+          <div class="hint">${a.icao}${a.registration ? ` · ${esc(a.registration)}` : ""}${a.country ? ` · ${esc(a.country)}` : ""}${model ? ` · ${esc(model)}` : (a.category ? ` · ${esc(a.category)}` : "")}${a.emergency ? ` · ⚠ EMERGENZA ${esc(a.emergency)}` : ""}</div>
+          ${route ? `<div class="hint">🛫 ${route}</div>` : ""}
+        </div>
+        <div class="pright">
+          ${val(a.alt_m != null ? `${a.alt_m.toLocaleString("it-IT")} m` : "—")}
+          ${val(`${a.speed_kmh != null ? `${a.speed_kmh} km/h` : "—"}${a.track != null ? ` <span class="hint">↗ ${dir(a.track)}</span>` : ""}`)}
+          ${val(a.km != null ? `${a.km.toLocaleString("it-IT")} km` : "—")}
+          ${val(a.bearing != null ? `<span class="hint">verso te</span> ${dir(a.bearing)} ${a.bearing}°` : "—")}
+        </div>
+      </div>`; }).join("")}</div>
+      <div class="hint" style="margin-top:6px">Compagnia, paese e categoria sono ricavati senza internet. Con «Dettagli da internet» si aggiungono modello, immatricolazione e rotta (adsbdb.com). La posizione c'è solo per gli aerei che la trasmettono. Radar centrato su di te, nord in alto.</div>`;
   }
 
   _routeOriented(a) {

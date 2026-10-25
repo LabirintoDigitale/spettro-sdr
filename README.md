@@ -234,6 +234,10 @@ Per l'RTTY si ascolta in **USB**: i due toni e la polarità (normale o invertita
 
 ## Aerei: ADS-B (1090 MHz)
 
+<p align="center">
+  <a href="https://raw.githubusercontent.com/LabirintoDigitale/spettro-sdr/main/docs/images/screenshots/complete/aerei.jpg"><img src="https://raw.githubusercontent.com/LabirintoDigitale/spettro-sdr/main/docs/images/screenshots/aerei.jpg" width="340" alt="Radar ADS-B con le scie degli aerei, foto, compagnia e rotta"></a>
+</p>
+
 Gli aerei trasmettono in chiaro la loro posizione sui 1090 MHz (ADS-B), e si ricevono anche con un'antennina corta (~6,9 cm). Nella scheda **✈️ Aerei (ADS-B)** il pulsante **▶ Avvia** tiene la chiavetta su 1090 MHz (scansione sospesa) e mostra gli aerei in vista aggiornati in tempo reale:
 
 - un **radar** centrato su di te (nord in alto) con ogni aereo alla sua direzione e distanza, colorato per quota (basso rosso → alto blu) e con una freccia per la rotta;
@@ -241,7 +245,7 @@ Gli aerei trasmettono in chiaro la loro posizione sui 1090 MHz (ADS-B), e si ric
 
 Per ogni aereo, **senza internet**, si ricavano anche la **compagnia** (dalle prime 3 lettere della sigla del volo), il **numero del volo**, il **paese di immatricolazione** (dal codice ICAO dell'aereo), la **categoria** (leggero, pesante, elicottero…) ed eventuali **emergenze** dichiarate. Con l'opzione **Dettagli da internet** (spenta di default) si aggiungono **modello esatto, immatricolazione, operatore e rotta partenza → arrivo**, scaricati da adsbdb.com (API pubblica e gratuita, senza chiave; serve che Home Assistant possa uscire su internet). La rotta viene mostrata **nel verso giusto**: dato che il database conosce solo la coppia di aeroporti della sigla del volo, Spettro guarda verso quale dei due l'aereo sta volando davvero (dalla sua rotta e posizione) e, se è la tratta di ritorno, inverte partenza e arrivo. Nella riga, «vola verso» indica la direzione di volo (diversa da «Direz.», che è dove l'aereo si trova rispetto a te).
 
-Sul radar ogni aereo lascia una **scia** che svanisce dietro di sé, così si vede da dove arriva e dove sta andando; con i dettagli online compare anche la **foto reale** dell'aereo accanto al volo. Un aereo sparisce dopo un minuto che non si sente. La posizione viene calcolata da un solo messaggio usando la posizione della stazione (da Home Assistant). Con l'opzione **Resta attivo a pannello chiuso** la chiavetta resta su 1090 MHz finché non premi **■ Ferma**; altrimenti si ferma da sola poco dopo aver chiuso il pannello. Due **sensori** — *Aerei in vista* e *Aereo più vicino* (con volo, quota e distanza negli attributi) — si possono usare in dashboard e automazioni. Il decoder (preambolo a impulsi, 112 bit, CRC a 24 bit, posizione CPR) è lo stesso usato nelle analisi.
+Sul radar ogni aereo lascia una **scia** che svanisce dietro di sé, così si vede da dove arriva e dove sta andando; con i dettagli online compare anche la **foto reale** dell'aereo accanto al volo. Un aereo sparisce dopo un minuto che non si sente. Se mentre il radar è attivo inizia un passaggio di un satellite meteo (Meteor automatico, o ISS), l'ADS-B **si sospende da solo** per lasciare la chiavetta al satellite e **riprende automaticamente** alla fine del passaggio. La posizione viene calcolata da un solo messaggio usando la posizione della stazione (da Home Assistant). Con l'opzione **Resta attivo a pannello chiuso** la chiavetta resta su 1090 MHz finché non premi **■ Ferma**; altrimenti si ferma da sola poco dopo aver chiuso il pannello. Due **sensori** — *Aerei in vista* e *Aereo più vicino* (con volo, quota e distanza negli attributi) — si possono usare in dashboard e automazioni. Il decoder (preambolo a impulsi, 112 bit, CRC a 24 bit, posizione CPR) è lo stesso usato nelle analisi.
 
 ## Modi digitali: FT8 e WSPR
 

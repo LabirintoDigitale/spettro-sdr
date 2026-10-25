@@ -324,6 +324,7 @@ class SpectrumScanner:
         self._dab_task: asyncio.Task | None = None
         self._adsb_task: asyncio.Task | None = None
         self.adsb_tracker: adsb_mod.AircraftTracker | None = None  # aerei visti nella sessione in corso
+        self._adsb_resume: dict[str, Any] | None = None  # opzioni ADS-B da riprendere dopo un passaggio satellite
         self.http_get: Callable[[str], Any] | None = None  # richieste HTTP (per i dettagli online degli aerei)
         self._adsb_ac: dict[str, dict[str, Any]] = {}  # dettagli online per codice ICAO (anche {} = cercato, assente)
         self._adsb_route: dict[str, dict[str, Any]] = {}  # rotte online per sigla del volo
@@ -550,6 +551,7 @@ class SpectrumScanner:
         chans = list(dab.CHANNELS.items())
         discard = RCV_BUF + 2 * READ_LIMIT + int(dab.RATE * 2 * max(self.settings.settle_ms, 100) / 1000)
         discard -= discard % 2
+        await self._adsb_yield(resume=False)
         self.analyzing = True
         self._update_active()
         error = None
@@ -607,6 +609,7 @@ class SpectrumScanner:
             raise RuntimeError("C'è già un'analisi in corso")
         if self._live_task is not None:
             raise RuntimeError("Ferma prima l'analisi continua")
+        await self._adsb_yield(resume=False)
         rate = int(self.settings.sample_rate)
         capture_bytes = int(rate * min(duration_s, ANALYSIS_MAX_S)) * 2
         discard_bytes = RCV_BUF + 2 * READ_LIMIT + int(rate * 2 * max(self.settings.settle_ms, 100) / 1000)
@@ -783,6 +786,7 @@ class SpectrumScanner:
         if mode == "dab" and not sid:
             raise RuntimeError("Scegli una radio del multiplex")
         await self.live_stop()
+        await self._adsb_yield(resume=False)
         mode = mode or self.live_mode_for(freq_hz)
         if decoder in IMAGE_DECODERS and mode not in ("nfm", "am", "usb", "lsb"):
             raise RuntimeError("SSTV e radiofax si decodificano in FM stretta, AM o SSB")
@@ -944,6 +948,7 @@ class SpectrumScanner:
                 self._live_task = None
             self.status["live"] = None
             self._update_active()  # riparte la scansione, se è attiva
+            await self._adsb_maybe_resume()
 
     async def _live_dab_run(self, freq_hz: float, sid: str) -> None:
         """Radio DAB+ in diretta: chiavetta al centro del canale a 2,048 MS/s, AU AAC al pannello."""
@@ -1019,6 +1024,8 @@ class SpectrumScanner:
         """
         if self.analyzing or self._dab_task is not None:
             raise RuntimeError("C'è un'altra operazione in corso, riprova tra poco")
+        if self.meteo_rx is not None:
+            raise RuntimeError("C'è una ricezione satellitare in corso")
         if online and self.http_get is None:
             online = False
         await self.live_stop()
@@ -1042,6 +1049,27 @@ class SpectrumScanner:
                 await task
             except asyncio.CancelledError:
                 pass
+
+    async def _adsb_yield(self, resume: bool) -> None:
+        """Libera la chiavetta dall'ADS-B per un'altra operazione. resume=True: la riprende dopo."""
+        if self._adsb_task is not None:
+            if resume and self.status["adsb"]:
+                self._adsb_resume = {"continuous": self.status["adsb"]["continuous"],
+                                     "online": self.status["adsb"]["online"]}
+            await self.adsb_stop()
+
+    async def _adsb_maybe_resume(self) -> None:
+        """Riavvia l'ADS-B dopo un passaggio, se era stato sospeso e la chiavetta è di nuovo libera."""
+        opts = self._adsb_resume
+        if opts is None or self._adsb_task is not None:
+            return
+        if self.status["live"] or self.meteo_rx is not None or self.analyzing or self._dab_task is not None:
+            return  # qualcos'altro sta ancora usando la chiavetta: si riproverà più tardi
+        self._adsb_resume = None
+        try:
+            await self.adsb_start(opts["continuous"], opts["online"])
+        except RuntimeError:
+            pass
 
     async def _adsb_run(self) -> None:
         loop = asyncio.get_running_loop()
@@ -1263,6 +1291,7 @@ class SpectrumScanner:
                         key = (p["norad"], p["aos"].timestamp())
                         if p.get("kind") == "iss" and key not in self._meteo_done and p["aos"] <= now < p["los"]:
                             self._meteo_done.add(key)
+                            await self._adsb_yield(resume=True)
                             await self.live_start(weather.ISS_FREQ, "nfm", decoder="sstv", until=p["los"],
                                                   title="ISS", auto=True)
                             break
@@ -1331,6 +1360,7 @@ class SpectrumScanner:
         info = weather.pass_json(p)
         self.meteo_rx = {"pass": info, "stats": None, "preview": None, "rows": 0, "error": None}
         await self.live_stop()
+        await self._adsb_yield(resume=True)
         self._update_active()
         self._emit({"kind": "meteo_live", **self.meteo_rx})
         rate = weather.IN_RATE
@@ -1407,6 +1437,7 @@ class SpectrumScanner:
                 self.meteo_rx = None
                 self._update_active()
                 self._emit({"kind": "meteo_live", "done": True})
+                await self._adsb_maybe_resume()
 
     async def _meteo_save_image(self, rx: weather.MeteorReceiver, p: dict[str, Any]) -> int:
         loop = asyncio.get_running_loop()
