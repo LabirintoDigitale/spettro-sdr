@@ -1,7 +1,7 @@
 // Pannello "Spettro" per Home Assistant: grafico dello spettro, waterfall e picchi.
 
 // deve coincidere con VERSION in const.py: se il backend ne riporta un'altra manca un riavvio
-const PANEL_VERSION = "1.23.0";
+const PANEL_VERSION = "1.24.0";
 
 const PRESETS = [
   ["Personalizzato", null, null],
@@ -15,6 +15,7 @@ const PRESETS = [
   ["PMR446 (446.0–446.2)", 446.0, 446.2],
   ["ISM 868 (863–870)", 863, 870],
   ["GSM 900 (925–960)", 925, 960],
+  ["UHF SatCom militari (243–270)", 243, 270],
   ["ADS-B (1085–1095)", 1085, 1095],
   ["TV digitale UHF (470–694)", 470, 694],
   ["Satellite con LNB (950–1760)", 950, 1760],
@@ -303,6 +304,7 @@ class SpettroPanel extends HTMLElement {
     if (m.kind === "live_dab") { this._onLiveDab(m); return; }
     if (m.kind === "live_tv") { this._onLiveTv(m); return; }
     if (m.kind === "live_sat") { this._onLiveSat(m); return; }
+    if (m.kind === "live_meter") { this._onLiveMeter(m); return; }
     if (m.kind === "live_image") { this._onLiveImage(m); return; }
     if (m.kind === "meteo_passes") { this._meteoPasses = m; this._renderMeteoPasses(); return; }
     if (m.kind === "meteo_live") { this._onMeteoLive(m); return; }
@@ -415,6 +417,10 @@ class SpettroPanel extends HTMLElement {
         #adsblist .plane.emg { color:#e53935; font-weight:600; }
         .digitab tr.cq td.msg { color:var(--success-color,#43a047); font-weight:600; }
         .digi { max-height:22em; overflow:auto; }
+        .metbar { position:relative; height:16px; border-radius:8px; margin-top:6px; overflow:visible;
+                  background:linear-gradient(90deg,rgba(67,160,71,.25),rgba(253,216,53,.25),rgba(229,57,53,.25)); }
+        .metfill { position:absolute; left:0; top:0; bottom:0; border-radius:8px; background:linear-gradient(90deg,#43a047,#fdd835,#e53935); }
+        .metpk { position:absolute; top:-3px; bottom:-3px; width:3px; background:var(--primary-text-color,#fff); border-radius:2px; }
         .livetext { white-space:pre-wrap; word-break:break-word; font:14px/1.45 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; background:var(--secondary-background-color,#f5f5f5); border-radius:6px; padding:8px; margin:6px 0; min-height:4.5em; max-height:16em; overflow:auto; }
         .meteogrid { display:grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap:4px 12px; margin:6px 0; }
         canvas { display:block; width:100%; }
@@ -524,6 +530,7 @@ class SpettroPanel extends HTMLElement {
               <div class="hint" id="selinfo" style="flex:1;min-width:160px">Tocca un picco sul grafico, una riga dell'Archivio spike, o scrivi la frequenza.</div>
               <button class="primary" id="analyze" disabled>Analizza</button>
               <button id="livebtn" disabled title="Resta sintonizzato su questa frequenza: audio, cascata e RDS in diretta (la scansione si sospende)">▶ Analisi continua</button>
+              <button id="metbtn" disabled title="Misuratore di livello per puntare l'antenna: gira l'antenna e cerca il massimo (satelliti, 137 MHz, ripetitori…)">📡 Punta antenna</button>
               <button class="heart" id="fav" disabled title="Aggiungi ai preferiti">♡</button>
             </div>
             <div id="live" style="display:none">
@@ -735,6 +742,7 @@ class SpettroPanel extends HTMLElement {
     $("analyze").addEventListener("click", () => this._analyze());
     $("fav").addEventListener("click", () => this._toggleFav());
     $("livebtn").addEventListener("click", () => this._liveStart(this._sel / 1e6));
+    $("metbtn").addEventListener("click", () => this._liveStart(this._sel / 1e6, "meter"));
     $("livestop").addEventListener("click", async () => {
       try { await this._hass.callWS({ type: "spettro/live_stop" }); } catch (err) { this._msg(err.message || String(err), true); }
     });
@@ -1445,9 +1453,9 @@ class SpettroPanel extends HTMLElement {
         : live.mode === "tv" ? `<div class="hint" style="margin-top:6px">Ricerca del multiplex TV…</div>`
         : live.mode === "sat" ? `<div class="hint" style="margin-top:6px">Misura del transponder…</div>` : "";
     }
-    const digital = live.mode === "dab" || live.mode === "tv" || live.mode === "sat";
+    const digital = live.mode === "dab" || live.mode === "tv" || live.mode === "sat" || live.mode === "meter";
     $("livemode").style.display = digital ? "none" : "";
-    $("livelisten").style.display = live.mode === "tv" || live.mode === "sat" ? "none" : "";
+    $("livelisten").style.display = live.mode === "tv" || live.mode === "sat" || live.mode === "meter" ? "none" : "";
     $("livedec").style.display = ["nfm", "am", "usb", "lsb", "cw"].includes(live.mode) ? "" : "none";
     for (const o of $("livedec").options) {
       const d = LIVE_DECODERS.find(([v]) => v === o.value);
@@ -1498,6 +1506,10 @@ class SpettroPanel extends HTMLElement {
     }
     if (live.mode === "tv") {
       this.shadowRoot.getElementById("livetitle").textContent = `TV ${live.channel || ""} · ${live.freq_mhz.toFixed(1)} MHz`;
+      return;
+    }
+    if (live.mode === "meter") {
+      this.shadowRoot.getElementById("livetitle").textContent = `📡 Puntamento · ${live.freq_mhz.toFixed(4)} MHz`;
       return;
     }
     const fav = this._favFor(live.freq_mhz);
@@ -2091,6 +2103,33 @@ class SpettroPanel extends HTMLElement {
     if (m.saved) this._loadMeteo();
   }
 
+  _onLiveMeter(m) {
+    if (!this._live) this._setLive({ freq_mhz: m.freq_mhz, mode: "meter" });
+    if (this._live.mode !== "meter") return;
+    const $ = (id) => this.shadowRoot.getElementById(id);
+    $("livelo").textContent = ((m.freq_mhz * 1e6 - m.span_hz / 2) / 1e6).toFixed(3);
+    $("livehi").textContent = ((m.freq_mhz * 1e6 + m.span_hz / 2) / 1e6).toFixed(3);
+    $("livelevel").textContent = `livello ${m.level_db} dBFS`;
+    this._drawLiveRow(m.row);
+    if (this._meterMax == null || m.peak_db > this._meterMax) this._meterMax = m.peak_db;
+    const prev = this._meterPrev; this._meterPrev = m.peak_db;
+    const LO = -90, HI = -10, pct = (v) => Math.max(0, Math.min(100, ((v - LO) / (HI - LO)) * 100));
+    const trend = prev == null ? "" : m.peak_db > prev + 0.8 ? "↑ più forte" : m.peak_db < prev - 0.8 ? "↓ più debole" : "= stabile";
+    const el = $("liverds");
+    el.innerHTML = `<div style="margin-top:8px">
+      <div style="display:flex;justify-content:space-between;align-items:baseline">
+        <span style="font-size:30px;font-weight:600">${m.peak_db} <span style="font-size:14px;font-weight:400">dBFS</span></span>
+        <span class="hint">picco più forte nella banda · max ${this._meterMax} dBFS</span></div>
+      <div class="metbar"><div class="metfill" style="width:${pct(m.peak_db)}%"></div><div class="metpk" style="left:${pct(this._meterMax)}%"></div></div>
+      <div class="row" style="justify-content:space-between;margin-top:4px">
+        <span style="font-weight:600;color:${trend.startsWith("↑") ? "var(--success-color,#43a047)" : trend.startsWith("↓") ? "#e53935" : "var(--secondary-text-color)"}">${trend}</span>
+        <button id="metreset">Azzera massimo</button></div>
+      <div class="hint" style="margin-top:4px">Gira lentamente l'antenna e cerca di far salire il numero: il trattino segna il massimo raggiunto. Per i satelliti geostazionari, una volta trovato il picco l'antenna resta ferma lì.</div></div>`;
+    el.querySelector("#metreset").addEventListener("click", () => { this._meterMax = m.peak_db; this._onLiveMeterRefresh(); });
+  }
+
+  _onLiveMeterRefresh() { /* il prossimo messaggio ridisegna; niente da fare subito */ }
+
   _onLiveSat(m) {
     if (!this._live) this._setLive({ freq_mhz: m.freq_mhz, mode: "sat" });
     if (this._live.mode !== "sat") return;
@@ -2482,6 +2521,7 @@ class SpettroPanel extends HTMLElement {
     if (this.shadowRoot.activeElement !== $("selfreq")) $("selfreq").value = (f / 1e6).toFixed(4);
     $("analyze").disabled = !!this._analyzing || !!this._live;
     $("livebtn").disabled = false;
+    $("metbtn").disabled = false;
     $("fav").disabled = false;
     this._updateFavBtn();
     this._draw();

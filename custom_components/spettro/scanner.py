@@ -817,6 +817,7 @@ class SpectrumScanner:
         self._update_active()  # la scansione si ferma al passo successivo e libera la chiavetta
         run = (self._live_dab_run(freq_hz, sid) if mode == "dab"
                else self._live_tv_run(freq_hz, mode == "sat") if mode in ("tv", "sat")
+               else self._live_meter_run(freq_hz) if mode == "meter"
                else self._live_run(freq_hz, mode, decoder, until, title, auto, bw))
         self._live_task = asyncio.get_running_loop().create_task(run, name="spettro_live")
         if self.viewers <= 0 and decoder not in KEEP_RUNNING:
@@ -1170,6 +1171,66 @@ class SpectrumScanner:
             self._adsb_route.pop(callsign, None)
         else:
             self._adsb_route[callsign] = route
+
+    async def _live_meter_run(self, freq_hz: float) -> None:
+        """Misuratore di puntamento: tiene la frequenza e mostra di continuo il livello e il picco,
+        per orientare l'antenna (satelliti, 137 MHz, ripetitori…). Nessun audio."""
+        loop = asyncio.get_running_loop()
+        rate = LIVE_RATE
+        center = float(round(freq_hz + rate / 8))
+        discard = RCV_BUF + 2 * READ_LIMIT + int(rate * 2 * max(self.settings.settle_ms, 100) / 1000)
+        discard -= discard % 2
+        chunk = int(rate * 0.2) * 2
+
+        def work(raw: bytes) -> tuple[float, float, list[float]]:
+            a = np.frombuffer(raw, dtype=np.uint8).astype(np.float32) - 127.5
+            iq = a[0::2] + 1j * a[1::2]
+            level = 10 * math.log10(float(np.mean(a * a)) * 2 / 127.5**2 + 1e-20)
+            row = dvbt.spectrum_row(iq)
+            # picco più forte escludendo il centro (residuo DC della chiavetta)
+            n = len(row)
+            peak = max(row[: n // 2 - 2] + row[n // 2 + 3:]) if n > 8 else level
+            return round(level, 1), round(peak, 1), row
+
+        try:
+            async with self._radio:
+                reader, writer, tuner = await _open(self.host, self.port)
+                try:
+                    self.status["tuner"] = TUNER_NAMES.get(tuner, f"Tipo {tuner}")
+                    await self._configure(writer, rate)
+                    await self._tune(writer, center, reader)
+                    async with asyncio.timeout(IO_TIMEOUT):
+                        await self._discard(reader, discard)
+                    while True:
+                        async with asyncio.timeout(IO_TIMEOUT):
+                            raw = await reader.readexactly(chunk)
+                        job = loop.run_in_executor(None, work, raw)
+                        while not job.done():
+                            async with asyncio.timeout(IO_TIMEOUT):
+                                if not await reader.read(READ_LIMIT):
+                                    raise ConnectionError("Connessione chiusa dal server")
+                            await asyncio.sleep(0)
+                        level, peak, row = job.result()
+                        self._emit({"kind": "live_meter", "freq_mhz": round(freq_hz / 1e6, 4),
+                                    "level_db": level, "peak_db": peak, "row": row, "span_hz": rate})
+                finally:
+                    writer.close()
+                    try:
+                        await writer.wait_closed()
+                    except OSError:
+                        pass
+        except asyncio.CancelledError:
+            raise
+        except (OSError, TimeoutError, asyncio.IncompleteReadError, RtlTcpError) as err:
+            msg = str(err) or type(err).__name__
+            _LOGGER.warning("Misuratore di puntamento interrotto: %s", msg)
+            self._emit({"kind": "live_error", "error": msg})
+        finally:
+            if asyncio.current_task() is self._live_task:
+                self._live_task = None
+            self.status["live"] = None
+            self._update_active()
+            await self._adsb_maybe_resume()
 
     def _sat_transponder(self, if_mhz: float) -> dict[str, Any]:
         """Transponder riconosciuto nell'ultima scansione più vicino alla frequenza (sul cavo), se c'è."""

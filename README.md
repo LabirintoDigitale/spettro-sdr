@@ -247,6 +247,12 @@ Per ogni aereo, **senza internet**, si ricavano anche la **compagnia** (dalle pr
 
 Sul radar ogni aereo lascia una **scia** che svanisce dietro di sé, così si vede da dove arriva e dove sta andando; con i dettagli online compare anche la **foto reale** dell'aereo accanto al volo. Un aereo sparisce dopo un minuto che non si sente. Se mentre il radar è attivo inizia un passaggio di un satellite meteo (Meteor automatico, o ISS), l'ADS-B **si sospende da solo** per lasciare la chiavetta al satellite e **riprende automaticamente** alla fine del passaggio. La posizione viene calcolata da un solo messaggio usando la posizione della stazione (da Home Assistant). Con l'opzione **Resta attivo a pannello chiuso** la chiavetta resta su 1090 MHz finché non premi **■ Ferma**; altrimenti si ferma da sola poco dopo aver chiuso il pannello. Due **sensori** — *Aerei in vista* e *Aereo più vicino* (con volo, quota e distanza negli attributi) — si possono usare in dashboard e automazioni. Il decoder (preambolo a impulsi, 112 bit, CRC a 24 bit, posizione CPR) è lo stesso usato nelle analisi.
 
+## Puntamento dell'antenna e satelliti UHF
+
+Il pulsante **📡 Punta antenna** (accanto a *▶ Analisi continua*) tiene la chiavetta sulla frequenza scelta e mostra un **misuratore di livello** grande, con il picco più forte della banda, un indicatore ↑/↓ («più forte / più debole») e un trattino che **segna il massimo raggiunto** (azzerabile). Si gira lentamente l'antenna cercando di far salire il numero; per i satelliti geostazionari, trovato il picco, l'antenna resta ferma lì. Funziona per qualsiasi antenna: i 137 MHz dei meteo, un ponte ripetitore, una parabola, ecc.
+
+Tra i preset di scansione c'è **UHF SatCom militari (243–270)**: sono vecchi satelliti militari in UHF con transponder «a specchio» non cifrati, su cui a volte si sentono comunicazioni non autorizzate (voce in FM stretta). Dall'Italia solo i satelliti sopra l'Atlantico/Africa sono raggiungibili, bassi verso sud, con un'antenna direttiva. ⚠️ Ricevere queste trasmissioni è un terreno legalmente delicato (comunicazioni non destinate al pubblico, su satelliti militari) e **trasmettere è reato**: trattalo come curiosità tecnica.
+
 ## Modi digitali: FT8 e WSPR
 
 I radioamatori usano molto due modi digitali "deboli", che si ricevono anche con antenne modeste da tutto il mondo:
