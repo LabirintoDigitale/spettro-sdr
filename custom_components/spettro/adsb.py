@@ -201,6 +201,7 @@ class AircraftTracker:
         self.planes: dict[str, dict[str, Any]] = {}
         self.messages = 0  # messaggi totali con CRC valido
         self.positions = 0
+        self.record = False  # se True tiene il percorso (lista di posizioni) di ogni aereo, per lo storico
 
     def feed_frames(self, frames: list[list[int]], now: float | None = None) -> None:
         now = time.time() if now is None else now
@@ -240,6 +241,13 @@ class AircraftTracker:
             if pos is not None:
                 pl["lat"], pl["lon"], pl["pos_time"] = pos[0], pos[1], now
                 self.positions += 1
+                if self.record:
+                    path = pl.setdefault("path", [])
+                    # un punto ogni ~3 s o ogni ~0,3 km: traccia leggera ma fedele
+                    if not path or now - path[-1][3] > 3 or abs(path[-1][0] - pos[0]) + abs(path[-1][1] - pos[1]) > 0.004:
+                        path.append([round(pos[0], 4), round(pos[1], 4), pl.get("alt_ft"), round(now, 1)])
+                        if len(path) > 400:
+                            del path[0]
         elif tc == 19 and mv(5, 8) in (1, 2):  # velocità al suolo
             ew = (mv(14, 24) - 1) * (-1 if me[13] else 1)
             ns = (mv(25, 35) - 1) * (-1 if me[24] else 1)
@@ -252,12 +260,11 @@ class AircraftTracker:
             em = mv(8, 11)
             pl["emergency"] = em if em else None
 
-    def prune(self, max_age_s: float, now: float | None = None) -> int:
+    def prune(self, max_age_s: float, now: float | None = None) -> list[dict[str, Any]]:
+        """Toglie gli aerei non più sentiti e li restituisce (per eventuale salvataggio nello storico)."""
         now = time.time() if now is None else now
         old = [k for k, p in self.planes.items() if now - p["last"] > max_age_s]
-        for k in old:
-            del self.planes[k]
-        return len(old)
+        return [self.planes.pop(k) for k in old]
 
     def aircraft(self) -> list[dict[str, Any]]:
         """Aerei attuali per il pannello, i più vicini (o i più recenti) per primi."""

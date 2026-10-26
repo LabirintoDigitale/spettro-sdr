@@ -24,6 +24,7 @@ from typing import Any
 import numpy as np
 
 from . import adsb as adsb_mod
+from . import adsb_db
 from . import adsb_online
 from . import dab, dvbt, rds, satellite, slots, textdec, verify, weather
 from .analysis import encode_png
@@ -82,6 +83,8 @@ KEEP_RUNNING = IMAGE_DECODERS + SLOT_DECODERS  # questi continuano anche a panne
 DIGI_LOG = 600  # messaggi FT8/WSPR tenuti in memoria
 DAB_SCAN_S = 1.2  # registrazione per ogni canale nella ricerca dei multiplex DAB
 ADSB_PRUNE_S = 60.0  # un aereo sparisce dalla lista se non si sente da tanto
+ADSB_HISTORY_H = 24.0  # ore dopo cui un volo nello storico si cancella da solo
+ADSB_HISTORY_MAX = 800  # voli tenuti al massimo nello storico
 ADSB_EMIT_S = 1.0  # ogni quanto si aggiorna il pannello
 ADSB_CHUNK = int(adsb_mod.RATE * 0.25)  # campioni per lettura (0,25 s)
 ADSB_OVERLAP = int(adsb_mod.RATE * 140e-6)  # coda riusata: un messaggio a cavallo non si perde
@@ -325,6 +328,8 @@ class SpectrumScanner:
         self._adsb_task: asyncio.Task | None = None
         self.adsb_tracker: adsb_mod.AircraftTracker | None = None  # aerei visti nella sessione in corso
         self._adsb_resume: dict[str, Any] | None = None  # opzioni ADS-B da riprendere dopo un passaggio satellite
+        self.adsb_history: list[dict[str, Any]] = []  # voli intercettati (dal più recente), con la traccia
+        self.adsb_record: bool = False  # se True registra i voli nello storico
         self.http_get: Callable[[str], Any] | None = None  # richieste HTTP (per i dettagli online degli aerei)
         self._adsb_ac: dict[str, dict[str, Any]] = {}  # dettagli online per codice ICAO (anche {} = cercato, assente)
         self._adsb_route: dict[str, dict[str, Any]] = {}  # rotte online per sigla del volo
@@ -399,6 +404,9 @@ class SpectrumScanner:
                         "time": self.dab_scan_time})
         if self.status["adsb"]:
             out.append({"kind": "adsb", **self.status["adsb"]})
+        if self.adsb_history or self.adsb_record:
+            out.append({"kind": "adsb_history", "flights": self._adsb_compact(), "record": self.adsb_record,
+                        "hours": ADSB_HISTORY_H, "home": list(self.meteo.location) if self.meteo else None})
         live = self.status["live"]
         if live and live.get("mode") == "dab" and (self.last_slide or self.last_dab):
             # un pannello aperto a diretta già avviata riceve subito nome, testo e immagine
@@ -469,6 +477,7 @@ class SpectrumScanner:
     def start(self) -> None:
         if self._task is None or self._task.done():
             asyncio.get_running_loop().create_task(self._load_dab())
+            asyncio.get_running_loop().create_task(self._load_adsb_history())
             self._task = asyncio.get_running_loop().create_task(self._run(), name="spettro_scanner")
         if self.meteo is not None and (self._meteo_loop_task is None or self._meteo_loop_task.done()):
             self._meteo_loop_task = asyncio.get_running_loop().create_task(self._meteo_loop(), name="spettro_meteo")
@@ -1036,7 +1045,9 @@ class SpectrumScanner:
             self._emit(dict(self.status))
             return self.status["adsb"]
         self.adsb_tracker = adsb_mod.AircraftTracker(self.meteo.location if self.meteo else None)
-        self.status["adsb"] = {"continuous": continuous, "online": online, "aircraft": [], "count": 0, "messages": 0,
+        self.adsb_tracker.record = self.adsb_record
+        self.status["adsb"] = {"continuous": continuous, "online": online, "record": self.adsb_record,
+                               "aircraft": [], "count": 0, "messages": 0, "history": len(self.adsb_history),
                                "home": list(self.meteo.location) if self.meteo else None}
         self._adsb_task = asyncio.get_running_loop().create_task(self._adsb_run(), name="spettro_adsb")
         self._update_active()  # ora la scansione vede il task e si ferma
@@ -1050,6 +1061,98 @@ class SpectrumScanner:
                 await task
             except asyncio.CancelledError:
                 pass
+
+    def _adsb_file(self) -> Any:
+        return self.archive.path.parent / "spettro_adsb_history.json" if self.archive is not None else None
+
+    async def _load_adsb_history(self) -> None:
+        path = self._adsb_file()
+        if path is None:
+            return
+
+        def read() -> dict[str, Any] | None:
+            try:
+                return json.loads(path.read_text())
+            except (OSError, ValueError):
+                return None
+
+        data = await asyncio.get_running_loop().run_in_executor(None, read)
+        if data and not self.adsb_history:
+            self.adsb_record = bool(data.get("record"))
+            self.adsb_history = data.get("flights", [])
+            self._prune_adsb_history()
+
+    def _prune_adsb_history(self) -> None:
+        limit = time.time() - ADSB_HISTORY_H * 3600
+        self.adsb_history = [f for f in self.adsb_history if f.get("last", 0) > limit][:ADSB_HISTORY_MAX]
+
+    def _record_flights(self, planes: list[dict[str, Any]]) -> None:
+        added = False
+        for pl in planes:
+            if not pl.get("call") and not pl.get("path"):
+                continue  # nulla di utile (né sigla né posizione)
+            self.adsb_history.insert(0, self._adsb_flight_record(pl))
+            added = True
+        if added:
+            self._prune_adsb_history()
+            self._save_adsb_history()
+            self._emit_adsb_history()
+
+    def _adsb_flight_record(self, pl: dict[str, Any]) -> dict[str, Any]:
+        icao = pl["icao"]
+        rec: dict[str, Any] = {"id": f"{icao}-{int(pl['first'])}", "icao": icao, "call": pl.get("call"),
+                               "first": round(pl["first"], 1), "last": round(pl["last"], 1), "msgs": pl["msgs"],
+                               "country": adsb_db.country(icao), "path": pl.get("path", [])}
+        name, flight = adsb_db.airline(pl.get("call"))
+        rec["airline"], rec["flight"] = name, flight
+        if "cat" in pl:
+            rec["category"] = adsb_db.category(*pl["cat"])
+        if "alt_ft" in pl:
+            rec["alt_m"] = round(pl["alt_ft"] * 0.3048)
+        info = self._adsb_ac.get(icao)
+        if info:
+            rec.update({k: info[k] for k in ("registration", "type", "manufacturer", "owner") if info.get(k)})
+        route = self._adsb_route.get(pl.get("call") or "")
+        if route:
+            rec["route"] = route
+        if pl.get("path") and self.meteo:
+            kms = [adsb_mod.distance_km(self.meteo.location, (pt[0], pt[1])) for pt in pl["path"]]
+            rec["km_min"] = round(min(kms), 1)
+        return rec
+
+    def _save_adsb_history(self) -> None:
+        path = self._adsb_file()
+        if path is None:
+            return
+        data = json.dumps({"record": self.adsb_record, "flights": self.adsb_history, "time": time.time()})
+        asyncio.get_running_loop().run_in_executor(None, path.write_text, data)
+
+    def _adsb_compact(self) -> list[dict[str, Any]]:
+        """Lo storico senza le tracce (leggero per la lista); le tracce si chiedono a parte."""
+        return [{k: v for k, v in f.items() if k != "path"} | {"points": len(f.get("path", []))}
+                for f in self.adsb_history]
+
+    def _emit_adsb_history(self) -> None:
+        self._emit({"kind": "adsb_history", "flights": self._adsb_compact(), "record": self.adsb_record,
+                    "hours": ADSB_HISTORY_H, "home": list(self.meteo.location) if self.meteo else None})
+
+    async def adsb_set_record(self, on: bool) -> None:
+        self.adsb_record = on
+        if self.adsb_tracker is not None:
+            self.adsb_tracker.record = on
+        if self.status["adsb"]:
+            self.status["adsb"]["record"] = on
+        self._save_adsb_history()
+        self._emit_adsb_history()
+
+    async def adsb_clear_history(self) -> None:
+        self.adsb_history = []
+        self._save_adsb_history()
+        self._emit_adsb_history()
+
+    def adsb_history_paths(self, ids: list[str]) -> dict[str, list]:
+        want = set(ids)
+        return {f["id"]: f.get("path", []) for f in self.adsb_history if f["id"] in want}
 
     async def _adsb_yield(self, resume: bool) -> None:
         """Libera la chiavetta dall'ADS-B per un'altra operazione. resume=True: la riprende dopo."""
@@ -1101,7 +1204,9 @@ class SpectrumScanner:
                         frames = await loop.run_in_executor(None, work, tail + raw)
                         tail = raw[-ADSB_OVERLAP * 2:]
                         tracker.feed_frames(frames)
-                        tracker.prune(ADSB_PRUNE_S)
+                        gone = tracker.prune(ADSB_PRUNE_S)
+                        if self.adsb_record and gone:
+                            self._record_flights(gone)
                         if loop.time() - last_emit >= ADSB_EMIT_S:
                             last_emit = loop.time()
                             ac = tracker.aircraft()
@@ -1130,12 +1235,15 @@ class SpectrumScanner:
             _LOGGER.warning("Ricevitore ADS-B interrotto: %s", msg)
             self._emit({"kind": "adsb_error", "error": msg})
         finally:
+            if self.adsb_record and self.adsb_tracker is not None:
+                self._record_flights(list(self.adsb_tracker.planes.values()))
             if asyncio.current_task() is self._adsb_task:
                 self._adsb_task = None
             self.status["adsb"] = None
             self.adsb_tracker = None
             self._update_active()
             self._emit({"kind": "adsb", "done": True})
+            await self._adsb_maybe_resume()
 
     def _adsb_enrich(self, aircraft: list[dict[str, Any]]) -> None:
         """Unisce agli aerei i dettagli online già in cache, e avvia la ricerca di quelli nuovi."""

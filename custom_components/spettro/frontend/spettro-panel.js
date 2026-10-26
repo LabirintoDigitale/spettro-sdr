@@ -1,7 +1,7 @@
 // Pannello "Spettro" per Home Assistant: grafico dello spettro, waterfall e picchi.
 
 // deve coincidere con VERSION in const.py: se il backend ne riporta un'altra manca un riavvio
-const PANEL_VERSION = "1.24.0";
+const PANEL_VERSION = "1.25.0";
 
 const PRESETS = [
   ["Personalizzato", null, null],
@@ -312,6 +312,7 @@ class SpettroPanel extends HTMLElement {
     if (m.kind === "dab_scan") { this._dabScan = m; this._renderDabScan(); return; }
     if (m.kind === "adsb") { this._adsb = m.done ? null : m; this._renderAdsb(); return; }
     if (m.kind === "adsb_error") { this._msg(`ADS-B: ${m.error}`, true); return; }
+    if (m.kind === "adsb_history") { this._adsbHistory = m.flights || []; this._adsbRecord = !!m.record; this._adsbHistHours = m.hours; this._adsbHome = m.home || this._adsbHome; this._renderAdsbHist(); return; }
     if (m.kind === "live_data") {
       if (!this._live || this._live.decoder !== "dati") return;
       this._live.data_log = (this._live.data_log || []).concat(m.new).slice(-200);
@@ -569,10 +570,12 @@ class SpettroPanel extends HTMLElement {
             <button class="primary" id="adsbbtn">▶ Avvia</button>
             <label class="chk" title="Tiene la chiavetta su 1090 MHz anche quando chiudi il pannello, finché non lo fermi"><input type="checkbox" id="adsbcont"> Resta attivo a pannello chiuso</label>
             <label class="chk" title="Scarica da internet (adsbdb.com) modello, immatricolazione, compagnia e rotta partenza→arrivo"><input type="checkbox" id="adsbonline"> Dettagli da internet</label>
+            <label class="chk" title="Tieni in uno storico i voli intercettati (con la traccia); si cancellano da soli dopo 24 ore"><input type="checkbox" id="adsbrec"> Registra storico</label>
             <span class="hint" id="adsbstat"></span>
           </div>
           <canvas id="adsbradar" style="display:none;width:100%;max-width:420px;margin:10px auto 0;aspect-ratio:1"></canvas>
           <div id="adsblist"></div>
+          <div id="adsbhist"></div>
         </div>
         <div class="card" id="meteocard">
           <h3 style="margin:0">🛰️ Satelliti meteo e immagini</h3>
@@ -811,6 +814,25 @@ class SpettroPanel extends HTMLElement {
     };
     $("adsbcont").addEventListener("change", adsbOpts);
     $("adsbonline").addEventListener("change", adsbOpts);
+    $("adsbrec").addEventListener("change", async (e) => {
+      try { await this._hass.callWS({ type: "spettro/adsb", action: "record", record: e.target.checked }); } catch (err) { this._msg(err.message || String(err), true); }
+    });
+    $("adsbhist").addEventListener("click", async (e) => {
+      const act = e.target.closest("[data-hact]");
+      if (act) {
+        const a = act.dataset.hact;
+        if (a === "clear") { if (confirm("Svuotare lo storico dei voli?")) try { await this._hass.callWS({ type: "spettro/adsb", action: "clear_history" }); } catch (err) { this._msg(err.message || String(err), true); } }
+        else if (a === "all") this._setAdsbSelection(this._adsbHistory.filter((f) => f.points > 1).map((f) => f.id));
+        else if (a === "none") this._setAdsbSelection([]);
+        return;
+      }
+      const cb = e.target.closest("input[data-hid]");
+      if (cb) {
+        const sel = new Set(this._adsbSel || []);
+        if (cb.checked) sel.add(cb.dataset.hid); else sel.delete(cb.dataset.hid);
+        this._setAdsbSelection([...sel]);
+      }
+    });
     $("isssstv").addEventListener("change", (e) => meteoCfg({ iss_sstv: e.target.checked }));
     $("imglisten").addEventListener("click", () => {
       const [name, mhz, mode, dec, bw] = IMG_PRESETS[+$("imgpreset").value];
@@ -1584,13 +1606,12 @@ class SpettroPanel extends HTMLElement {
     $("adsbstat").textContent = running
       ? `${m.count} aere${m.count === 1 ? "o" : "i"} in vista · ${m.messages} messaggi ricevuti`
       : "Fermo.";
-    const radar = $("adsbradar");
-    radar.style.display = running ? "" : "none";
     const list = $("adsblist");
-    if (!running) { list.innerHTML = ""; this._adsbTrails = {}; return; }
+    if (!running) { list.innerHTML = ""; this._adsbTrails = {}; this._drawRadar(); return; }
     const ac = m.aircraft || [];
+    this._adsbHome = m.home || this._adsbHome;
     this._updateAdsbTrails(ac);
-    this._drawAdsbRadar(ac, m.home);
+    this._drawRadar();
     if (!ac.length) { list.innerHTML = `<div class="hint" style="margin-top:8px">In ascolto… gli aerei compaiono quando passano in portata (quota alta = più lontano si sente). Serve un'antenna sui 1090 MHz.</div>`; return; }
     const dir = (b) => b == null ? "" : ["N", "NE", "E", "SE", "S", "SO", "O", "NO"][Math.round(b / 45) % 8];
     const ap = (x) => x ? `${esc(x.city || x.name || x.iata || "?")}${x.iata ? ` (${esc(x.iata)})` : ""}` : "?";
@@ -1660,8 +1681,88 @@ class SpettroPanel extends HTMLElement {
     }
   }
 
-  _drawAdsbRadar(ac, home) {
+  _renderAdsbHist() {
+    const rec = this.shadowRoot.getElementById("adsbrec");
+    if (rec) rec.checked = !!this._adsbRecord;
+    const el = this.shadowRoot.getElementById("adsbhist");
+    if (!el) return;
+    const h = this._adsbHistory || [];
+    // tieni valida la selezione
+    const ids = new Set(h.map((f) => f.id));
+    if (this._adsbSel) this._adsbSel = new Set([...this._adsbSel].filter((x) => ids.has(x)));
+    if (!h.length) {
+      el.innerHTML = this._adsbRecord ? `<div class="hint" style="margin-top:8px">Storico attivo: i voli intercettati compariranno qui (si cancellano dopo 24 ore).</div>` : "";
+      this._drawRadar();
+      return;
+    }
+    const sel = this._adsbSel || new Set();
+    const hm = (t) => new Date(t * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false });
+    el.innerHTML = `<div class="row" style="justify-content:space-between;align-items:center;margin-top:10px">
+        <h4 class="sub" style="margin:0">Storico voli (${h.length})</h4>
+        <span class="hint">si cancellano dopo ${Math.round(this._adsbHistHours || 24)} h</span></div>
+      <div class="row" style="margin:4px 0">
+        <button data-hact="all">Mostra tutti sul radar</button>
+        <button data-hact="none">Nessuno</button>
+        <button data-hact="clear" title="Cancella tutto lo storico">🗑 Svuota storico</button></div>
+      <div class="planes" style="max-height:18em;overflow:auto">${h.map((f) => {
+        const route = f.route && (f.route.origin || f.route.destination)
+          ? `${(f.route.origin && (f.route.origin.iata || f.route.origin.city)) || "?"} → ${(f.route.destination && (f.route.destination.iata || f.route.destination.city)) || "?"}` : "";
+        const who = [f.airline || f.owner, f.registration, f.country, f.type || f.category].filter(Boolean).join(" · ");
+        return `<label class="plane" style="cursor:pointer;align-items:center">
+          <div class="pleft" style="display:flex;gap:8px;align-items:baseline">
+            <input type="checkbox" data-hid="${f.id}" ${sel.has(f.id) ? "checked" : ""} ${f.points > 1 ? "" : "disabled title='nessuna traccia da mostrare'"}>
+            <div><b>${esc(f.call || f.icao)}</b>${who ? ` · <span class="hint">${esc(who)}</span>` : ""}
+              ${route ? `<br><span class="hint">🛫 ${esc(route)}</span>` : ""}
+              <br><span class="hint">${hm(f.first)}–${hm(f.last)}${f.km_min != null ? ` · minimo ${f.km_min.toLocaleString("it-IT")} km` : ""}${f.points > 1 ? ` · ${f.points} punti` : " · senza traccia"}</span></div>
+          </div></label>`; }).join("")}</div>`;
+    this._drawRadar();
+  }
+
+  async _setAdsbSelection(idsArr) {
+    this._adsbSel = new Set(idsArr);
+    this._adsbPaths = this._adsbPaths || {};
+    const missing = idsArr.filter((id) => !(id in this._adsbPaths));
+    if (missing.length) {
+      try {
+        const r = await this._hass.callWS({ type: "spettro/adsb_history", ids: missing });
+        Object.assign(this._adsbPaths, r.paths || {});
+      } catch (err) { this._msg(err.message || String(err), true); }
+    }
+    this._renderAdsbHist();
+  }
+
+  _geo(home, lat, lon) {
+    // distanza (km) e direzione (gradi, 0 = N) da casa a un punto
+    const t = Math.PI / 180, R = 6371;
+    const dlat = (lat - home[0]) * t, dlon = (lon - home[1]) * t;
+    const a = Math.sin(dlat / 2) ** 2 + Math.cos(home[0] * t) * Math.cos(lat * t) * Math.sin(dlon / 2) ** 2;
+    const km = R * 2 * Math.asin(Math.min(1, Math.sqrt(a)));
+    const y = Math.sin(dlon) * Math.cos(lat * t);
+    const x = Math.cos(home[0] * t) * Math.sin(lat * t) - Math.sin(home[0] * t) * Math.cos(lat * t) * Math.cos(dlon);
+    return { km, bearing: (Math.atan2(y, x) / t + 360) % 360 };
+  }
+
+  _histLines() {
+    // tracce storiche selezionate, convertite in {km,bearing,alt} usando la posizione di casa
+    const home = this._adsbHome;
+    if (!home || !this._adsbSel) return [];
+    const out = [];
+    for (const id of this._adsbSel) {
+      const path = (this._adsbPaths || {})[id];
+      if (!path || path.length < 2) continue;
+      out.push({ id, pts: path.map((p) => ({ ...this._geo(home, p[0], p[1]), alt: p[2] ? Math.round(p[2] * 0.3048) : 0 })),
+                 label: (this._adsbHistory.find((f) => f.id === id) || {}).call || id.split("-")[0] });
+    }
+    return out;
+  }
+
+  _drawRadar() {
     const cv = this.shadowRoot.getElementById("adsbradar");
+    const running = !!this._adsb;
+    const hist = this._histLines();
+    cv.style.display = running || hist.length ? "" : "none";
+    if (!running && !hist.length) return;
+    const ac = running ? (this._adsb.aircraft || []) : [];
     const dpr = window.devicePixelRatio || 1;
     const size = Math.round((cv.clientWidth || 360) * dpr);
     if (cv.width !== size) { cv.width = size; cv.height = size; }
@@ -1671,7 +1772,8 @@ class SpettroPanel extends HTMLElement {
     const css = (v, d) => (getComputedStyle(this).getPropertyValue(v).trim() || d);
     const fg = css("--primary-text-color", "#ddd"), grid = css("--divider-color", "#555"), sec = css("--secondary-text-color", "#999");
     const withPos = ac.filter((a) => a.km != null && a.bearing != null);
-    const maxKm = Math.max(50, ...withPos.map((a) => a.km));
+    const histKm = hist.flatMap((h) => h.pts.map((p) => p.km));
+    const maxKm = Math.max(50, ...withPos.map((a) => a.km), ...histKm);
     const rings = maxKm <= 50 ? [25, 50] : maxKm <= 120 ? [40, 80, 120] : [Math.round(maxKm / 3), Math.round(2 * maxKm / 3), Math.ceil(maxKm)];
     const rr = rings[rings.length - 1];
     const rad = R - pad;
@@ -1685,6 +1787,19 @@ class SpettroPanel extends HTMLElement {
     g.fillText("N", cx, pad / 2); g.fillText("S", cx, W - pad / 2); g.fillText("E", W - pad / 2, cy); g.fillText("O", pad / 2, cy);
     // casa
     g.fillStyle = fg; g.beginPath(); g.arc(cx, cy, 3 * dpr, 0, 2 * Math.PI); g.fill();
+    const toXY = (o) => { const ang = (o.bearing - 90) * Math.PI / 180, d = rad * Math.min(o.km, rr) / rr;
+      return [cx + d * Math.cos(ang), cy + d * Math.sin(ang)]; };
+    // tracce storiche selezionate: linea continua con un pallino e l'etichetta alla fine
+    g.lineWidth = 2 * dpr; g.lineCap = "round";
+    for (const h of hist) {
+      g.strokeStyle = sec; g.globalAlpha = 0.8; g.beginPath();
+      h.pts.forEach((p, i) => { const [x, y] = toXY(p); i ? g.lineTo(x, y) : g.moveTo(x, y); });
+      g.stroke(); g.globalAlpha = 1;
+      const last = h.pts[h.pts.length - 1], [lx, ly] = toXY(last);
+      g.fillStyle = sec; g.beginPath(); g.arc(lx, ly, 3 * dpr, 0, 2 * Math.PI); g.fill();
+      g.textAlign = "left"; g.textBaseline = "bottom"; g.font = `${11 * dpr}px sans-serif`;
+      g.fillText(h.label, lx + 5 * dpr, ly - 3 * dpr);
+    }
     // scie: il percorso recente di ogni aereo, che svanisce verso la coda
     const tr = this._adsbTrails || {};
     g.lineWidth = 2 * dpr; g.lineCap = "round";

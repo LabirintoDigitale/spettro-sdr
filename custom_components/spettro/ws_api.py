@@ -50,6 +50,7 @@ def async_setup(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, ws_scan_now)
     websocket_api.async_register_command(hass, ws_dab_scan)
     websocket_api.async_register_command(hass, ws_adsb)
+    websocket_api.async_register_command(hass, ws_adsb_history)
     websocket_api.async_register_command(hass, ws_set_enabled)
     websocket_api.async_register_command(hass, ws_analyze)
     websocket_api.async_register_command(hass, ws_ask_ai)
@@ -168,24 +169,45 @@ async def ws_dab_scan(hass: HomeAssistant, connection: websocket_api.ActiveConne
 
 @websocket_api.websocket_command({
     vol.Required("type"): "spettro/adsb",
-    vol.Optional("action", default="start"): vol.In(["start", "stop"]),
+    vol.Optional("action", default="start"): vol.In(["start", "stop", "record", "clear_history"]),
     vol.Optional("continuous", default=False): bool,
     vol.Optional("online", default=False): bool,
+    vol.Optional("record", default=False): bool,
 })
 @websocket_api.async_response
 async def ws_adsb(hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]) -> None:
-    """Avvia o ferma il ricevitore aerei ADS-B (1090 MHz)."""
+    """Avvia/ferma il ricevitore aerei ADS-B, o gestisce la registrazione dello storico."""
     _entry, scanner = _scanner(hass, connection, msg)
     if scanner is None:
         return
     try:
-        if msg["action"] == "stop":
+        action = msg["action"]
+        if action == "stop":
             await scanner.adsb_stop()
+            connection.send_result(msg["id"], {})
+        elif action == "record":
+            await scanner.adsb_set_record(msg["record"])
+            connection.send_result(msg["id"], {"record": scanner.adsb_record})
+        elif action == "clear_history":
+            await scanner.adsb_clear_history()
             connection.send_result(msg["id"], {})
         else:
             connection.send_result(msg["id"], await scanner.adsb_start(msg["continuous"], msg["online"]))
     except RuntimeError as err:
         connection.send_error(msg["id"], "adsb_failed", str(err))
+
+
+@websocket_api.websocket_command({
+    vol.Required("type"): "spettro/adsb_history",
+    vol.Required("ids"): [str],
+})
+@callback
+def ws_adsb_history(hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]) -> None:
+    """Le tracce (percorsi) dei voli selezionati nello storico, per disegnarli sul radar."""
+    _entry, scanner = _scanner(hass, connection, msg)
+    if scanner is None:
+        return
+    connection.send_result(msg["id"], {"paths": scanner.adsb_history_paths(msg["ids"])})
 
 
 @websocket_api.websocket_command({vol.Required("type"): "spettro/scan_now"})
