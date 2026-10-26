@@ -1,7 +1,7 @@
 // Pannello "Spettro" per Home Assistant: grafico dello spettro, waterfall e picchi.
 
 // deve coincidere con VERSION in const.py: se il backend ne riporta un'altra manca un riavvio
-const PANEL_VERSION = "1.25.2";
+const PANEL_VERSION = "1.26.0";
 
 const PRESETS = [
   ["Personalizzato", null, null],
@@ -510,20 +510,7 @@ class SpettroPanel extends HTMLElement {
       <div id="verwarn" class="err" style="display:none;padding:10px 16px;font-size:14px"></div>
       <div class="content">
         <div class="maincol">
-        <div class="card charts">
-          <div class="row">
-            <div class="status" id="status">Collegamento…</div>
-            <button class="primary" id="resume" style="display:none">Riattiva scansione</button>
-            <label class="chk"><input type="checkbox" id="showmax" checked> Max hold</label>
-            <button id="clearmax">Azzera max</button>
-            <button id="zoomscan" disabled title="Usa la zona ingrandita come nuovo intervallo di scansione">Scansiona zona</button>
-            <button id="resetzoom" disabled>Zoom 100%</button>
-          </div>
-          <div class="bar"><div id="bar"></div></div>
-          <canvas id="spec"></canvas>
-          <canvas id="wf"></canvas>
-          <div class="hint">Trascina sul grafico per ingrandire, doppio clic per tornare all'intervallo completo.</div>
-          <div class="ana">
+        <div class="card ana" id="anacard">
             <h3 style="margin:0">Analisi segnale</h3>
             <div class="row">
               <label class="selfreq" title="Frequenza da analizzare: si prende dal clic sul grafico o si scrive qui (Invio per confermare)">MHz
@@ -551,7 +538,20 @@ class SpettroPanel extends HTMLElement {
               <div id="liverds"></div>
             </div>
             <div id="anaout"></div>
+        </div>
+        <div class="card charts" id="chartcard">
+          <div class="row">
+            <div class="status" id="status">Collegamento…</div>
+            <button class="primary" id="resume" style="display:none">Riattiva scansione</button>
+            <label class="chk"><input type="checkbox" id="showmax" checked> Max hold</label>
+            <button id="clearmax">Azzera max</button>
+            <button id="zoomscan" disabled title="Usa la zona ingrandita come nuovo intervallo di scansione">Scansiona zona</button>
+            <button id="resetzoom" disabled>Zoom 100%</button>
           </div>
+          <div class="bar"><div id="bar"></div></div>
+          <canvas id="spec"></canvas>
+          <canvas id="wf"></canvas>
+          <div class="hint">Trascina sul grafico per ingrandire, doppio clic per tornare all'intervallo completo.</div>
         </div>
         <div class="card" id="dabcard">
           <h3 style="margin:0">📻 Radio DAB+</h3>
@@ -1067,6 +1067,8 @@ class SpettroPanel extends HTMLElement {
     if (this._raf) return;
     this._raf = requestAnimationFrame(() => {
       this._raf = null;
+      const spec = this.shadowRoot.getElementById("spec");
+      if (!spec || !spec.clientWidth) return;  // grafico compresso/nascosto: niente da disegnare
       this._drawSpectrum();
       this._drawWaterfall();
       const z = this.shadowRoot.getElementById("resetzoom");
@@ -1558,11 +1560,11 @@ class SpettroPanel extends HTMLElement {
   }
 
   _setupFolds() {
-    // ogni scheda (tranne grafico e analisi) si chiude e si riapre con il pulsante a destra del titolo; il browser lo ricorda
+    // ogni scheda si chiude e si riapre con il pulsante a destra del titolo; il browser lo ricorda
     let saved = {};
     try { saved = JSON.parse(localStorage.getItem("spettro_folded") || "{}"); } catch (err) { /* memoria del browser non disponibile */ }
     this._folded = saved;
-    for (const card of this.shadowRoot.querySelectorAll(".card:not(.charts)")) {
+    for (const card of this.shadowRoot.querySelectorAll(".card")) {
       let head = card.firstElementChild;
       if (!head) continue;
       if (head.tagName === "H3") {
@@ -1586,6 +1588,8 @@ class SpettroPanel extends HTMLElement {
         card.classList.toggle("folded", f);
         btn.textContent = f ? "▸" : "▾";
         btn.title = f ? "Espandi" : "Comprimi";
+        // il grafico, riaperto, va ridisegnato (da chiuso il canvas aveva larghezza 0)
+        if (!f && card.id === "chartcard") requestAnimationFrame(() => this._draw());
       };
       btn.addEventListener("click", () => {
         this._folded[key] = !this._folded[key];
