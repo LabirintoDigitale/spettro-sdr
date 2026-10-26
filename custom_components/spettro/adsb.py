@@ -20,6 +20,7 @@ import numpy as np
 from . import adsb_db
 
 RATE = 2_400_000  # campionamento del ricevitore ADS-B in diretta (≥ 2 MS/s)
+PATH_MAX = 3000  # punti massimi della traccia di un volo (una posizione ~2/s → copre ~25 min interi)
 FREQ = 1_090_000_000.0
 _CHARS = "#ABCDEFGHIJKLMNOPQRSTUVWXYZ##### ###############0123456789######"
 
@@ -243,10 +244,11 @@ class AircraftTracker:
                 self.positions += 1
                 if self.record:
                     path = pl.setdefault("path", [])
-                    # un punto ogni ~3 s o ogni ~0,3 km: traccia leggera ma fedele
-                    if not path or now - path[-1][3] > 3 or abs(path[-1][0] - pos[0]) + abs(path[-1][1] - pos[1]) > 0.004:
-                        path.append([round(pos[0], 4), round(pos[1], 4), pl.get("alt_ft"), round(now, 1)])
-                        if len(path) > 400:
+                    pt = [round(pos[0], 4), round(pos[1], 4), pl.get("alt_ft"), round(now, 1)]
+                    # un punto per ogni posizione ricevuta (si salta solo se identica all'ultima)
+                    if not path or path[-1][0] != pt[0] or path[-1][1] != pt[1]:
+                        path.append(pt)
+                        if len(path) > PATH_MAX:
                             del path[0]
         elif tc == 19 and mv(5, 8) in (1, 2):  # velocità al suolo
             ew = (mv(14, 24) - 1) * (-1 if me[13] else 1)
