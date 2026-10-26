@@ -1862,10 +1862,9 @@ class SpectrumScanner:
                 lo = (n - keep) // 2
                 spectrum[i * keep : (i + 1) * keep] = psd[lo : lo + keep]
 
-                # raccoglie i candidati: si analizzano alla fine, i più forti di tutta la scansione per
-                # primi (così in una scansione larga le bande forti non vengono "saltate" perché il budget
-                # si è esaurito in basso in frequenza)
                 if s.auto_analyze:
+                    # stesso criterio del grafico: soglia sopra il rumore della zona; dalla scansione
+                    # precedente (vede anche i passi successivi) o, la prima volta, dai passi già fatti
                     prev = self._floor_prev
                     if prev is not None and prev[0] == (f_start, bin_hz, total_bins):
                         noise = float(np.median(prev[1][i * keep: (i + 1) * keep]))
@@ -1876,9 +1875,29 @@ class SpectrumScanner:
                         noise = max(step_low(psd[lo: lo + keep]), zone_floor(
                             [step_low(spectrum[k * keep: (k + 1) * keep]) for k in range(first, i + 1)]))
                     f0 = f_start + i * keep * bin_hz
-                    for f, scan_snr in self._spike_candidates(psd[lo: lo + keep], f0, bin_hz, noise + s.threshold_db, noise):
-                        if not any(abs(f - g) <= SPIKE_TOL_HZ for g, _ in candidates):
-                            candidates.append((f, scan_snr))
+                    spikes = self._spike_candidates(psd[lo: lo + keep], f0, bin_hz, noise + s.threshold_db, noise)
+                    if s.auto_limit_sweep:
+                        # budget limitato: si raccolgono e si analizzano i più forti di tutta la scansione
+                        # alla fine (così in una scansione larga le bande forti non vengono "saltate"
+                        # perché il budget si è esaurito in basso in frequenza)
+                        for f, scan_snr in spikes:
+                            if not any(abs(f - g) <= SPIKE_TOL_HZ for g, _ in candidates):
+                                candidates.append((f, scan_snr))
+                    elif spikes:
+                        # nessun limite: si analizza subito, così l'archivio si riempie man mano e il
+                        # lavoro non va perso se la scansione viene messa in pausa (passaggio satellite/aerei)
+                        if i < steps - 1:
+                            last_partial = time.monotonic()
+                            progress = (i + 1) / steps
+                            self.status["progress"] = progress
+                            self._publish(spectrum, (i + 1) * keep, total_bins, f_start, f_stop,
+                                          bin_hz, pool, min_sep_hz, sweep_id, False, progress, None)
+                            self._emit(dict(self.status))
+                        for f, scan_snr in spikes:
+                            if not self._active.is_set():
+                                raise ScanPaused
+                            auto_done += 1
+                            await self._auto_analyze(reader, writer, rate, f, discard_bytes, scan_snr)
 
                 now = time.monotonic()
                 if now - last_partial >= PARTIAL_EVERY and i < steps - 1:
@@ -1889,9 +1908,9 @@ class SpectrumScanner:
                                   bin_hz, pool, min_sep_hz, sweep_id, False, progress, None)
                     self._emit(dict(self.status))
 
-            if s.auto_analyze and candidates:
+            if s.auto_analyze and s.auto_limit_sweep and candidates:
                 candidates.sort(key=lambda c: c[1], reverse=True)  # i più forti per primi
-                budget = int(s.auto_max_per_sweep) if s.auto_limit_sweep else len(candidates)
+                budget = int(s.auto_max_per_sweep)
                 # il grafico completo subito, poi le analisi (che possono durare parecchi secondi)
                 self.status["progress"] = 1.0
                 self._publish(spectrum, total_bins, total_bins, f_start, f_stop,
