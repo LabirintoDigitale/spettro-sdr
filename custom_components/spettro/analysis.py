@@ -161,6 +161,14 @@ def classify(r: dict[str, Any]) -> tuple[str, str | None]:
         # in onde corte, con righe da ~1 kHz, voce SSB, Morse e telescriventi si somigliano
         return "segnale stretto in onde corte (voce SSB, Morse o dati): ascoltalo in USB o LSB", "usb" if f >= 10 else "lsb"
     if bw >= VOICE_MAX_KHZ:
+        # FM a banda larga analogica (radio broadcast): larga ~150–260 kHz ma "appuntita", cioè con
+        # l'energia concentrata al centro (banda a −3 dB molto più stretta di quella occupata) e lo
+        # spettro non piatto. Un vero segnale dati riempie la banda in modo piatto (−3 dB ≈ occupata).
+        # Capita anche appena sopra la banda FM (108–115 MHz) come immagine di una stazione forte.
+        peaked = r["bw_3db_khz"] > 0 and bw >= 2.5 * r["bw_3db_khz"] and r.get("flatness", 1) < FLAT_DIGITAL
+        if 130 <= bw <= 260 and peaked and r["continuous"] and not (880 <= f <= 960 or 1710 <= f <= 1880):
+            nota = " (probabile immagine della FM: prova ad abbassare il guadagno)" if f > 108 else ""
+            return "FM a banda larga: radio broadcast (audio)" + nota, "wfm"
         # troppo largo per la fonia analogica: modulazione digitale
         if (880 <= f <= 960 or 1710 <= f <= 1880) and 120 <= bw <= 350:
             return "portante GSM (200 kHz, GMSK): telefonia cellulare digitale, cifrata", None
