@@ -1,7 +1,7 @@
 // Pannello "Spettro" per Home Assistant: grafico dello spettro, waterfall e picchi.
 
 // deve coincidere con VERSION in const.py: se il backend ne riporta un'altra manca un riavvio
-const PANEL_VERSION = "1.25.1";
+const PANEL_VERSION = "1.25.2";
 
 const PRESETS = [
   ["Personalizzato", null, null],
@@ -1796,9 +1796,15 @@ class SpettroPanel extends HTMLElement {
       h.pts.forEach((p, i) => { const [x, y] = toXY(p); i ? g.lineTo(x, y) : g.moveTo(x, y); });
       g.stroke(); g.globalAlpha = 1;
       const last = h.pts[h.pts.length - 1], [lx, ly] = toXY(last);
-      g.fillStyle = sec; g.beginPath(); g.arc(lx, ly, 3 * dpr, 0, 2 * Math.PI); g.fill();
+      // freccia in fondo, orientata nel verso di marcia (dall'ultimo tratto della traccia)
+      let px = lx, py = ly;
+      for (let i = h.pts.length - 2; i >= 0; i--) { const [x, y] = toXY(h.pts[i]); if (Math.hypot(lx - x, ly - y) > 4 * dpr) { px = x; py = y; break; } }
+      const ang = Math.atan2(ly - py, lx - px);
+      g.fillStyle = sec; g.save(); g.translate(lx, ly); g.rotate(ang);
+      g.beginPath(); g.moveTo(8 * dpr, 0); g.lineTo(-4 * dpr, -4 * dpr); g.lineTo(-4 * dpr, 4 * dpr); g.closePath(); g.fill();
+      g.restore();
       g.textAlign = "left"; g.textBaseline = "bottom"; g.font = `${11 * dpr}px sans-serif`;
-      g.fillText(h.label, lx + 5 * dpr, ly - 3 * dpr);
+      g.fillText(h.label, lx + 8 * dpr, ly - 4 * dpr);
     }
     // scie: il percorso recente di ogni aereo, che svanisce verso la coda
     const tr = this._adsbTrails || {};
