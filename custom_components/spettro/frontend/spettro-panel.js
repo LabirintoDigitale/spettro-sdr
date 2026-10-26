@@ -1,7 +1,7 @@
 // Pannello "Spettro" per Home Assistant: grafico dello spettro, waterfall e picchi.
 
 // deve coincidere con VERSION in const.py: se il backend ne riporta un'altra manca un riavvio
-const PANEL_VERSION = "1.26.0";
+const PANEL_VERSION = "1.26.1";
 
 const PRESETS = [
   ["Personalizzato", null, null],
@@ -1777,9 +1777,11 @@ class SpettroPanel extends HTMLElement {
     const fg = css("--primary-text-color", "#ddd"), grid = css("--divider-color", "#555"), sec = css("--secondary-text-color", "#999");
     const withPos = ac.filter((a) => a.km != null && a.bearing != null);
     const histKm = hist.flatMap((h) => h.pts.map((p) => p.km));
-    const maxKm = Math.max(50, ...withPos.map((a) => a.km), ...histKm);
-    const rings = maxKm <= 50 ? [25, 50] : maxKm <= 120 ? [40, 80, 120] : [Math.round(maxKm / 3), Math.round(2 * maxKm / 3), Math.ceil(maxKm)];
-    const rr = rings[rings.length - 1];
+    const allKm = [...withPos.map((a) => a.km), ...histKm].filter((v) => v != null).sort((a, b) => a - b);
+    const scale = allKm.length ? allKm[Math.min(allKm.length - 1, Math.floor(allKm.length * 0.9))] : 50;
+    const NICE = [10, 15, 25, 40, 60, 100, 150, 250, 400, 700];
+    const rr = NICE.find((v) => v >= Math.max(10, scale)) || Math.ceil(scale / 100) * 100;
+    const rings = rr <= 40 ? [Math.round(rr / 2), rr] : [Math.round(rr / 3), Math.round(2 * rr / 3), rr];
     const rad = R - pad;
     g.strokeStyle = grid; g.fillStyle = sec; g.lineWidth = dpr; g.font = `${11 * dpr}px sans-serif`; g.textAlign = "center";
     for (const km of rings) {
@@ -1793,23 +1795,34 @@ class SpettroPanel extends HTMLElement {
     g.fillStyle = fg; g.beginPath(); g.arc(cx, cy, 3 * dpr, 0, 2 * Math.PI); g.fill();
     const toXY = (o) => { const ang = (o.bearing - 90) * Math.PI / 180, d = rad * Math.min(o.km, rr) / rr;
       return [cx + d * Math.cos(ang), cy + d * Math.sin(ang)]; };
-    // tracce storiche selezionate: linea continua con un pallino e l'etichetta alla fine
-    g.lineWidth = 2 * dpr; g.lineCap = "round";
-    for (const h of hist) {
-      g.strokeStyle = sec; g.globalAlpha = 0.8; g.beginPath();
+    // etichette che non si accavallano: se non c'è spazio in nessuna posizione, l'etichetta si salta
+    const placed = [];
+    g.font = `${11 * dpr}px sans-serif`;
+    const label = (text, x, y, color) => {
+      const w = g.measureText(text).width, h = 13 * dpr;
+      const hit = (r) => placed.some((q) => r[0] < q[0] + q[2] && r[0] + r[2] > q[0] && r[1] < q[1] + q[3] && r[1] + r[3] > q[1]);
+      for (const [ox, oy] of [[7, -3], [7, 13], [-w - 7, -3], [-w - 7, 13], [7, -16], [7, 26]]) {
+        const lx = x + ox * dpr, ly = y + oy * dpr, r = [lx, ly - h, w, h];
+        if (!hit(r)) { placed.push(r); g.fillStyle = color; g.textAlign = "left"; g.textBaseline = "bottom"; g.fillText(text, lx, ly); return; }
+      }
+    };
+    const palette = (i) => `hsl(${(i * 67) % 360},65%,58%)`;
+    // tracce storiche selezionate: ognuna con un colore diverso, freccia e etichetta
+    g.lineWidth = 2 * dpr; g.lineCap = "round"; g.lineJoin = "round";
+    hist.forEach((h, hi) => {
+      const col = palette(hi);
+      g.strokeStyle = col; g.beginPath();
       h.pts.forEach((p, i) => { const [x, y] = toXY(p); i ? g.lineTo(x, y) : g.moveTo(x, y); });
-      g.stroke(); g.globalAlpha = 1;
+      g.stroke();
       const last = h.pts[h.pts.length - 1], [lx, ly] = toXY(last);
-      // freccia in fondo, orientata nel verso di marcia (dall'ultimo tratto della traccia)
       let px = lx, py = ly;
       for (let i = h.pts.length - 2; i >= 0; i--) { const [x, y] = toXY(h.pts[i]); if (Math.hypot(lx - x, ly - y) > 4 * dpr) { px = x; py = y; break; } }
       const ang = Math.atan2(ly - py, lx - px);
-      g.fillStyle = sec; g.save(); g.translate(lx, ly); g.rotate(ang);
+      g.fillStyle = col; g.save(); g.translate(lx, ly); g.rotate(ang);
       g.beginPath(); g.moveTo(8 * dpr, 0); g.lineTo(-4 * dpr, -4 * dpr); g.lineTo(-4 * dpr, 4 * dpr); g.closePath(); g.fill();
       g.restore();
-      g.textAlign = "left"; g.textBaseline = "bottom"; g.font = `${11 * dpr}px sans-serif`;
-      g.fillText(h.label, lx + 8 * dpr, ly - 4 * dpr);
-    }
+      label(h.label, lx, ly, col);
+    });
     // scie: il percorso recente di ogni aereo, che svanisce verso la coda
     const tr = this._adsbTrails || {};
     g.lineWidth = 2 * dpr; g.lineCap = "round";
@@ -1835,8 +1848,7 @@ class SpettroPanel extends HTMLElement {
       g.save(); g.translate(x, y); g.rotate(tr * Math.PI / 180);
       g.beginPath(); g.moveTo(7 * dpr, 0); g.lineTo(-4 * dpr, -4 * dpr); g.lineTo(-4 * dpr, 4 * dpr); g.closePath(); g.fill();
       g.restore();
-      g.fillStyle = fg; g.textAlign = "left"; g.textBaseline = "bottom";
-      g.fillText(a.call || a.icao, x + 6 * dpr, y - 3 * dpr);
+      label(a.call || a.icao, x, y, fg);
     }
   }
 
