@@ -91,6 +91,7 @@ ADSB_EMIT_S = 1.0  # ogni quanto si aggiorna il pannello
 ADSB_CHUNK = int(adsb_mod.RATE * 0.25)  # campioni per lettura (0,25 s)
 ADSB_OVERLAP = int(adsb_mod.RATE * 140e-6)  # coda riusata: un messaggio a cavallo non si perde
 ADSB_RETRY_MAX = 6  # riconnessioni di fila dopo un errore prima di arrendersi (rtl_tcp ogni tanto resetta)
+LIVE_RETRY_MAX = 6  # come sopra, per l'analisi continua: un reset non la ferma, prova a riconnettersi
 DATA_WINDOW_S = 2.0  # "Riconosci dati": finestra di IQ esaminata
 DATA_EVERY_S = 1.5  # ogni quanto (le finestre si sovrappongono: i pacchetti a cavallo non si perdono)
 TEXT_KEEP = 4000  # caratteri di testo decodificato tenuti nello stato (per chi apre il pannello dopo)
@@ -919,76 +920,89 @@ class SpectrumScanner:
         discard = RCV_BUF + 2 * READ_LIMIT + int(LIVE_RATE * 2 * max(self.settings.settle_ms, 100) / 1000)
         discard -= discard % 2
         rds_task: asyncio.Task | None = None
+        fails = 0  # errori di connessione consecutivi (azzerati appena arrivano campioni)
         try:
             async with self._radio:
-                reader, writer, tuner = await _open(self.host, self.port)
-                try:
-                    self.status["tuner"] = TUNER_NAMES.get(tuner, f"Tipo {tuner}")
-                    await self._configure(writer, LIVE_RATE)
-                    await self._tune(writer, center, reader)
-                    async with asyncio.timeout(IO_TIMEOUT):
-                        await self._discard(reader, discard)
-                    demod = LiveDemod(LIVE_RATE, freq_hz - center, mode, bw)
-                    mpx: list[np.ndarray] = []
-                    keep = int(LIVE_RDS_WINDOW_S * demod.mid)
-                    last_rds = loop.time()
-                    while until is None or datetime.now(UTC) < until:
-                        async with asyncio.timeout(IO_TIMEOUT):
-                            raw = await reader.readexactly(CHUNK * 2)
-                        out = await loop.run_in_executor(None, _live_chunk, demod, raw, img, text, slot, time.time())
-                        if img is not None:
-                            await self._image_events(img, out)
-                        extra: dict[str, Any] = {}
-                        if text is not None:
-                            extra = {"text": out["text"], "text_info": text.status()["info"]}
-                            if out["text"] and self.status["live"]:
-                                self.status["live"]["text"] = (self.status["live"]["text"] + out["text"])[-TEXT_KEEP:]
-                        if decoder == "dati":
-                            data_raw.append(raw)
-                            while len(data_raw) * CHUNK > DATA_WINDOW_S * LIVE_RATE:
-                                data_raw.popleft()
-                            if loop.time() - last_data >= DATA_EVERY_S and (data_task is None or data_task.done()):
-                                last_data = loop.time()
-                                data_task = loop.create_task(self._live_data(b"".join(data_raw), freq_hz - center))
-                                slot_tasks.add(data_task)
-                                data_task.add_done_callback(slot_tasks.discard)
-                        if slot is not None:
-                            extra = {"digi": slot.status()}
-                            for start, seg in out["slots"]:
-                                task = loop.create_task(self._decode_slot(slot, start, seg))
-                                slot_tasks.add(task)
-                                task.add_done_callback(slot_tasks.discard)
-                        self._emit({
-                            **extra,
-                            "kind": "live",
-                            "freq_mhz": round(freq_hz / 1e6, 4),
-                            "mode": mode,
-                            "audio": base64.b64encode(out["pcm"]).decode(),
-                            "row": out["row"],
-                            "span_hz": out["span_hz"],
-                            "level_db": out["level_db"],
-                        })
-                        if out["mpx"] is None:
-                            continue
-                        mpx.append(out["mpx"])
-                        while sum(len(m) for m in mpx) - len(mpx[0]) >= keep:
-                            mpx.pop(0)
-                        # l'RDS si decodifica a parte, così la lettura dei campioni non si ferma
-                        if loop.time() - last_rds >= LIVE_RDS_EVERY_S and (rds_task is None or rds_task.done()):
-                            last_rds = loop.time()
-                            rds_task = loop.create_task(self._live_rds(np.concatenate(mpx), demod.mid))
-                finally:
-                    writer.close()
+                while True:  # un reset non ferma l'analisi: si prova a riconnettersi
                     try:
-                        await writer.wait_closed()
-                    except OSError:
-                        pass
+                        reader, writer, tuner = await _open(self.host, self.port)
+                        try:
+                            self.status["tuner"] = TUNER_NAMES.get(tuner, f"Tipo {tuner}")
+                            await self._configure(writer, LIVE_RATE)
+                            await self._tune(writer, center, reader)
+                            async with asyncio.timeout(IO_TIMEOUT):
+                                await self._discard(reader, discard)
+                            demod = LiveDemod(LIVE_RATE, freq_hz - center, mode, bw)
+                            mpx: list[np.ndarray] = []
+                            keep = int(LIVE_RDS_WINDOW_S * demod.mid)
+                            last_rds = loop.time()
+                            while until is None or datetime.now(UTC) < until:
+                                async with asyncio.timeout(IO_TIMEOUT):
+                                    raw = await reader.readexactly(CHUNK * 2)
+                                fails = 0  # arrivano campioni: azzera i tentativi di riconnessione
+                                out = await loop.run_in_executor(None, _live_chunk, demod, raw, img, text, slot, time.time())
+                                if img is not None:
+                                    await self._image_events(img, out)
+                                extra: dict[str, Any] = {}
+                                if text is not None:
+                                    extra = {"text": out["text"], "text_info": text.status()["info"]}
+                                    if out["text"] and self.status["live"]:
+                                        self.status["live"]["text"] = (self.status["live"]["text"] + out["text"])[-TEXT_KEEP:]
+                                if decoder == "dati":
+                                    data_raw.append(raw)
+                                    while len(data_raw) * CHUNK > DATA_WINDOW_S * LIVE_RATE:
+                                        data_raw.popleft()
+                                    if loop.time() - last_data >= DATA_EVERY_S and (data_task is None or data_task.done()):
+                                        last_data = loop.time()
+                                        data_task = loop.create_task(self._live_data(b"".join(data_raw), freq_hz - center))
+                                        slot_tasks.add(data_task)
+                                        data_task.add_done_callback(slot_tasks.discard)
+                                if slot is not None:
+                                    extra = {"digi": slot.status()}
+                                    for start, seg in out["slots"]:
+                                        task = loop.create_task(self._decode_slot(slot, start, seg))
+                                        slot_tasks.add(task)
+                                        task.add_done_callback(slot_tasks.discard)
+                                self._emit({
+                                    **extra,
+                                    "kind": "live",
+                                    "freq_mhz": round(freq_hz / 1e6, 4),
+                                    "mode": mode,
+                                    "audio": base64.b64encode(out["pcm"]).decode(),
+                                    "row": out["row"],
+                                    "span_hz": out["span_hz"],
+                                    "level_db": out["level_db"],
+                                })
+                                if out["mpx"] is None:
+                                    continue
+                                mpx.append(out["mpx"])
+                                while sum(len(m) for m in mpx) - len(mpx[0]) >= keep:
+                                    mpx.pop(0)
+                                # l'RDS si decodifica a parte, così la lettura dei campioni non si ferma
+                                if loop.time() - last_rds >= LIVE_RDS_EVERY_S and (rds_task is None or rds_task.done()):
+                                    last_rds = loop.time()
+                                    rds_task = loop.create_task(self._live_rds(np.concatenate(mpx), demod.mid))
+                        finally:
+                            writer.close()
+                            try:
+                                await writer.wait_closed()
+                            except OSError:
+                                pass
+                    except asyncio.CancelledError:
+                        raise
+                    except (OSError, TimeoutError, asyncio.IncompleteReadError, RtlTcpError) as err:
+                        msg = str(err) or type(err).__name__
+                        fails += 1
+                        if fails > LIVE_RETRY_MAX or (until is not None and datetime.now(UTC) >= until):
+                            _LOGGER.warning("Analisi continua interrotta: %s", msg)
+                            self._emit({"kind": "live_error", "error": msg})
+                            break
+                        _LOGGER.info("Analisi continua: riprovo a connettermi (%s) %d/%d", msg, fails, LIVE_RETRY_MAX)
+                        await asyncio.sleep(min(fails, 3))
+                        continue
+                    break  # loop interno finito (orario 'until' raggiunto): fine
         except asyncio.CancelledError:
             raise
-        except (OSError, TimeoutError, asyncio.IncompleteReadError, RtlTcpError) as err:
-            msg = str(err) or type(err).__name__
-            _LOGGER.warning("Analisi continua interrotta: %s", msg)
-            self._emit({"kind": "live_error", "error": msg})
         finally:
             if rds_task is not None:
                 rds_task.cancel()
@@ -1292,7 +1306,7 @@ class SpectrumScanner:
                             self._emit({"kind": "adsb_error", "error": msg})
                             break
                         _LOGGER.info("ADS-B: connessione persa (%s), riprovo (%d/%d)", msg, fails, ADSB_RETRY_MAX)
-                        await asyncio.sleep(min(2 ** (fails - 1), 8))
+                        await asyncio.sleep(min(fails, 3))
         except asyncio.CancelledError:
             raise
         finally:
