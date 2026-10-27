@@ -1,7 +1,7 @@
 // Pannello "Spettro" per Home Assistant: grafico dello spettro, waterfall e picchi.
 
 // deve coincidere con VERSION in const.py: se il backend ne riporta un'altra manca un riavvio
-const PANEL_VERSION = "1.28.0";
+const PANEL_VERSION = "1.28.1";
 
 const PRESETS = [
   ["Personalizzato", null, null],
@@ -409,9 +409,9 @@ class SpettroPanel extends HTMLElement {
         .digitab { width:100%; border-collapse:collapse; font-size:13px; }
         .digitab th, .digitab td { text-align:left; padding:3px 6px; border-bottom:1px solid var(--divider-color,#e0e0e0); white-space:nowrap; }
         .digitab td.msg { font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; white-space:normal; }
-        #adsblist .plane { display:flex; flex-wrap:wrap; gap:4px 14px; align-items:baseline; padding:8px 0; border-bottom:1px solid var(--divider-color,#e0e0e0); }
-        #adsblist .pleft { flex:1 1 180px; min-width:0; }
-        #adsblist .pleft > div { word-break:break-word; }
+        #adsblist .plane, #adsbhist .plane { display:flex; flex-direction:row; flex-wrap:wrap; gap:4px 14px; align-items:baseline; padding:8px 0; border-bottom:1px solid var(--divider-color,#e0e0e0); }
+        #adsblist .pleft, #adsbhist .pleft { flex:1 1 180px; min-width:0; }
+        #adsblist .pleft > div, #adsbhist .pleft > div { word-break:break-word; }
         #adsblist .pphoto { float:right; height:44px; border-radius:4px; margin:0 0 4px 10px; }
         #adsblist .pright { display:flex; flex-wrap:wrap; gap:2px 14px; font-variant-numeric:tabular-nums; }
         #adsblist .pv { white-space:nowrap; }
@@ -449,7 +449,7 @@ class SpettroPanel extends HTMLElement {
         td.num, th.num { text-align:right; }
         .hint { font-size:12px; color:var(--secondary-text-color); }
         .chk { flex-direction:row; align-items:center; gap:6px; font-size:13px; width:fit-content; max-width:100%; }
-        .chk input { width:auto; }
+        .chk input, #adsbhist .pleft input { width:auto; }
         .msg { font-size:12px; min-height:16px; }
         .msg.err { color:var(--error-color,#db4437); }
         .ana { border-top:1px solid var(--divider-color); padding-top:10px; margin-top:4px; display:flex; flex-direction:column; gap:10px; }
@@ -1714,9 +1714,9 @@ class SpettroPanel extends HTMLElement {
         const route = f.route && (f.route.origin || f.route.destination)
           ? `${(f.route.origin && (f.route.origin.iata || f.route.origin.city)) || "?"} → ${(f.route.destination && (f.route.destination.iata || f.route.destination.city)) || "?"}` : "";
         const who = [f.airline || f.owner, f.registration, f.country, f.type || f.category].filter(Boolean).join(" · ");
-        return `<label class="plane" style="cursor:pointer;align-items:center">
-          <div class="pleft" style="display:flex;gap:8px;align-items:baseline">
-            <input type="checkbox" data-hid="${f.id}" ${sel.has(f.id) ? "checked" : ""} ${f.points > 1 ? "" : "disabled title='nessuna traccia da mostrare'"}>
+        return `<label class="plane" style="cursor:pointer;align-items:flex-start">
+          <div class="pleft" style="display:flex;gap:8px;align-items:flex-start">
+            <input type="checkbox" style="margin-top:3px;flex:none" data-hid="${f.id}" ${sel.has(f.id) ? "checked" : ""} ${f.points > 1 ? "" : "disabled title='nessuna traccia da mostrare'"}>
             <div><b>${esc(f.call || f.icao)}</b>${who ? ` · <span class="hint">${esc(who)}</span>` : ""}
               ${route ? `<br><span class="hint">🛫 ${esc(route)}</span>` : ""}
               <br><span class="hint">${hm(f.first)}–${hm(f.last)}${f.km_min != null ? ` · minimo ${f.km_min.toLocaleString("it-IT")} km` : ""}${f.points > 1 ? ` · ${f.points} punti` : " · senza traccia"}</span></div>
@@ -1777,7 +1777,9 @@ class SpettroPanel extends HTMLElement {
     g.clearRect(0, 0, W, W);
     const css = (v, d) => (getComputedStyle(this).getPropertyValue(v).trim() || d);
     const fg = css("--primary-text-color", "#ddd"), grid = css("--divider-color", "#555"), sec = css("--secondary-text-color", "#999");
-    const withPos = ac.filter((a) => a.km != null && a.bearing != null);
+    // etichette prima alle emergenze e agli aerei più vicini: in un gruppo fitto si tengono quelle utili
+    const withPos = ac.filter((a) => a.km != null && a.bearing != null)
+      .sort((a, b) => (b.emergency ? 1 : 0) - (a.emergency ? 1 : 0) || a.km - b.km);
     const histKm = hist.flatMap((h) => h.pts.map((p) => p.km));
     const allKm = [...withPos.map((a) => a.km), ...histKm].filter((v) => v != null).sort((a, b) => a - b);
     const scale = allKm.length ? allKm[Math.min(allKm.length - 1, Math.floor(allKm.length * 0.9))] : 50;
@@ -1809,10 +1811,14 @@ class SpettroPanel extends HTMLElement {
       }
     };
     const palette = (i) => `hsl(${(i * 67) % 360},65%,58%)`;
-    // tracce storiche selezionate: ognuna con un colore diverso, freccia e etichetta
-    g.lineWidth = 2 * dpr; g.lineCap = "round"; g.lineJoin = "round";
+    // tracce storiche selezionate: ognuna con un colore diverso, freccia e (se poche) etichetta.
+    // Con tante tracce si alleggeriscono (più sottili e trasparenti) e si tolgono le etichette, che
+    // altrimenti riempirebbero il radar: la direzione resta leggibile dalla freccia in testa.
+    const manyHist = hist.length > 8;
+    g.lineWidth = (manyHist ? 1.4 : 2) * dpr; g.lineCap = "round"; g.lineJoin = "round";
     hist.forEach((h, hi) => {
       const col = palette(hi);
+      g.globalAlpha = manyHist ? 0.5 : 1;
       g.strokeStyle = col; g.beginPath();
       h.pts.forEach((p, i) => { const [x, y] = toXY(p); i ? g.lineTo(x, y) : g.moveTo(x, y); });
       g.stroke();
@@ -1820,10 +1826,11 @@ class SpettroPanel extends HTMLElement {
       let px = lx, py = ly;
       for (let i = h.pts.length - 2; i >= 0; i--) { const [x, y] = toXY(h.pts[i]); if (Math.hypot(lx - x, ly - y) > 4 * dpr) { px = x; py = y; break; } }
       const ang = Math.atan2(ly - py, lx - px);
+      g.globalAlpha = 1;
       g.fillStyle = col; g.save(); g.translate(lx, ly); g.rotate(ang);
       g.beginPath(); g.moveTo(8 * dpr, 0); g.lineTo(-4 * dpr, -4 * dpr); g.lineTo(-4 * dpr, 4 * dpr); g.closePath(); g.fill();
       g.restore();
-      label(h.label, lx, ly, col);
+      if (!manyHist) label(h.label, lx, ly, col);
     });
     // scie: il percorso recente di ogni aereo, che svanisce verso la coda
     const tr = this._adsbTrails || {};
@@ -1839,7 +1846,9 @@ class SpettroPanel extends HTMLElement {
         g.beginPath(); g.moveTo(x0, y0); g.lineTo(x1, y1); g.stroke();
       }
     }
-    for (const a of withPos) {
+    // la freccia (verso di marcia) si disegna per tutti; l'etichetta solo ai primi (emergenze e più
+    // vicini, già ordinati), così un gruppo fitto non diventa una zuppa di scritte sovrapposte
+    withPos.forEach((a, idx) => {
       const ang = (a.bearing - 90) * Math.PI / 180;
       const d = rad * a.km / rr;
       const x = cx + d * Math.cos(ang), y = cy + d * Math.sin(ang);
@@ -1850,8 +1859,8 @@ class SpettroPanel extends HTMLElement {
       g.save(); g.translate(x, y); g.rotate(tr * Math.PI / 180);
       g.beginPath(); g.moveTo(7 * dpr, 0); g.lineTo(-4 * dpr, -4 * dpr); g.lineTo(-4 * dpr, 4 * dpr); g.closePath(); g.fill();
       g.restore();
-      label(a.call || a.icao, x, y, fg);
-    }
+      if (idx < 16 || a.emergency) label(a.call || a.icao, x, y, fg);
+    });
   }
 
   _renderDabScan() {
