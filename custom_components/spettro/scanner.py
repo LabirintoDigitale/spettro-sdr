@@ -88,6 +88,7 @@ ADSB_HISTORY_MAX = 800  # voli tenuti al massimo nello storico
 ADSB_EMIT_S = 1.0  # ogni quanto si aggiorna il pannello
 ADSB_CHUNK = int(adsb_mod.RATE * 0.25)  # campioni per lettura (0,25 s)
 ADSB_OVERLAP = int(adsb_mod.RATE * 140e-6)  # coda riusata: un messaggio a cavallo non si perde
+ADSB_RETRY_MAX = 6  # riconnessioni di fila dopo un errore prima di arrendersi (rtl_tcp ogni tanto resetta)
 DATA_WINDOW_S = 2.0  # "Riconosci dati": finestra di IQ esaminata
 DATA_EVERY_S = 1.5  # ogni quanto (le finestre si sovrappongono: i pacchetti a cavallo non si perdono)
 TEXT_KEEP = 4000  # caratteri di testo decodificato tenuti nello stato (per chi apre il pannello dopo)
@@ -469,14 +470,16 @@ class SpectrumScanner:
             self._emit(dict(self.status))
 
     def _pass_busy(self) -> str | None:
-        """Ricezione foto Meteor (LRPT) in corso, da non interrompere a metà con scansioni/analisi a mano.
+        """Satellite in ricezione adesso (Meteor o ISS automatici), da non interrompere a metà.
 
-        Solo il Meteor: scaricare la foto dura minuti ed è preziosa, quindi un'azione manuale viene
-        rimandata con un avviso. L'ascolto automatico della ISS (SSTV, quasi sempre senza nulla da
-        ricevere) invece non blocca niente: un'azione manuale lo interrompe e parte subito.
+        Serve a proteggere il passaggio da scansioni/analisi avviate a mano: queste non partono e
+        mostrano un avviso col motivo, invece di rubargli la chiavetta durante la ricezione.
         """
         if self.meteo_rx:
             return (self.meteo_rx.get("pass") or {}).get("satellite") or "Meteor"
+        live = self.status.get("live")
+        if live and live.get("auto") and self._live_task is not None:
+            return live.get("title") or "satellite"
         return None
 
     def set_enabled(self, enabled: bool) -> None:
@@ -1206,51 +1209,68 @@ class SpectrumScanner:
             a = np.frombuffer(raw, dtype=np.uint8).astype(np.float32) - 127.5
             return adsb_mod.decode_frames((a[0::2] + 1j * a[1::2]).astype(np.complex64), rate)
 
+        fails = 0  # errori di connessione consecutivi (azzerati appena arrivano dati)
+        stop = False
         try:
             async with self._radio:
-                reader, writer, tuner = await _open(self.host, self.port)
-                try:
-                    self.status["tuner"] = TUNER_NAMES.get(tuner, f"Tipo {tuner}")
-                    await self._configure(writer, rate)
-                    await self._tune(writer, adsb_mod.FREQ, reader)
-                    async with asyncio.timeout(IO_TIMEOUT):
-                        await self._discard(reader, discard)
-                    while True:
-                        async with asyncio.timeout(IO_TIMEOUT):
-                            raw = await reader.readexactly(ADSB_CHUNK * 2)
-                        frames = await loop.run_in_executor(None, work, tail + raw)
-                        tail = raw[-ADSB_OVERLAP * 2:]
-                        tracker.feed_frames(frames)
-                        gone = tracker.prune(ADSB_PRUNE_S)
-                        if self.adsb_record and gone:
-                            self._record_flights(gone)
-                        if loop.time() - last_emit >= ADSB_EMIT_S:
-                            last_emit = loop.time()
-                            ac = tracker.aircraft()
-                            if self.status["adsb"]["online"]:
-                                self._adsb_enrich(ac)
-                            self.status["adsb"].update(aircraft=ac, count=len(ac), messages=tracker.messages)
-                            self._emit({"kind": "adsb", **self.status["adsb"]})
-                        # a pannello chiuso: se non è "continuo", ci si ferma dopo un po'
-                        if not self.status["adsb"]["continuous"] and self.viewers <= 0:
-                            no_viewer_since = no_viewer_since or loop.time()
-                            if loop.time() - no_viewer_since > LIVE_NO_VIEWER_STOP_S:
-                                _LOGGER.info("Nessun pannello aperto: ricevitore ADS-B fermato")
-                                break
-                        else:
-                            no_viewer_since = None
-                finally:
-                    writer.close()
+                while not stop:
+                    tail = b""
+                    no_viewer_since = None
                     try:
-                        await writer.wait_closed()
-                    except OSError:
-                        pass
+                        reader, writer, tuner = await _open(self.host, self.port)
+                        try:
+                            self.status["tuner"] = TUNER_NAMES.get(tuner, f"Tipo {tuner}")
+                            await self._configure(writer, rate)
+                            await self._tune(writer, adsb_mod.FREQ, reader)
+                            async with asyncio.timeout(IO_TIMEOUT):
+                                await self._discard(reader, discard)
+                            while True:
+                                async with asyncio.timeout(IO_TIMEOUT):
+                                    raw = await reader.readexactly(ADSB_CHUNK * 2)
+                                fails = 0  # la connessione consegna dati: riconnessioni azzerate
+                                frames = await loop.run_in_executor(None, work, tail + raw)
+                                tail = raw[-ADSB_OVERLAP * 2:]
+                                tracker.feed_frames(frames)
+                                gone = tracker.prune(ADSB_PRUNE_S)
+                                if self.adsb_record and gone:
+                                    self._record_flights(gone)
+                                if loop.time() - last_emit >= ADSB_EMIT_S:
+                                    last_emit = loop.time()
+                                    ac = tracker.aircraft()
+                                    if self.status["adsb"]["online"]:
+                                        self._adsb_enrich(ac)
+                                    self.status["adsb"].update(aircraft=ac, count=len(ac), messages=tracker.messages)
+                                    self._emit({"kind": "adsb", **self.status["adsb"]})
+                                # a pannello chiuso: se non è "continuo", ci si ferma dopo un po'
+                                if not self.status["adsb"]["continuous"] and self.viewers <= 0:
+                                    no_viewer_since = no_viewer_since or loop.time()
+                                    if loop.time() - no_viewer_since > LIVE_NO_VIEWER_STOP_S:
+                                        _LOGGER.info("Nessun pannello aperto: ricevitore ADS-B fermato")
+                                        stop = True
+                                        break
+                                else:
+                                    no_viewer_since = None
+                        finally:
+                            writer.close()
+                            try:
+                                await writer.wait_closed()
+                            except OSError:
+                                pass
+                    except asyncio.CancelledError:
+                        raise
+                    except (OSError, TimeoutError, asyncio.IncompleteReadError, RtlTcpError) as err:
+                        # rtl_tcp ogni tanto resetta la connessione (anche nel passaggio da/verso scansione
+                        # e analisi): non è un errore fatale, si riprova a riconnettersi per un po'
+                        msg = str(err) or type(err).__name__
+                        fails += 1
+                        if fails > ADSB_RETRY_MAX or (not self.status["adsb"]["continuous"] and self.viewers <= 0):
+                            _LOGGER.warning("Ricevitore ADS-B interrotto: %s", msg)
+                            self._emit({"kind": "adsb_error", "error": msg})
+                            break
+                        _LOGGER.info("ADS-B: connessione persa (%s), riprovo (%d/%d)", msg, fails, ADSB_RETRY_MAX)
+                        await asyncio.sleep(min(2 ** (fails - 1), 8))
         except asyncio.CancelledError:
             raise
-        except (OSError, TimeoutError, asyncio.IncompleteReadError, RtlTcpError) as err:
-            msg = str(err) or type(err).__name__
-            _LOGGER.warning("Ricevitore ADS-B interrotto: %s", msg)
-            self._emit({"kind": "adsb_error", "error": msg})
         finally:
             if self.adsb_record and self.adsb_tracker is not None:
                 self._record_flights(list(self.adsb_tracker.planes.values()))

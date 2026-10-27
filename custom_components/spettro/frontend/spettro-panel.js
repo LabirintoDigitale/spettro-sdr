@@ -1,7 +1,7 @@
 // Pannello "Spettro" per Home Assistant: grafico dello spettro, waterfall e picchi.
 
 // deve coincidere con VERSION in const.py: se il backend ne riporta un'altra manca un riavvio
-const PANEL_VERSION = "1.29.1";
+const PANEL_VERSION = "1.30.0";
 
 const PRESETS = [
   ["Personalizzato", null, null],
@@ -804,7 +804,7 @@ class SpettroPanel extends HTMLElement {
     this._setupFolds();
     $("dabscan").addEventListener("click", async () => {
       const running = this._dabScan && !this._dabScan.done;
-      try { await this._hass.callWS({ type: "spettro/dab_scan", stop: !!running }); } catch (err) { this._msg(err.message || String(err), true); }
+      try { await this._hass.callWS({ type: "spettro/dab_scan", stop: !!running }); } catch (err) { this._startError(err.message || String(err)); }
     });
     $("dablist").addEventListener("click", (e) => {
       const b = e.target.closest("button.dabgo");
@@ -814,7 +814,7 @@ class SpettroPanel extends HTMLElement {
       try {
         if (this._adsb) await this._hass.callWS({ type: "spettro/adsb", action: "stop" });
         else await this._hass.callWS({ type: "spettro/adsb", action: "start", continuous: $("adsbcont").checked, online: $("adsbonline").checked });
-      } catch (err) { this._msg(err.message || String(err), true); }
+      } catch (err) { this._startError(err.message || String(err)); }
     });
     const adsbOpts = async () => {
       if (this._adsb) try { await this._hass.callWS({ type: "spettro/adsb", action: "start", continuous: $("adsbcont").checked, online: $("adsbonline").checked }); } catch (err) { this._msg(err.message || String(err), true); }
@@ -980,6 +980,13 @@ class SpettroPanel extends HTMLElement {
     el.className = "msg" + (err ? " err" : "");
     clearTimeout(this._msgT);
     this._msgT = setTimeout(() => { el.textContent = ""; }, err ? 20000 : 6000);
+  }
+
+  // un'operazione non è partita perché la chiavetta è occupata (ricezione satellitare, altra
+  // analisi, DAB…): oltre al messaggio in riga, un popup spiega subito il motivo
+  _startError(text) {
+    this._msg(text, true);
+    if (/ricezione|in corso|ferma prima|occupat|un'altra operazione/i.test(text)) alert(text);
   }
 
   _setStatusText(text, err) {
@@ -1446,15 +1453,17 @@ class SpettroPanel extends HTMLElement {
 
   async _liveStart(mhz, mode = null, sid = null, decoder = null, title = null, bw = null) {
     if (mhz == null) return;
-    this._setListen(true); // il tocco sul pulsante permette di avviare l'audio
+    this._ensureAudio(); // sblocca l'audio restando nel gesto del tocco (la spia si accende solo se parte)
     this._liveRestart = true; // la diretta precedente si ferma: l'audio resta acceso
     try {
       await this._hass.callWS({ type: "spettro/live_start", freq_mhz: mhz, ...(mode ? { mode } : {}), ...(sid ? { sid } : {}),
         ...(decoder ? { decoder } : {}), ...(title ? { title } : {}), ...(bw ? { bw } : {}) });
+      this._setListen(true); // partita davvero: ora si accende l'ascolto
       this.shadowRoot.querySelector(".ana").scrollIntoView({ behavior: "smooth", block: "start" });
     } catch (err) {
       this._setListen(false);
-      this._msg(err.message || String(err), true);
+      // non è partita: messaggio in riga e, se la chiavetta è occupata, un popup col motivo
+      this._startError(err.message || String(err));
     } finally {
       this._liveRestart = false;
     }
@@ -2705,7 +2714,9 @@ class SpettroPanel extends HTMLElement {
       this._archSel = this._ana.id || null; // nell'archivio si evidenzia l'analisi appena fatta
       this._renderArchive();
     } catch (err) {
-      $("anaout").innerHTML = `<div class="err">Analisi non riuscita: ${esc(err.message || err.code || err)}</div>`;
+      const text = err.message || err.code || String(err);
+      $("anaout").innerHTML = `<div class="err">Analisi non riuscita: ${esc(text)}</div>`;
+      this._startError(text);
     } finally {
       this._analyzing = false;
       $("analyze").disabled = this._sel === null;
