@@ -1,7 +1,7 @@
 // Pannello "Spettro" per Home Assistant: grafico dello spettro, waterfall e picchi.
 
 // deve coincidere con VERSION in const.py: se il backend ne riporta un'altra manca un riavvio
-const PANEL_VERSION = "1.27.3";
+const PANEL_VERSION = "1.28.0";
 
 const PRESETS = [
   ["Personalizzato", null, null],
@@ -1472,10 +1472,12 @@ class SpettroPanel extends HTMLElement {
       $("liveslide").style.display = "none";
       $("liveslide").removeAttribute("src");
       this._closeDec();
+      const meteor = live.freq_mhz >= 137 && live.freq_mhz <= 138 && !["sat", "dab", "tv"].includes(live.mode);
       $("liverds").innerHTML = live.mode === "wfm" ? `<div class="hint" style="margin-top:6px">In attesa dei dati RDS…</div>`
         : live.mode === "dab" ? `<div class="hint" style="margin-top:6px">Aggancio del multiplex DAB…</div>`
         : live.mode === "tv" ? `<div class="hint" style="margin-top:6px">Ricerca del multiplex TV…</div>`
-        : live.mode === "sat" ? `<div class="hint" style="margin-top:6px">Misura del transponder…</div>` : "";
+        : live.mode === "sat" ? `<div class="hint" style="margin-top:6px">Misura del transponder…</div>`
+        : meteor ? `<div class="hint" style="margin-top:6px">⚠ Questo è un satellite Meteor (foto LRPT, 137 MHz): non si decodifica qui, in FM/AM sentirai solo il rumore digitale. Durante un passaggio premi <b>▶ Ricevi</b> nel blocco Satelliti (serve il Doppler), oppure attiva «Meteor: ricevi da solo le foto».</div>` : "";
     }
     const digital = live.mode === "dab" || live.mode === "tv" || live.mode === "sat" || live.mode === "meter";
     $("livemode").style.display = digital ? "none" : "";

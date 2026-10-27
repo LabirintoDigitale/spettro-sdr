@@ -468,6 +468,19 @@ class SpectrumScanner:
         if emit:
             self._emit(dict(self.status))
 
+    def _pass_busy(self) -> str | None:
+        """Satellite in ricezione adesso, se è in corso una cattura satellitare da non interrompere.
+
+        Serve a proteggere il passaggio (Meteor o ISS) da scansioni/analisi avviate a mano, che
+        altrimenti gli porterebbero via la chiavetta a metà ricezione.
+        """
+        if self.meteo_rx:
+            return (self.meteo_rx.get("pass") or {}).get("satellite") or "Meteor"
+        live = self.status.get("live")
+        if live and live.get("auto") and self._live_task is not None:
+            return live.get("title") or "satellite"
+        return None
+
     def set_enabled(self, enabled: bool) -> None:
         self.enabled = enabled
         self._update_active()
@@ -543,6 +556,8 @@ class SpectrumScanner:
             raise RuntimeError("Ricerca DAB già in corso")
         if self.analyzing or self._live_task is not None:
             raise RuntimeError("Ferma prima l'analisi in corso")
+        if (sat := self._pass_busy()):
+            raise RuntimeError(f"Ricezione satellitare in corso ({sat}): aspetta la fine o fermala prima")
         self._dab_task = asyncio.get_running_loop().create_task(self._dab_scan_run(), name="spettro_dab_scan")
 
     async def dab_scan_stop(self) -> None:
@@ -618,6 +633,8 @@ class SpectrumScanner:
             raise RuntimeError("C'è già un'analisi in corso")
         if self._live_task is not None:
             raise RuntimeError("Ferma prima l'analisi continua")
+        if (sat := self._pass_busy()):
+            raise RuntimeError(f"Ricezione satellitare in corso ({sat}): aspetta la fine o fermala prima")
         await self._adsb_yield(resume=False)
         rate = int(self.settings.sample_rate)
         capture_bytes = int(rate * min(duration_s, ANALYSIS_MAX_S)) * 2
@@ -792,6 +809,8 @@ class SpectrumScanner:
         """
         if self.analyzing:
             raise RuntimeError("C'è un'analisi in corso, riprova tra qualche secondo")
+        if not auto and (sat := self._pass_busy()):
+            raise RuntimeError(f"Ricezione satellitare in corso ({sat}): aspetta la fine o fermala prima")
         if mode == "dab" and not sid:
             raise RuntimeError("Scegli una radio del multiplex")
         await self.live_stop()
@@ -810,7 +829,7 @@ class SpectrumScanner:
         else:
             bw = None
         self.status["live"] = {"freq_mhz": round(freq_hz / 1e6, 4), "mode": mode, "sid": sid, "decoder": decoder,
-                               "until": until.timestamp() if until else None, "title": title,
+                               "until": until.timestamp() if until else None, "title": title, "auto": auto,
                                "bw": bw or (BANDWIDTHS[mode][0] if mode in BANDWIDTHS else None), "text": ""}
         if mode == "dab":
             ch = dab.channel_for(freq_hz / 1e6)
