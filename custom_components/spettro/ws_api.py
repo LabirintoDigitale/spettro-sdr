@@ -367,15 +367,18 @@ async def ws_archive_delete(hass: HomeAssistant, connection: websocket_api.Activ
         vol.Optional("name"): vol.Any(None, str),
         vol.Optional("source", default="user"): vol.In(["user", "rds", "dab"]),
         vol.Optional("sid"): vol.Any(None, str),
+        vol.Optional("mode"): vol.Any(None, str),
+        vol.Optional("squelch"): vol.Any(None, vol.Coerce(float)),
     }
 )
 @websocket_api.async_response
 async def ws_favorite_set(hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]) -> None:
-    """Aggiunge una frequenza ai preferiti (o ne cambia il nome)."""
+    """Aggiunge una frequenza ai preferiti (o ne cambia il nome, la modalità, lo squelch)."""
     _entry, scanner = _scanner(hass, connection, msg)
     if scanner is None:
         return
-    await scanner.favorites.async_set(msg["freq_mhz"], msg.get("name"), msg["source"], msg.get("sid"))
+    await scanner.favorites.async_set(msg["freq_mhz"], msg.get("name"), msg["source"], msg.get("sid"),
+                                      msg.get("mode"), msg.get("squelch"))
     scanner.favorites_changed()
     connection.send_result(msg["id"], {"favorites": scanner.favorites.items})
 

@@ -49,8 +49,12 @@ class Favorites:
         return next((f for f in self.items if abs(f["freq_mhz"] - freq_mhz) * 1e6 <= MATCH_HZ
                      and f.get("sid") == sid), None)
 
-    async def async_set(self, freq_mhz: float, name: str | None, source: str = "user", sid: str | None = None) -> None:
-        """Aggiunge un preferito, o ne cambia il nome; un nome RDS/DAB non sostituisce quello scritto a mano."""
+    async def async_set(self, freq_mhz: float, name: str | None, source: str = "user", sid: str | None = None,
+                        mode: str | None = None, squelch: float | None = None) -> None:
+        """Aggiunge un preferito, o ne cambia il nome; un nome RDS/DAB non sostituisce quello scritto a mano.
+
+        mode/squelch: la demodulazione e la soglia dell'altoparlante da ripristinare quando si riascolta.
+        """
         fav = self.find(freq_mhz, sid)
         if fav is None:
             fav = {"freq_mhz": round(freq_mhz, 4), "name": None, "source": "auto", "added": time.time()}
@@ -61,6 +65,10 @@ class Favorites:
                 fav.update(sid=sid.upper(), mode="dab", channel=ch[0] if ch else None)
             self.items.append(fav)
             self.items.sort(key=lambda f: f["freq_mhz"])
+        if mode and not fav.get("sid"):  # la modalità del DAB resta "dab"
+            fav["mode"] = mode
+        if squelch is not None:
+            fav["squelch"] = round(float(squelch), 1)
         if name is not None and not (source in ("rds", "dab") and fav.get("source") == "user"):
             name = name.strip()[:40]
             fav["name"], fav["source"] = (name, source) if name else (None, "auto")
