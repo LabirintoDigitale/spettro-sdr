@@ -74,6 +74,8 @@ PARTIAL_EVERY = 1.5  # secondi tra un aggiornamento parziale e l'altro
 CONNECT_TIMEOUT = 8
 IO_TIMEOUT = 10
 MIN_ERROR_RETRY = 10
+OPEN_RETRIES = 4  # rtl_tcp (spesso a client singolo) resetta una nuova connessione finché non ha
+OPEN_RETRY_DELAY = 0.5  # rilasciato la precedente: si riprova ad aprire dopo una breve attesa
 LIVE_RDS_WINDOW_S = 6.0  # multiplex tenuto per decodificare l'RDS in diretta
 LIVE_RDS_EVERY_S = 1.0
 LIVE_NO_VIEWER_STOP_S = 30  # senza pannelli aperti l'analisi continua si ferma da sola
@@ -152,6 +154,28 @@ class ScanPaused(Exception):
 
 
 async def _open(host: str, port: int) -> tuple[asyncio.StreamReader, asyncio.StreamWriter, int]:
+    """Apre la connessione a rtl_tcp, con qualche ritentativo se il server resetta.
+
+    rtl_tcp accetta un solo client alla volta: quando si passa la chiavetta da un'operazione all'altra
+    (scansione, analisi, ADS-B…) la connessione nuova può essere resettata finché il server non ha
+    chiuso la precedente. Invece di fallire subito, si riprova per qualche volta con una breve attesa.
+    """
+    last: BaseException | None = None
+    for attempt in range(OPEN_RETRIES):
+        try:
+            return await _open_once(host, port)
+        except asyncio.CancelledError:
+            raise
+        except (ConnectionError, asyncio.IncompleteReadError, TimeoutError, RtlTcpError) as err:
+            # un header sbagliato può capitare se si legge la coda della connessione precedente
+            last = err
+            if attempt < OPEN_RETRIES - 1:
+                await asyncio.sleep(OPEN_RETRY_DELAY * (attempt + 1))
+    assert last is not None
+    raise last
+
+
+async def _open_once(host: str, port: int) -> tuple[asyncio.StreamReader, asyncio.StreamWriter, int]:
     """Apre la connessione, legge l'header 'RTL0' e restituisce il tipo di tuner."""
     loop = asyncio.get_running_loop()
     infos = await loop.getaddrinfo(host, port, type=socket.SOCK_STREAM)
