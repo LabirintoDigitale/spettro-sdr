@@ -469,16 +469,14 @@ class SpectrumScanner:
             self._emit(dict(self.status))
 
     def _pass_busy(self) -> str | None:
-        """Satellite in ricezione adesso, se è in corso una cattura satellitare da non interrompere.
+        """Ricezione foto Meteor (LRPT) in corso, da non interrompere a metà con scansioni/analisi a mano.
 
-        Serve a proteggere il passaggio (Meteor o ISS) da scansioni/analisi avviate a mano, che
-        altrimenti gli porterebbero via la chiavetta a metà ricezione.
+        Solo il Meteor: scaricare la foto dura minuti ed è preziosa, quindi un'azione manuale viene
+        rimandata con un avviso. L'ascolto automatico della ISS (SSTV, quasi sempre senza nulla da
+        ricevere) invece non blocca niente: un'azione manuale lo interrompe e parte subito.
         """
         if self.meteo_rx:
             return (self.meteo_rx.get("pass") or {}).get("satellite") or "Meteor"
-        live = self.status.get("live")
-        if live and live.get("auto") and self._live_task is not None:
-            return live.get("title") or "satellite"
         return None
 
     def set_enabled(self, enabled: bool) -> None:
