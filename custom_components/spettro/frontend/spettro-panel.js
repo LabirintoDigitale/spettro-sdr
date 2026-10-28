@@ -1,7 +1,7 @@
 // Pannello "Spettro" per Home Assistant: grafico dello spettro, waterfall e picchi.
 
 // deve coincidere con VERSION in const.py: se il backend ne riporta un'altra manca un riavvio
-const PANEL_VERSION = "1.39.0";
+const PANEL_VERSION = "1.40.0";
 
 const PRESETS = [
   ["Personalizzato", null, null],
@@ -306,10 +306,11 @@ class SpettroPanel extends HTMLElement {
     if (m.kind === "plugins") {
       this._plugins = m.plugins || [];
       this._addPluginOptions();
-      // se è già in corso una diretta con questo plugin ma il pannello non era ancora stato creato
-      // (elenco plugin arrivato dopo lo stato della diretta), crealo ora
+      // se è già in corso una diretta con questo plugin, aggiorno la riga di stato col nome ora noto
       if (this._live && this._plugins.some((p) => p.id === this._live.decoder)) {
-        if (!this.shadowRoot.querySelector("#liveimg .plugframe")) this._renderPlugin({});
+        const hint = this.shadowRoot.querySelector("#liveimg .plughint");
+        if (hint && !this._plugFrames) hint.textContent = `🧩 ${esc(this._pluginName())} · in attesa di dati…`;
+        else if (!this.shadowRoot.querySelector("#liveimg .plugbody")) this._renderPluginBox();
       }
       return;
     }
@@ -1568,15 +1569,6 @@ class SpettroPanel extends HTMLElement {
         this._liveText = live.text || "";
         this._renderLiveText("in cerca del segnale…");
       }
-    } else if ((this._plugins || []).some((p) => p.id === live.decoder)) {
-      if (!was || was.decoder !== live.decoder || was.freq_mhz !== live.freq_mhz) {
-        this._liveText = null; this._liveImgPreview = null;
-        const name = ((this._plugins || []).find((p) => p.id === live.decoder) || {}).name || "Plugin";
-        // l'HTML del plugin gira in un iframe sandbox, isolato dal resto del pannello
-        $("liveimg").innerHTML = `<iframe class="plugframe" sandbox="allow-scripts" title="${esc(name)}"`
-          + ` style="width:100%;height:96px;border:0;background:transparent"></iframe>`
-          + `<div class="hint plughint" style="margin-top:2px">🧩 ${esc(name)} · in attesa di dati…</div>`;
-      }
     } else if (live.decoder === "sstv" || live.decoder === "fax") {
       if (!was || was.decoder !== live.decoder || was.freq_mhz !== live.freq_mhz) {
         this._liveText = null;
@@ -1584,11 +1576,12 @@ class SpettroPanel extends HTMLElement {
         $("liveimg").innerHTML = `<div class="hint" style="margin-top:6px">In ascolto: ${live.decoder === "fax" ? "una carta inizia con il tono di avvio" : "ogni immagine SSTV inizia con il codice VIS"}…</div>`;
       }
     } else if (!was || was.decoder !== live.decoder || was.freq_mhz !== live.freq_mhz) {
-      // decoder sconosciuto, o un plugin non ancora presente in elenco (lo stato della diretta può
-      // arrivare prima della lista plugin): niente messaggio fuorviante, l'iframe lo crea _renderPlugin
+      // qualsiasi altro decoder è un plugin (anche se l'elenco plugin non è ancora arrivato): mostro
+      // subito il riquadro, così compare pure prima dei dati e non dipende dall'ordine dei messaggi
       this._liveText = null;
       this._liveImgPreview = null;
-      $("liveimg").innerHTML = "";
+      this._plugFrames = 0;
+      this._renderPluginBox();
     }
     this._updateFavBtn();
     if (!digital) $("livemode").value = live.mode;
@@ -1638,26 +1631,47 @@ class SpettroPanel extends HTMLElement {
     }
   }
 
+  _pluginName() {
+    const dec = this._live && this._live.decoder;
+    return ((this._plugins || []).find((p) => p.id === dec) || {}).name || "Plugin";
+  }
+
+  // pulizia di sicurezza dell'HTML di un plugin: via script, gestori on*, javascript:, iframe/object.
+  // I plugin sono codice che l'utente installa volontariamente (lato backend hanno già pieni permessi),
+  // qui si evita solo che l'HTML mostrato possa eseguire o incorporare roba nel pannello.
+  _sanitize(html) {
+    return String(html)
+      .replace(/<\s*(script|iframe|object|embed|link|meta|base)\b[\s\S]*?(<\s*\/\s*\1\s*>|$)/gi, "")
+      .replace(/\son\w+\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/gi, "")
+      .replace(/(href|src)\s*=\s*("|')?\s*javascript:[^"'>\s]*/gi, "$1=\"#\"");
+  }
+
+  _renderPluginBox() {
+    const box = this.shadowRoot.getElementById("liveimg");
+    if (!box) return null;
+    // niente iframe (alcuni webview, es. l'app di Home Assistant, non lo mostrano): l'HTML del plugin
+    // va in un riquadro normale, con sopra una riga di stato che conta gli aggiornamenti ricevuti.
+    box.innerHTML = `<div class="plugwrap" style="margin-top:6px">`
+      + `<div class="hint plughint">🧩 ${esc(this._pluginName())} · in attesa di dati…</div>`
+      + `<div class="plugbody" style="margin-top:4px;color:#ddd;font:13px system-ui,sans-serif"></div>`
+      + `</div>`;
+    return box.querySelector(".plugbody");
+  }
+
   _renderPlugin(plugin) {
     const box = this.shadowRoot.getElementById("liveimg");
     if (!box) return;
-    let fr = box.querySelector(".plugframe");
-    if (!fr) {
-      // l'iframe può non esserci ancora (lo stato della diretta è arrivato prima dell'elenco
-      // plugin): lo creo adesso, così il pannello compare comunque, in qualunque ordine
-      const dec = this._live && this._live.decoder;
-      const name = ((this._plugins || []).find((p) => p.id === dec) || {}).name || "Plugin";
-      box.innerHTML = `<iframe class="plugframe" sandbox="allow-scripts" title="${esc(name)}"`
-        + ` style="width:100%;height:96px;border:0;background:transparent"></iframe>`
-        + `<div class="hint plughint" style="margin-top:2px">🧩 ${esc(name)} · in attesa di dati…</div>`;
-      fr = box.querySelector(".plugframe");
-    }
-    if (fr && typeof plugin.html === "string") {
-      fr.srcdoc = `<!doctype html><meta charset="utf-8"><body style="margin:0;color:#ddd;`
-        + `background:transparent;font:13px system-ui,sans-serif">${plugin.html}</body>`;
-    }
+    let body = box.querySelector(".plugbody");
+    if (!body) body = this._renderPluginBox();  // crea il riquadro se non c'è (ordine dei messaggi)
+    if (!body) return;
+    this._plugFrames = (this._plugFrames || 0) + 1;
+    if (typeof plugin.html === "string") body.innerHTML = this._sanitize(plugin.html);
     const hint = box.querySelector(".plughint");
-    if (hint && typeof plugin.text === "string") hint.textContent = plugin.text;
+    if (hint) {
+      hint.textContent = (typeof plugin.text === "string" && plugin.text)
+        ? plugin.text
+        : `🧩 ${this._pluginName()} · ${this._plugFrames} aggiornamenti ricevuti`;
+    }
   }
 
   _onLive(m) {
