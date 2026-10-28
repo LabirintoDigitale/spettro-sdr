@@ -1,7 +1,7 @@
 // Pannello "Spettro" per Home Assistant: grafico dello spettro, waterfall e picchi.
 
 // deve coincidere con VERSION in const.py: se il backend ne riporta un'altra manca un riavvio
-const PANEL_VERSION = "1.31.1";
+const PANEL_VERSION = "1.31.2";
 
 const PRESETS = [
   ["Personalizzato", null, null],
@@ -218,6 +218,8 @@ class SpettroPanel extends HTMLElement {
     this._live = null; // analisi continua in corso: {freq_mhz, mode}
     this._listen = false; // audio della diretta attivo
     this._squelch = 0; // squelch: dB che il segnale deve superare il rumore per sentirsi (0 = spento)
+    this._sqFloor = null; // fondo stimato del canale per lo squelch
+    this._sqHang = 0; // coda dello squelch: resta aperto ancora un po' dopo che il segnale cala
     this._audioCtx = null;
     this._nextT = 0;
     this._rtHistory = []; // testi RDS ricevuti in diretta, dal più recente
@@ -1487,6 +1489,8 @@ class SpettroPanel extends HTMLElement {
     }
     if (!was || was.freq_mhz !== live.freq_mhz || was.mode !== live.mode || was.sid !== live.sid) {
       this._liveRows = null;
+      this._sqFloor = null;  // nuova frequenza/modo: lo squelch ri-stima il fondo da capo
+      this._sqHang = 0;
       this._rtHistory = [];
       this._liveRds = null;
       this._dabState = null;
@@ -1571,26 +1575,24 @@ class SpettroPanel extends HTMLElement {
     this.shadowRoot.getElementById("livetitle").textContent = `${live.freq_mhz.toFixed(4)} MHz${name ? ` «${name}»` : ""}`;
   }
 
-  _rowSnr(row) {
-    // quanto il segnale supera il rumore nel canale, dalla riga di spettro (differenza di percentili,
-    // così la scala si semplifica): rumore = 25° percentile dei bin, segnale = quasi il picco (98°)
-    if (!row || row.length < 8) return 0;
-    const s = [...row].sort((a, b) => a - b);
-    const noise = s[Math.floor(s.length * 0.25)];
-    const sig = s[Math.floor(s.length * 0.98)];
-    return sig - noise;
-  }
-
   _onLive(m) {
     if (!this._live) this._setLive({ freq_mhz: m.freq_mhz, mode: m.mode });
     const $ = (id) => this.shadowRoot.getElementById(id);
     const half = m.span_hz / 2;
     $("livelo").textContent = `${((m.freq_mhz * 1e6 - half) / 1e6).toFixed(3)}`;
     $("livehi").textContent = `${((m.freq_mhz * 1e6 + half) / 1e6).toFixed(3)}`;
-    // squelch: apre l'audio solo se il segnale supera il rumore (stimato dalla riga) di tanti dB
-    const snr = this._rowSnr(m.row);
-    const squelched = this._squelch > 0 && snr < this._squelch;
-    $("livelevel").textContent = `livello ${m.level_db} dBFS`
+    // squelch "a inseguimento del fondo": il fondo scende subito al livello quando è basso e risale
+    // piano, così stima il rumore del canale; l'audio si apre quando il livello lo supera di tanti dB.
+    // Una breve coda (hang) evita che si chiuda tra una sillaba e l'altra.
+    const lvl = m.level_db;
+    if (this._sqFloor == null || lvl < this._sqFloor) this._sqFloor = lvl;
+    else this._sqFloor = Math.min(this._sqFloor + 0.05, lvl);
+    const snr = lvl - this._sqFloor;
+    const openNow = this._squelch <= 0 || snr >= this._squelch;
+    if (openNow) this._sqHang = 10;
+    else if (this._sqHang > 0) this._sqHang--;
+    const squelched = this._squelch > 0 && !openNow && this._sqHang <= 0;
+    $("livelevel").textContent = `livello ${lvl} dBFS`
       + (this._squelch > 0 ? ` · ${Math.round(snr)}/${this._squelch} dB sul rumore${squelched ? " · muto" : ""}` : "");
     this._drawLiveRow(m.row);
     if (this._listen && this._audioCtx && !squelched) this._playPcm(m.audio);
