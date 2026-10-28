@@ -12,6 +12,11 @@ solo se il file non c'è) e **non** ripristina quelli che hai cancellato di prop
 registro in `.spettro_bundled.json`). Dopo un aggiornamento, **riavvia Home Assistant** e il nuovo
 plugin comparirà nel menu (eventualmente premi 🔄 Ricarica plugin).
 
+Allo stesso modo viene consegnata anche l'eventuale cartella **`bin/`** inclusa nella release (per i
+programmi di appoggio, es. il binario `rtl_433`): i file in `bin/` vengono copiati in
+`/config/spettro_plugins/bin/` e resi eseguibili, con le stesse regole (una sola volta, senza
+sovrascrivere né ripristinare i cancellati).
+
 Un file `.py` per plugin. Si innestano nel blocco **Analisi segnale**
 come un decoder scelto dal menu. Quando lo selezioni, Spettro sintonizza la frequenza, demodula e
 passa al plugin — blocco per blocco — l'audio (o l'IQ grezzo del canale); il plugin restituisce un

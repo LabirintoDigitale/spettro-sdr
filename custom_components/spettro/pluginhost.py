@@ -71,31 +71,41 @@ def init_user_dir(path: str | Path) -> Path:
     """
     global _USER_DIR
     import json  # noqa: PLC0415
+    import os  # noqa: PLC0415
     import shutil  # noqa: PLC0415
 
     p = Path(path)
     p.mkdir(parents=True, exist_ok=True)
 
-    manifest = p / ".spettro_bundled.json"  # file già consegnati dalla release (nome -> visto)
+    manifest = p / ".spettro_bundled.json"  # file già consegnati dalla release (percorso -> visto)
     try:
         known = set(json.loads(manifest.read_text("utf-8")))
     except (OSError, ValueError):
         known = set()
 
     changed = False
-    for f in sorted(bundled_dir().glob("*")):
+    # si scorre ricorsivamente: così arrivano anche le sottocartelle incluse, come `bin/`
+    # (dove può stare un programma di appoggio, es. il binario `rtl_433` per i sensori ISM).
+    base = bundled_dir()
+    for f in sorted(base.rglob("*")):
         if not f.is_file():
             continue
-        dest = p / f.name
-        if f.name not in known:
-            if not dest.exists():  # file nuovo: consegnalo (mai sovrascrivere l'esistente)
-                try:
-                    shutil.copy2(f, dest)
-                    _LOGGER.info("Plugin incluso consegnato: %s", f.name)
-                except OSError:
-                    _LOGGER.warning("Non riesco a copiare %s in %s", f.name, p)
-            known.add(f.name)
-            changed = True
+        rel = f.relative_to(base)       # es. "rtl433.py" oppure "bin/rtl_433"
+        key = str(rel)
+        if key in known:
+            continue
+        dest = p / rel
+        if not dest.exists():  # file nuovo: consegnalo (mai sovrascrivere l'esistente)
+            try:
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(f, dest)
+                if rel.parts[0] == "bin":  # i programmi in bin/ devono essere eseguibili
+                    os.chmod(dest, os.stat(dest).st_mode | 0o111)
+                _LOGGER.info("File incluso consegnato: %s", key)
+            except OSError:
+                _LOGGER.warning("Non riesco a copiare %s in %s", key, p)
+        known.add(key)
+        changed = True
 
     if changed:
         try:
