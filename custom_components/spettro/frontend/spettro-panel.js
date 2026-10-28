@@ -1,7 +1,7 @@
 // Pannello "Spettro" per Home Assistant: grafico dello spettro, waterfall e picchi.
 
 // deve coincidere con VERSION in const.py: se il backend ne riporta un'altra manca un riavvio
-const PANEL_VERSION = "1.45.0";
+const PANEL_VERSION = "1.46.0";
 
 const PRESETS = [
   ["Personalizzato", null, null],
@@ -1670,7 +1670,7 @@ class SpettroPanel extends HTMLElement {
     if (hint) {
       hint.textContent = (typeof plugin.text === "string" && plugin.text)
         ? plugin.text
-        : `🧩 ${this._pluginName()} · ${this._plugFrames} aggiornamenti ricevuti`;
+        : `🧩 ${this._pluginName()}`;
     }
   }
 
@@ -1694,10 +1694,8 @@ class SpettroPanel extends HTMLElement {
     // il decoder autorevole arriva nel frame stesso: se il pannello non lo sapeva (stato non ancora
     // ricevuto), allineo this._live così i rami che dipendono dal decoder funzionano comunque
     if (m.decoder !== undefined && this._live && this._live.decoder !== m.decoder) this._live.decoder = m.decoder;
-    this._dbgN = (this._dbgN || 0) + 1;
     $("livelevel").textContent = `livello ${lvl} dBFS`
-      + (this._squelch > 0 ? ` · ${Math.round(snr)}/${this._squelch} dB sul rumore${squelched ? " · muto" : ""}` : "")
-      + ` · [dec=${(this._live && this._live.decoder) || "—"} f=${this._dbgN}${m.plugin ? " +plugin" : ""}]`;
+      + (this._squelch > 0 ? ` · ${Math.round(snr)}/${this._squelch} dB sul rumore${squelched ? " · muto" : ""}` : "");
     this._drawLiveRow(m.row);
     if (this._listen && this._audioCtx && !squelched) this._playPcm(m.audio);
     // plugin: il riquadro viene creato/aggiornato dal flusso dei frame (che gira di sicuro: la cascata
@@ -1715,9 +1713,7 @@ class SpettroPanel extends HTMLElement {
           this._renderPlugin(m.plugin);
         } else {
           const hint = box && box.querySelector(".plughint");
-          if (hint && !this._plugFrames) {
-            hint.textContent = `🧩 ${this._pluginName()} · ${this._plugAll} frame, 0 col plugin — in attesa…`;
-          }
+          if (hint && !this._plugFrames) hint.textContent = `🧩 ${this._pluginName()} · in attesa di dati…`;
         }
       } catch (err) {
         const box = $("liveimg");
