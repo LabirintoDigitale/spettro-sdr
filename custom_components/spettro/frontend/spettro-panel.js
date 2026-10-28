@@ -1,7 +1,7 @@
 // Pannello "Spettro" per Home Assistant: grafico dello spettro, waterfall e picchi.
 
 // deve coincidere con VERSION in const.py: se il backend ne riporta un'altra manca un riavvio
-const PANEL_VERSION = "1.33.1";
+const PANEL_VERSION = "1.33.2";
 
 const PRESETS = [
   ["Personalizzato", null, null],
@@ -805,7 +805,14 @@ class SpettroPanel extends HTMLElement {
         const r = await this._hass.callWS({ type: "spettro/plugins_reload" });
         this._plugins = r.plugins || [];
         this._addPluginOptions();
-        this._msg(`Plugin ricaricati: ${this._plugins.length} trovati.`);
+        const errs = r.errors || [];
+        if (errs.length) {
+          const txt = errs.map((e) => `• ${e.file}: ${e.error}`).join("\n");
+          this._msg(`${this._plugins.length} plugin ok, ${errs.length} con errori.`, true);
+          alert(`Plugin non caricati (cartella ${r.folder || "spettro_plugins"}):\n\n${txt}`);
+        } else {
+          this._msg(`Plugin ricaricati: ${this._plugins.length} trovati${r.folder ? ` in ${r.folder}` : ""}.`);
+        }
       } catch (err) { this._startError(err.message || String(err)); }
     });
     $("resume").addEventListener("click", async () => {

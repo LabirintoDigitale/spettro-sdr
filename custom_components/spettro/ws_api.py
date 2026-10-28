@@ -448,7 +448,8 @@ async def ws_plugins_reload(hass: HomeAssistant, connection: websocket_api.Activ
     await hass.async_add_executor_job(pluginhost.load, True)
     if scanner is not None:
         scanner.plugins_changed()
-    connection.send_result(msg["id"], {"plugins": pluginhost.listing()})
+    connection.send_result(msg["id"], {"plugins": pluginhost.listing(),
+                                       "errors": pluginhost.errors(), "folder": pluginhost.folder_path()})
 
 
 # --- satelliti meteo ----------------------------------------------------------------

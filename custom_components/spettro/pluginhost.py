@@ -48,6 +48,7 @@ _LOGGER = logging.getLogger(__name__)
 AUDIO_RATE = 32_000  # frequenza dell'audio demodulato passato ai plugin "audio"
 
 _PLUGINS: dict[str, dict[str, Any]] | None = None
+_ERRORS: list[dict[str, str]] = []  # plugin che non si sono caricati, col motivo
 _USER_DIR: Path | None = None  # cartella persistente nella config di HA (impostata all'avvio)
 
 
@@ -85,11 +86,12 @@ def _folder() -> Path:
 
 
 def load(reload: bool = False) -> dict[str, dict[str, Any]]:
-    """Carica i plugin dalla cartella plugins/ (una volta sola, salvo reload). {id: descrittore}."""
-    global _PLUGINS
+    """Carica i plugin dalla cartella (una volta sola, salvo reload). {id: descrittore}."""
+    global _PLUGINS, _ERRORS
     if _PLUGINS is not None and not reload:
         return _PLUGINS
     found: dict[str, dict[str, Any]] = {}
+    errors: list[dict[str, str]] = []
     for py in sorted(_folder().glob("*.py")):
         if py.name.startswith("_"):
             continue
@@ -102,7 +104,9 @@ def load(reload: bool = False) -> dict[str, dict[str, Any]]:
             meta = getattr(mod, "PLUGIN", None)
             cls = getattr(mod, "Decoder", None)
             if not isinstance(meta, dict) or "id" not in meta or cls is None:
-                _LOGGER.warning("Plugin %s ignorato: mancano PLUGIN{id,…} o la classe Decoder", py.name)
+                msg = "manca il dizionario PLUGIN{id,…} o la classe Decoder"
+                _LOGGER.warning("Plugin %s ignorato: %s", py.name, msg)
+                errors.append({"file": py.name, "error": msg})
                 continue
             pid = str(meta["id"])
             inp = meta.get("input")
@@ -120,15 +124,28 @@ def load(reload: bool = False) -> dict[str, dict[str, Any]]:
                 desc["bw"] = float(meta.get("bw", 25_000))        # larghezza del canale da far passare (Hz)
             found[pid] = desc
             _LOGGER.info("Plugin Spettro caricato: %s (%s)", pid, py.name)
-        except Exception:  # noqa: BLE001 - un plugin rotto non deve impedire l'avvio
+        except Exception as err:  # noqa: BLE001 - un plugin rotto non deve impedire l'avvio
             _LOGGER.exception("Errore caricando il plugin %s", py.name)
+            errors.append({"file": py.name, "error": f"{type(err).__name__}: {err}"})
     _PLUGINS = found
+    _ERRORS = errors
     return _PLUGINS
 
 
 def listing() -> list[dict[str, Any]]:
     """Descrittori senza la classe, per il frontend (id, name, mode, input)."""
     return [{k: v for k, v in p.items() if k != "cls"} for p in load().values()]
+
+
+def errors() -> list[dict[str, str]]:
+    """Plugin che non si sono caricati, col motivo: [{"file":…, "error":…}]."""
+    load()
+    return list(_ERRORS)
+
+
+def folder_path() -> str:
+    """Il percorso della cartella da cui si caricano i plugin (per mostrarlo all'utente)."""
+    return str(_folder())
 
 
 def get(pid: str | None) -> dict[str, Any] | None:
