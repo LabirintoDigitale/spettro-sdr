@@ -30,6 +30,23 @@ PLUGIN = {
 }
 
 
+# chiavi di servizio di rtl_433 da non mostrare come "misura"
+_SKIP = {"model", "id", "channel", "time", "mic", "protocol", "subtype", "freq", "freq1", "freq2",
+         "rssi", "snr", "noise", "mod", "sync", "len", "seq", "num_rows", "rows"}
+
+# etichette più leggibili per i campi più comuni (per gli altri si usa il nome con gli _ sostituiti)
+_LABELS = {
+    "temperature_C": "temp °C", "temperature_F": "temp °F", "temperature_1_C": "temp1 °C",
+    "humidity": "umidità %", "humidity_1": "umidità1 %",
+    "wind_avg_m_s": "vento m/s", "wind_avg_km_h": "vento km/h", "wind_max_m_s": "raffica m/s",
+    "wind_max_km_h": "raffica km/h", "wind_dir_deg": "direzione °",
+    "rain_mm": "pioggia mm", "rain_mm_h": "pioggia mm/h", "rain_in": "pioggia in",
+    "pressure_hPa": "pressione hPa", "pressure_kPa": "pressione kPa",
+    "uv": "UV", "uvi": "indice UV", "light_lux": "luce lux", "lux": "luce lux",
+    "battery_ok": "batteria ok", "battery_V": "batteria V",
+}
+
+
 def _find_rtl433() -> str | None:
     import pathlib  # noqa: PLC0415
     bundled = pathlib.Path(__file__).parent / "bin" / "rtl_433"  # binario incluso nella release
@@ -100,13 +117,15 @@ class Decoder:
         return {"html": self._html()}
 
     def _add(self, d: dict) -> None:
-        keys = ("temperature_C", "temperature_F", "humidity", "pressure_kPa", "pressure_PSI",
-                "wind_avg_km_h", "rain_mm", "battery_ok", "state", "pressure_hPa")
+        # mostra TUTTE le misure decodificate (temp, umidità, vento, direzione, pioggia, UV, luce,
+        # pressione, batteria…), non più una lista fissa: così si vede tutto ciò che il sensore manda.
+        # Si saltano solo le chiavi di servizio (modello, id, ora, qualità del segnale, ecc.).
         vals = []
-        for k in keys:
-            if k in d:
-                lab = k.replace("temperature_C", "temp").replace("temperature_F", "temp").replace("_", " ")
-                vals.append(f"{lab}={d[k]}")
+        for k, v in d.items():
+            if k in _SKIP or k.startswith("_"):
+                continue
+            lab = _LABELS.get(k) or k.replace("_", " ")
+            vals.append(f"{lab}={v}")
         self.rows.insert(0, {
             "t": time.strftime("%H:%M:%S"),
             "model": str(d.get("model", "?")),
