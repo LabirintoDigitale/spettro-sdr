@@ -32,7 +32,7 @@ from .fax import FaxDecoder
 from .sstv import SstvDecoder, ToneTracker
 from .analysis import analyze_iq
 from .dabplus import DabLiveReceiver
-from .demod import BANDWIDTHS
+from .demod import BANDWIDTHS, _channel
 from .archive import SpikeArchive
 from .live import CHUNK, LIVE_RATE, LiveDemod
 from .orbit import passes as orbit_passes
@@ -919,12 +919,21 @@ class SpectrumScanner:
         text = textdec.DECODERS[decoder]() if decoder in textdec.DECODERS else None
         slot = (slots.SlotDecoder(decoder, freq_hz, self.meteo.location if self.meteo else None)
                 if decoder in SLOT_DECODERS else None)
+        center = float(round(freq_hz + LIVE_RATE / 8))
         pmeta = pluginhost.get(decoder)
-        plugin = plugin_iq = None
+        plugin = baseband = None
+        plugin_iq = False
         if pmeta is not None:
-            plugin_iq = pmeta["input"] == "iq"
+            if pmeta["input"] == "baseband":
+                baseband = _Baseband(int(LIVE_RATE), freq_hz - center, pmeta["rate"], pmeta["bw"])
+                prate = round(baseband.out_rate)
+            elif pmeta["input"] == "iq":
+                plugin_iq = True
+                prate = int(LIVE_RATE)
+            else:
+                prate = pluginhost.AUDIO_RATE
             try:
-                plugin = pmeta["cls"](freq_hz, int(LIVE_RATE) if plugin_iq else pluginhost.AUDIO_RATE)
+                plugin = pmeta["cls"](freq_hz, prate)
             except Exception:  # noqa: BLE001 - un plugin che non parte non deve rompere la diretta
                 _LOGGER.exception("Plugin %s: errore all'avvio", decoder)
                 plugin = None
@@ -933,7 +942,6 @@ class SpectrumScanner:
         data_task: asyncio.Task | None = None
         last_data = loop.time()
         log = self._log_start("ISS", "iss", auto) if title == "ISS" else None
-        center = float(round(freq_hz + LIVE_RATE / 8))
         discard = RCV_BUF + 2 * READ_LIMIT + int(LIVE_RATE * 2 * max(self.settings.settle_ms, 100) / 1000)
         discard -= discard % 2
         rds_task: asyncio.Task | None = None
@@ -957,7 +965,7 @@ class SpectrumScanner:
                                 async with asyncio.timeout(IO_TIMEOUT):
                                     raw = await reader.readexactly(CHUNK * 2)
                                 fails = 0  # arrivano campioni: azzera i tentativi di riconnessione
-                                out = await loop.run_in_executor(None, _live_chunk, demod, raw, img, text, slot, time.time(), plugin, plugin_iq)
+                                out = await loop.run_in_executor(None, _live_chunk, demod, raw, img, text, slot, time.time(), plugin, plugin_iq, baseband)
                                 if img is not None:
                                     await self._image_events(img, out)
                                 extra: dict[str, Any] = {}
@@ -2142,10 +2150,28 @@ def _dab_probe(raw: bytes) -> dict[str, Any] | None:
             "quality": round(res["fib_ok"] / max(1, res["fib_total"]), 2), "level_db": round(level, 1)}
 
 
+class _Baseband:
+    """Fornisce ai plugin il canale a banda base (target a 0), filtrato e decimato: downconvert +
+    filtro passa-basso + decimazione, con continuità di fase tra i blocchi (via _channel)."""
+
+    def __init__(self, rate: int, offset_hz: float, out_rate: int, bw: float) -> None:
+        self.rate = rate
+        self.offset = offset_hz
+        self.decim = max(1, round(rate / max(1, out_rate)))
+        self.out_rate = rate / self.decim
+        self.half_bw = min(bw / 2, self.out_rate / 2 * 0.95)  # entro la banda di Nyquist dell'uscita
+        self.pos = 0
+
+    def process(self, iq: np.ndarray) -> np.ndarray:
+        z = _channel(iq, self.rate, self.offset, self.decim, self.half_bw, self.pos)
+        self.pos += len(iq)
+        return z
+
+
 def _live_chunk(demod: LiveDemod, raw: bytes, img: _ImageListener | None = None,
                 text: textdec.MorseDecoder | textdec.RttyDecoder | None = None,
                 slot: slots.SlotDecoder | None = None, now: float = 0.0,
-                plugin: Any = None, plugin_iq: bool = False) -> dict[str, Any]:
+                plugin: Any = None, plugin_iq: bool = False, baseband: Any = None) -> dict[str, Any]:
     """Un blocco di byte rtl_tcp elaborato dal demodulatore in diretta (nell'executor)."""
     a = np.frombuffer(raw, dtype=np.uint8).astype(np.float32) - 127.5
     iq = (a[0::2] + 1j * a[1::2]).astype(np.complex64)
@@ -2158,8 +2184,9 @@ def _live_chunk(demod: LiveDemod, raw: bytes, img: _ImageListener | None = None,
     if slot is not None:
         out["slots"] = slot.feed(audio, now)
     if plugin is not None:
+        samples = baseband.process(iq) if baseband is not None else (iq if plugin_iq else audio)
         try:
-            res = plugin.feed(iq if plugin_iq else audio)
+            res = plugin.feed(samples)
         except Exception as err:  # noqa: BLE001 - un plugin non deve interrompere la diretta
             res = {"html": f"<i>errore nel plugin: {type(err).__name__}</i>"}
         if isinstance(res, dict):

@@ -11,14 +11,22 @@ Interfaccia di un plugin (vedi plugins/esempio_livello.py):
         "id": "mio_plugin",            # identificativo univoco
         "name": "Nome mostrato",       # etichetta nel menu dei decoder
         "mode": "nfm",                 # modo di demodulazione consigliato (o None = quello attuale)
-        "input": "audio",              # "audio" (PCM float a 32 kHz) oppure "iq" (IQ del canale)
+        "input": "audio",              # "audio", "iq" oppure "baseband" (vedi sotto)
+        # solo per input "baseband":
+        "rate": 48000,                 # frequenza d'uscita desiderata (si userà la più vicina ottenibile)
+        "bw": 25000,                   # larghezza del canale da far passare (Hz)
     }
 
     class Decoder:
-        def __init__(self, freq_hz: float, rate: int): ...
+        def __init__(self, freq_hz: float, rate: int): ...  # rate = frequenza effettiva dei campioni
         def feed(self, samples) -> dict | None:
-            # samples: numpy float (audio) o complex64 (iq). Restituisce un dizionario con una o più
-            # di: {"html": "<...>", "text": "...", "audio": <bytes PCM int16 mono 32 kHz>}
+            # samples dipende da "input":
+            #   "audio"    -> numpy float, audio demodulato a 32 kHz
+            #   "iq"       -> numpy complex64, IQ grezzo dell'intero blocco (1.024 MS/s, target NON a 0)
+            #   "baseband" -> numpy complex64, il canale GIÀ a banda base (target a 0), filtrato a "bw"
+            #                 e decimato a ~"rate" (es. per demodulare π/4-DQPSK, FSK, PSK…)
+            # Restituisce un dizionario con una o più di:
+            #   {"html": "<...>", "text": "...", "audio": <bytes PCM int16 mono 32 kHz>}
             ...
 
 ATTENZIONE SICUREZZA: un plugin è codice Python eseguito dentro Home Assistant, con i suoi permessi.
@@ -67,13 +75,20 @@ def load(reload: bool = False) -> dict[str, dict[str, Any]]:
                 _LOGGER.warning("Plugin %s ignorato: mancano PLUGIN{id,…} o la classe Decoder", py.name)
                 continue
             pid = str(meta["id"])
-            found[pid] = {
+            inp = meta.get("input")
+            inp = inp if inp in ("iq", "baseband") else "audio"
+            desc = {
                 "id": pid,
                 "name": str(meta.get("name", pid)),
                 "mode": meta.get("mode"),
-                "input": "iq" if meta.get("input") == "iq" else "audio",
+                "input": inp,
                 "cls": cls,
             }
+            if inp == "baseband":
+                # canale pronto: a banda base, filtrato e decimato alla frequenza chiesta
+                desc["rate"] = int(meta.get("rate", 48_000))      # frequenza d'uscita desiderata (Hz)
+                desc["bw"] = float(meta.get("bw", 25_000))        # larghezza del canale da far passare (Hz)
+            found[pid] = desc
             _LOGGER.info("Plugin Spettro caricato: %s (%s)", pid, py.name)
         except Exception:  # noqa: BLE001 - un plugin rotto non deve impedire l'avvio
             _LOGGER.exception("Errore caricando il plugin %s", py.name)

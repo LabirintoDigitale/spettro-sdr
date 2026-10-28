@@ -12,14 +12,21 @@ PLUGIN = {
     "id": "mio_plugin",        # identificativo univoco
     "name": "Nome mostrato",   # etichetta nel menu dei decoder
     "mode": "nfm",             # modo consigliato: wfm/nfm/am/usb/lsb/cw, oppure None
-    "input": "audio",          # "audio" (float a 32 kHz) oppure "iq" (complex64 del canale)
+    "input": "audio",          # "audio", "iq" oppure "baseband" (vedi sotto)
+    # solo per input "baseband":
+    "rate": 48000,             # frequenza d'uscita desiderata (si usa la più vicina ottenibile)
+    "bw": 25000,               # larghezza del canale da far passare (Hz)
 }
 
 class Decoder:
-    def __init__(self, freq_hz: float, rate: int):
+    def __init__(self, freq_hz: float, rate: int):   # rate = frequenza effettiva dei campioni
         ...
     def feed(self, samples) -> dict | None:
-        # samples: numpy float (audio) o complex64 (iq)
+        # samples dipende da "input":
+        #   "audio"    -> numpy float, audio demodulato a 32 kHz
+        #   "iq"       -> numpy complex64, IQ grezzo dell'intero blocco (1.024 MS/s, target NON a 0)
+        #   "baseband" -> numpy complex64, canale GIÀ a banda base (target a 0), filtrato a "bw" e
+        #                 decimato a ~"rate": pronto per demodulare π/4-DQPSK, FSK, PSK, ecc.
         # ritorna un dizionario con una o più di:
         #   "html":  str   -> pannello HTML (mostrato in un iframe sandbox)
         #   "text":  str   -> testo semplice (accodato)
@@ -27,7 +34,8 @@ class Decoder:
         return {"html": "..."}
 ```
 
-Vedi `esempio_livello.py` come modello. Dopo aver aggiunto o modificato un plugin,
+Vedi `esempio_livello.py` (audio) ed `esempio_baseband.py` (canale a banda base) come modelli.
+Dopo aver aggiunto o modificato un plugin,
 **riavvia Home Assistant** e ricarica il pannello.
 
 ## Attenzione (sicurezza)
