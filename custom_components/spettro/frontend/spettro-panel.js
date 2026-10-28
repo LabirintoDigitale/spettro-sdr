@@ -1,7 +1,7 @@
 // Pannello "Spettro" per Home Assistant: grafico dello spettro, waterfall e picchi.
 
 // deve coincidere con VERSION in const.py: se il backend ne riporta un'altra manca un riavvio
-const PANEL_VERSION = "1.50.0";
+const PANEL_VERSION = "1.51.0";
 
 const PRESETS = [
   ["Personalizzato", null, null],
@@ -1384,9 +1384,11 @@ class SpettroPanel extends HTMLElement {
   _favTarget() {
     const live = this._live;
     if (live && live.mode === "dab" && live.sid) return { mhz: live.freq_mhz, sid: live.sid, name: live.service || null };
-    // in ascolto su un modo audio: il cuore salva questa stazione con la sua demodulazione e lo squelch
+    // in ascolto su un modo audio: il cuore salva la stazione con demodulazione, squelch, la
+    // decodifica/plugin scelto e la larghezza del canale, così si ripristina tutto al riascolto
     if (live && ["wfm", "nfm", "am", "usb", "lsb", "cw"].includes(live.mode))
-      return { mhz: live.freq_mhz, sid: null, name: null, mode: live.mode, squelch: this._squelch };
+      return { mhz: live.freq_mhz, sid: null, name: null, mode: live.mode, squelch: this._squelch,
+               decoder: live.decoder || null, bw: live.bw || null };
     return this._sel === null ? null : { mhz: this._sel / 1e6, sid: null, name: null };
   }
 
@@ -1411,7 +1413,8 @@ class SpettroPanel extends HTMLElement {
     try {
       if (fav) await this._hass.callWS({ type: "spettro/favorite_remove", freq_mhz: fav.freq_mhz, sid: fav.sid || null });
       else await this._hass.callWS({ type: "spettro/favorite_set", freq_mhz: t.mhz, sid: t.sid, name, ...(name ? { source } : {}),
-        ...(t.mode ? { mode: t.mode } : {}), ...(t.squelch ? { squelch: t.squelch } : {}) });
+        ...(t.mode ? { mode: t.mode } : {}), ...(t.squelch ? { squelch: t.squelch } : {}),
+        ...(t.decoder ? { decoder: t.decoder } : {}), ...(t.bw ? { bw: t.bw } : {}) });
     } catch (err) {
       this._msg(err.message || String(err), true);
     }
@@ -1459,7 +1462,7 @@ class SpettroPanel extends HTMLElement {
       tr.querySelector("button.play").addEventListener("click", () => {
         this._select(mhz * 1e6);
         if (fav.sid) this._liveStart(mhz, "dab", fav.sid);
-        else { this._squelch = fav.squelch > 0 ? fav.squelch : 0; this._liveStart(mhz, fav.mode || null); }
+        else { this._squelch = fav.squelch > 0 ? fav.squelch : 0; this._liveStart(mhz, fav.mode || null, null, fav.decoder || null, null, fav.bw || null); }
       });
       tr.querySelector("button.heart").addEventListener("click", () => this._toggleFav({ mhz, sid: fav.sid || null, name: fav.name }));
       tr.querySelector("button.edit").addEventListener("click", () => this._renameFav(fav));

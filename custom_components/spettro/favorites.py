@@ -50,10 +50,12 @@ class Favorites:
                      and f.get("sid") == sid), None)
 
     async def async_set(self, freq_mhz: float, name: str | None, source: str = "user", sid: str | None = None,
-                        mode: str | None = None, squelch: float | None = None) -> None:
+                        mode: str | None = None, squelch: float | None = None,
+                        decoder: str | None = None, bw: float | None = None) -> None:
         """Aggiunge un preferito, o ne cambia il nome; un nome RDS/DAB non sostituisce quello scritto a mano.
 
-        mode/squelch: la demodulazione e la soglia dell'altoparlante da ripristinare quando si riascolta.
+        mode/squelch/decoder/bw: demodulazione, soglia dell'altoparlante, decodifica/plugin scelto e
+        larghezza del canale, da ripristinare quando si riascolta.
         """
         fav = self.find(freq_mhz, sid)
         if fav is None:
@@ -69,6 +71,15 @@ class Favorites:
             fav["mode"] = mode
         if squelch is not None:
             fav["squelch"] = round(float(squelch), 1)
+        if not fav.get("sid"):  # decodifica/plugin e larghezza del canale (non per il DAB)
+            # decoder="" significa "nessuna decodifica": lo salvo come rimozione del campo
+            if decoder is not None:
+                if decoder:
+                    fav["decoder"] = decoder
+                else:
+                    fav.pop("decoder", None)
+            if bw is not None:
+                fav["bw"] = round(float(bw))
         if name is not None and not (source in ("rds", "dab") and fav.get("source") == "user"):
             name = name.strip()[:40]
             fav["name"], fav["source"] = (name, source) if name else (None, "auto")
