@@ -1,7 +1,7 @@
 // Pannello "Spettro" per Home Assistant: grafico dello spettro, waterfall e picchi.
 
 // deve coincidere con VERSION in const.py: se il backend ne riporta un'altra manca un riavvio
-const PANEL_VERSION = "1.51.0";
+const PANEL_VERSION = "1.52.0";
 
 const PRESETS = [
   ["Personalizzato", null, null],
@@ -2350,9 +2350,41 @@ class SpettroPanel extends HTMLElement {
 
   _onMeteoLive(m) {
     const el = this.shadowRoot.getElementById("meteolive");
-    if (m.done) { el.innerHTML = ""; this._meteoPreview = null; return; }
+    if (!el) return;
+    if (m.done) { el.innerHTML = ""; this._meteoPreview = null; this._meteoKey = null; return; }
     if (m.preview) this._meteoPreview = m.preview;
     const s = m.stats, p = m.pass;
+    this._meteoNorad = p ? p.norad : null;
+    // La struttura (e i PULSANTI) si creano una volta sola per ricezione: prima venivano ricreati a
+    // ogni aggiornamento (~4/s), così un tocco cadeva su un pulsante che stava per essere sostituito e
+    // sembrava non fare nulla. A ogni messaggio aggiorno solo le parti che cambiano.
+    const key = p ? `${p.norad}:${p.aos}` : "rx";
+    let built = false;
+    if (this._meteoKey !== key || !el.querySelector("#meteostop")) {
+      this._meteoKey = key;
+      built = true;
+      el.innerHTML = `<div class="livehead" style="margin-top:8px"><span class="dot">● IN RICEZIONE</span>
+          <span class="title" id="meteotitle"></span>
+          <button id="meteorestart" title="Ferma e ricomincia la ricezione di questo passaggio">↻ Riparti</button>
+          <button class="primary" id="meteostop">■ Ferma e salva</button></div>
+        <div id="meteoerr"></div>
+        <table><tbody id="meteorows"></tbody></table>
+        <div id="meteoimgwrap"></div>`;
+      el.querySelector("#meteostop").addEventListener("click", async () => {
+        try { await this._hass.callWS({ type: "spettro/meteo_stop" }); } catch (err) { this._msg(err.message || String(err), true); }
+      });
+      el.querySelector("#meteorestart").addEventListener("click", async () => {
+        const norad = this._meteoNorad;
+        if (norad == null) return;
+        try {
+          await this._hass.callWS({ type: "spettro/meteo_stop" });   // ferma quella in corso…
+          await this._hass.callWS({ type: "spettro/meteo_receive", norad });  // …e ricomincia il passaggio
+          this._msg("Ricezione riavviata.");
+        } catch (err) { this._startError(err.message || String(err)); }
+      });
+    }
+    const title = this.shadowRoot.getElementById("meteotitle");
+    if (title && p) title.textContent = p.satellite;
     const rows = s ? [
       ["Satellite", `${p.satellite} · ${s.freq_mhz} MHz${s.el != null ? ` · elevazione ${s.el}°` : ""}`],
       ["Segnale", s.locked ? `agganciato (righe ${s.line_db} dB sopra il fondo, simboli ${s.snr_db} dB)` : "in ricerca…"],
@@ -2361,14 +2393,15 @@ class SpettroPanel extends HTMLElement {
       ["Immagine", `${m.rows || 0} righe${m.composite ? ` · ${m.composite}` : ""}`],
       ["Tempo", `${Math.floor(s.elapsed_s / 60)}:${String(Math.floor(s.elapsed_s % 60)).padStart(2, "0")} · fine alle ${new Date(p.los * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`],
     ] : [];
-    el.innerHTML = `<div class="livehead" style="margin-top:8px"><span class="dot">● IN RICEZIONE</span>
-        <span class="title">${esc(p.satellite)}</span><button class="primary" id="meteostop">■ Ferma e salva</button></div>
-      ${m.error ? `<div class="err">${esc(m.error)}</div>` : ""}
-      <table><tbody>${rows.map(([k, v]) => `<tr><td>${k}</td><td class="num">${esc(v)}</td></tr>`).join("")}</tbody></table>
-      ${this._meteoPreview ? `<img class="meteoimg" src="data:image/png;base64,${this._meteoPreview}" alt="Immagine in arrivo">` : ""}`;
-    el.querySelector("#meteostop").addEventListener("click", async () => {
-      try { await this._hass.callWS({ type: "spettro/meteo_stop" }); } catch (err) { this._msg(err.message || String(err), true); }
-    });
+    const errEl = this.shadowRoot.getElementById("meteoerr");
+    if (errEl) errEl.innerHTML = m.error ? `<div class="err">${esc(m.error)}</div>` : "";
+    const rowsEl = this.shadowRoot.getElementById("meteorows");
+    if (rowsEl) rowsEl.innerHTML = rows.map(([k, v]) => `<tr><td>${k}</td><td class="num">${esc(v)}</td></tr>`).join("");
+    // l'immagine la riscrivo solo quando arriva un'anteprima nuova (evita di ricaricarla a ogni update)
+    if (m.preview || built) {
+      const iw = this.shadowRoot.getElementById("meteoimgwrap");
+      if (iw) iw.innerHTML = this._meteoPreview ? `<img class="meteoimg" src="data:image/png;base64,${this._meteoPreview}" alt="Immagine in arrivo">` : "";
+    }
   }
 
   _renderMeteoList() {
