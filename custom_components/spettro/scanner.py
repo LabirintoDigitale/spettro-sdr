@@ -862,13 +862,6 @@ class SpectrumScanner:
             raise RuntimeError("FT8 e WSPR si ricevono in USB")
         if decoder == "dati" and mode != "nfm":
             raise RuntimeError("Il riconoscimento dei dati funziona in FM stretta")
-        # un decoder scelto che non è né predefinito né un plugin caricato = plugin non disponibile
-        # nel backend (cartella non sincronizzata, errore di caricamento, o HA non riavviato): meglio
-        # dirlo subito con un popup invece di avviare una diretta muta senza plugin
-        builtin = decoder in IMAGE_DECODERS or decoder in SLOT_DECODERS or decoder in textdec.DECODERS or decoder == "dati"
-        if decoder and not builtin and pluginhost.get(decoder) is None:
-            raise RuntimeError(f"Plugin «{decoder}» non disponibile nel backend: premi 🔄 Ricarica plugin, "
-                               "e se non basta riavvia Home Assistant (dopo un aggiornamento serve il riavvio)")
         if bw is not None and mode in BANDWIDTHS:
             bw = min(BANDWIDTHS[mode][1], key=lambda b: abs(b - bw))
         else:
@@ -931,9 +924,17 @@ class SpectrumScanner:
         slot = (slots.SlotDecoder(decoder, freq_hz, self.meteo.location if self.meteo else None)
                 if decoder in SLOT_DECODERS else None)
         center = float(round(freq_hz + LIVE_RATE / 8))
+        builtin_dec = (decoder in IMAGE_DECODERS or decoder in SLOT_DECODERS
+                       or decoder in textdec.DECODERS or decoder == "dati")
         pmeta = pluginhost.get(decoder)
+        # se il decoder scelto non è predefinito ma non risulta caricato, riprovo a caricare i plugin
+        # (es. cartella sincronizzata da poco): così la selezione funziona senza riavviare HA
+        if pmeta is None and decoder and not builtin_dec:
+            await loop.run_in_executor(None, pluginhost.load, True)
+            pmeta = pluginhost.get(decoder)
         plugin = baseband = None
         plugin_iq = False
+        plugin_err: str | None = None
         if pmeta is not None:
             if pmeta["input"] == "baseband":
                 baseband = _Baseband(int(LIVE_RATE), freq_hz - center, pmeta["rate"], pmeta["bw"])
@@ -945,9 +946,13 @@ class SpectrumScanner:
                 prate = pluginhost.AUDIO_RATE
             try:
                 plugin = pmeta["cls"](freq_hz, prate)
-            except Exception:  # noqa: BLE001 - un plugin che non parte non deve rompere la diretta
+            except Exception as err:  # noqa: BLE001 - un plugin che non parte non deve rompere la diretta
                 _LOGGER.exception("Plugin %s: errore all'avvio", decoder)
                 plugin = None
+                plugin_err = f"Il plugin «{decoder}» non è partito: {type(err).__name__}. Vedi i log di Home Assistant."
+        elif decoder and not builtin_dec:
+            plugin_err = (f"Plugin «{decoder}» non caricato nel backend. Premi 🔄 Ricarica plugin; "
+                          "se non basta, controlla che il file sia in /config/spettro_plugins/ e riavvia Home Assistant.")
         slot_tasks: set[asyncio.Task] = set()
         data_raw: deque[bytes] = deque()  # ultimi secondi di IQ per "Riconosci dati"
         data_task: asyncio.Task | None = None
@@ -999,6 +1004,12 @@ class SpectrumScanner:
                                         task = loop.create_task(self._decode_slot(slot, start, seg))
                                         slot_tasks.add(task)
                                         task.add_done_callback(slot_tasks.discard)
+                                if out.get("plugin"):
+                                    plugin_field = {"plugin": out["plugin"]}
+                                elif plugin_err:
+                                    plugin_field = {"plugin": {"html": f'<div style="color:#e53935">⚠ {plugin_err}</div>'}}
+                                else:
+                                    plugin_field = {}
                                 self._emit({
                                     **extra,
                                     "kind": "live",
@@ -1009,7 +1020,7 @@ class SpectrumScanner:
                                     "row": out["row"],
                                     "span_hz": out["span_hz"],
                                     "level_db": out["level_db"],
-                                    **({"plugin": out["plugin"]} if out.get("plugin") else {}),
+                                    **plugin_field,
                                 })
                                 if out["mpx"] is None:
                                     continue
