@@ -1,7 +1,7 @@
 // Pannello "Spettro" per Home Assistant: grafico dello spettro, waterfall e picchi.
 
 // deve coincidere con VERSION in const.py: se il backend ne riporta un'altra manca un riavvio
-const PANEL_VERSION = "1.31.3";
+const PANEL_VERSION = "1.31.4";
 
 const PRESETS = [
   ["Personalizzato", null, null],
@@ -415,7 +415,7 @@ class SpettroPanel extends HTMLElement {
         #adsblist .plane, #adsbhist .plane { display:flex; flex-direction:row; flex-wrap:wrap; gap:4px 14px; align-items:baseline; padding:8px 0; border-bottom:1px solid var(--divider-color,#e0e0e0); }
         #adsblist .pleft, #adsbhist .pleft { flex:1 1 180px; min-width:0; }
         #adsblist .pleft > div, #adsbhist .pleft > div { word-break:break-word; }
-        #adsblist .pphoto { flex:none; align-self:flex-start; height:44px; border-radius:4px; margin-left:10px; }
+        #adsblist .pphoto, #adsbhist .pphoto { flex:none; align-self:flex-start; height:44px; border-radius:4px; margin-left:10px; }
         #adsblist .pright { display:flex; flex-wrap:wrap; gap:2px 14px; font-variant-numeric:tabular-nums; }
         #adsblist .pv { white-space:nowrap; }
         #adsblist .plane.emg { color:#e53935; font-weight:600; }
@@ -1777,7 +1777,9 @@ class SpettroPanel extends HTMLElement {
             <div><b>${esc(f.call || f.icao)}</b>${who ? ` · <span class="hint">${esc(who)}</span>` : ""}
               ${route ? `<br><span class="hint">🛫 ${esc(route)}</span>` : ""}
               <br><span class="hint">${hm(f.first)}–${hm(f.last)}${f.km_min != null ? ` · minimo ${f.km_min.toLocaleString("it-IT")} km` : ""}${f.points > 1 ? ` · ${f.points} punti` : " · senza traccia"}</span></div>
-          </div></label>`; }).join("")}</div>`;
+          </div>
+          ${f.photo ? `<img class="pphoto" src="${esc(f.photo)}" alt="" referrerpolicy="no-referrer" loading="lazy">` : ""}
+          </label>`; }).join("")}</div>`;
     this._drawRadar();
   }
 

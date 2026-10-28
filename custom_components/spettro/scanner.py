@@ -1169,7 +1169,7 @@ class SpectrumScanner:
             rec["alt_m"] = round(pl["alt_ft"] * 0.3048)
         info = self._adsb_ac.get(icao)
         if info:
-            rec.update({k: info[k] for k in ("registration", "type", "manufacturer", "owner") if info.get(k)})
+            rec.update({k: info[k] for k in ("registration", "type", "manufacturer", "owner", "photo") if info.get(k)})
         route = self._adsb_route.get(pl.get("call") or "")
         if route:
             rec["route"] = route
