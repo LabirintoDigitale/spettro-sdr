@@ -58,20 +58,51 @@ def bundled_dir() -> Path:
 
 
 def init_user_dir(path: str | Path) -> Path:
-    """Imposta la cartella utente dei plugin (persistente, sotto la config di HA) e, la prima volta,
-    ci copia gli esempi inclusi. Qui vanno i plugin dell'utente: NON si cancellano con gli aggiornamenti."""
+    """Imposta la cartella utente dei plugin (persistente, sotto la config di HA) e vi consegna i
+    plugin inclusi nella release. Qui vanno i plugin dell'utente: NON si cancellano con gli
+    aggiornamenti.
+
+    Ogni file incluso nell'integrazione (esempi e plugin pronti, come rtl_433) viene copiato nella
+    cartella utente una sola volta, al primo avvio in cui compare. Così i plugin aggiunti in una
+    nuova release arrivano da soli anche a chi ha già la cartella, ma senza mai:
+      - sovrascrivere un plugin che l'utente ha modificato (si copia solo se il file non c'è);
+      - ripristinare un plugin che l'utente ha cancellato di proposito (si tiene un registro dei
+        file già consegnati in `.spettro_bundled.json`).
+    """
     global _USER_DIR
+    import json  # noqa: PLC0415
+    import shutil  # noqa: PLC0415
+
     p = Path(path)
     p.mkdir(parents=True, exist_ok=True)
-    if not any(p.glob("*.py")):  # cartella nuova/vuota: parti con gli esempi
-        import shutil  # noqa: PLC0415
 
-        for f in bundled_dir().glob("*"):
-            if f.is_file() and not (p / f.name).exists():
+    manifest = p / ".spettro_bundled.json"  # file già consegnati dalla release (nome -> visto)
+    try:
+        known = set(json.loads(manifest.read_text("utf-8")))
+    except (OSError, ValueError):
+        known = set()
+
+    changed = False
+    for f in sorted(bundled_dir().glob("*")):
+        if not f.is_file():
+            continue
+        dest = p / f.name
+        if f.name not in known:
+            if not dest.exists():  # file nuovo: consegnalo (mai sovrascrivere l'esistente)
                 try:
-                    shutil.copy2(f, p / f.name)
+                    shutil.copy2(f, dest)
+                    _LOGGER.info("Plugin incluso consegnato: %s", f.name)
                 except OSError:
-                    _LOGGER.warning("Non riesco a copiare l'esempio %s in %s", f.name, p)
+                    _LOGGER.warning("Non riesco a copiare %s in %s", f.name, p)
+            known.add(f.name)
+            changed = True
+
+    if changed:
+        try:
+            manifest.write_text(json.dumps(sorted(known)), "utf-8")
+        except OSError:
+            _LOGGER.warning("Non riesco a salvare il registro dei plugin inclusi in %s", p)
+
     _USER_DIR = p
     _LOGGER.info("Cartella plugin di Spettro: %s", p)
     return p

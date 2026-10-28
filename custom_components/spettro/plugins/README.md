@@ -3,7 +3,14 @@
 I tuoi plugin vanno nella cartella **`spettro_plugins/` dentro la configurazione di Home Assistant**
 (di solito `/config/spettro_plugins/`) — **non** in `custom_components/spettro/plugins/`, che viene
 sovrascritta a ogni aggiornamento. La cartella `spettro_plugins/` è **persistente**: i tuoi plugin
-restano anche quando aggiorni Spettro. La prima volta viene creata e riempita con questi esempi.
+restano anche quando aggiorni Spettro. Al primo avvio viene creata e riempita con questi esempi.
+
+I plugin **inclusi nella release** (gli esempi e quelli pronti all'uso, come `rtl433.py`) vengono
+consegnati nella tua cartella automaticamente: ognuno viene copiato una sola volta, la prima volta
+che compare in un aggiornamento. Spettro **non** sovrascrive mai un plugin che hai modificato (copia
+solo se il file non c'è) e **non** ripristina quelli che hai cancellato di proposito (tiene un
+registro in `.spettro_bundled.json`). Dopo un aggiornamento, **riavvia Home Assistant** e il nuovo
+plugin comparirà nel menu (eventualmente premi 🔄 Ricarica plugin).
 
 Un file `.py` per plugin. Si innestano nel blocco **Analisi segnale**
 come un decoder scelto dal menu. Quando lo selezioni, Spettro sintonizza la frequenza, demodula e
