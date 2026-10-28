@@ -1,7 +1,7 @@
 // Pannello "Spettro" per Home Assistant: grafico dello spettro, waterfall e picchi.
 
 // deve coincidere con VERSION in const.py: se il backend ne riporta un'altra manca un riavvio
-const PANEL_VERSION = "1.40.0";
+const PANEL_VERSION = "1.41.0";
 
 const PRESETS = [
   ["Personalizzato", null, null],
@@ -1695,7 +1695,32 @@ class SpettroPanel extends HTMLElement {
       + (this._squelch > 0 ? ` · ${Math.round(snr)}/${this._squelch} dB sul rumore${squelched ? " · muto" : ""}` : "");
     this._drawLiveRow(m.row);
     if (this._listen && this._audioCtx && !squelched) this._playPcm(m.audio);
-    if (m.plugin) this._renderPlugin(m.plugin);
+    // plugin: il riquadro viene creato/aggiornato dal flusso dei frame (che gira di sicuro: la cascata
+    // si muove), così non dipende da _setLive né dall'ordine dei messaggi. Un doppio contatore mostra
+    // quanti frame arrivano in tutto e quanti portano l'output del plugin. Protetto da try/catch.
+    const dec = this._live && this._live.decoder;
+    const isPlugin = dec && dec !== "sstv" && dec !== "fax" && dec !== "dati"
+      && !SLOT_DECODERS.includes(dec) && !TEXT_DECODERS.includes(dec);
+    if (isPlugin) {
+      try {
+        this._plugAll = (this._plugAll || 0) + 1;
+        const box = $("liveimg");
+        if (box && !box.querySelector(".plugbody")) this._renderPluginBox();
+        if (m.plugin) {
+          this._renderPlugin(m.plugin);
+        } else {
+          const hint = box && box.querySelector(".plughint");
+          if (hint && !this._plugFrames) {
+            hint.textContent = `🧩 ${this._pluginName()} · ${this._plugAll} frame, 0 col plugin — in attesa…`;
+          }
+        }
+      } catch (err) {
+        const box = $("liveimg");
+        if (box) box.innerHTML = `<div class="hint err" style="margin-top:6px">Errore pannello plugin: ${esc(err.message || String(err))}</div>`;
+      }
+    } else if (m.plugin) {
+      this._renderPlugin(m.plugin);
+    }
     if (m.digi && this._live && SLOT_DECODERS.includes(this._live.decoder)) { this._digiStatus = m.digi; this._renderDigiStatus(); }
     if (m.text_info !== undefined && this._live && TEXT_DECODERS.includes(this._live.decoder)) {
       if (this._liveText == null) this._liveText = "";
