@@ -793,6 +793,12 @@ class SpectrumScanner:
                         raise ConnectionError("Connessione chiusa dal server")
             result, png, audio = job.result()
             result["scan_snr_db"] = scan_snr  # quanto stava sopra il rumore nella scansione
+            if scan_snr is not None and scan_snr >= 15 and not result.get("detected"):
+                # la scansione l'ha visto forte ma l'analisi, pochi secondi dopo, trova solo rumore:
+                # era un segnale a raffiche (PMR, dati, cercapersone) che aveva smesso di trasmettere
+                result["kind"] = (f"segnale intermittente (a raffiche): forte nella scansione "
+                                  f"(+{round(scan_snr)} dB) ma spento al momento dell'analisi "
+                                  f"— es. radio PMR, dati o cercapersone")
             result["tune_hz"] = center
             await self._store_analysis(result, png, audio, auto=True, iq=raw if self.settings.save_iq_auto else None)
         finally:
