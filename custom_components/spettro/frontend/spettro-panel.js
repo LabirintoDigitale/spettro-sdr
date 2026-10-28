@@ -1,7 +1,7 @@
 // Pannello "Spettro" per Home Assistant: grafico dello spettro, waterfall e picchi.
 
 // deve coincidere con VERSION in const.py: se il backend ne riporta un'altra manca un riavvio
-const PANEL_VERSION = "1.31.2";
+const PANEL_VERSION = "1.31.3";
 
 const PRESETS = [
   ["Personalizzato", null, null],
@@ -415,7 +415,7 @@ class SpettroPanel extends HTMLElement {
         #adsblist .plane, #adsbhist .plane { display:flex; flex-direction:row; flex-wrap:wrap; gap:4px 14px; align-items:baseline; padding:8px 0; border-bottom:1px solid var(--divider-color,#e0e0e0); }
         #adsblist .pleft, #adsbhist .pleft { flex:1 1 180px; min-width:0; }
         #adsblist .pleft > div, #adsbhist .pleft > div { word-break:break-word; }
-        #adsblist .pphoto { float:right; height:44px; border-radius:4px; margin:0 0 4px 10px; }
+        #adsblist .pphoto { flex:none; align-self:flex-start; height:44px; border-radius:4px; margin-left:10px; }
         #adsblist .pright { display:flex; flex-wrap:wrap; gap:2px 14px; font-variant-numeric:tabular-nums; }
         #adsblist .pv { white-space:nowrap; }
         #adsblist .plane.emg { color:#e53935; font-weight:600; }
@@ -1684,7 +1684,6 @@ class SpettroPanel extends HTMLElement {
       const val = (v, cls) => `<span class="pv${cls ? " " + cls : ""}">${v}</span>`;
       return `<div class="plane${a.emergency ? " emg" : ""}">
         <div class="pleft">
-          ${a.photo ? `<img class="pphoto" src="${esc(a.photo)}" alt="" referrerpolicy="no-referrer" loading="lazy">` : ""}
           <div><b>${esc(a.call || a.icao)}</b>${a.airline || a.owner ? ` · <span class="hint">${esc(a.airline || a.owner)}${a.flight ? ` volo ${esc(a.flight)}` : ""}</span>` : ""}</div>
           <div class="hint">${a.icao}${a.registration ? ` · ${esc(a.registration)}` : ""}${a.country ? ` · ${esc(a.country)}` : ""}${model ? ` · ${esc(model)}` : (a.category ? ` · ${esc(a.category)}` : "")}${a.emergency ? ` · ⚠ EMERGENZA ${esc(a.emergency)}` : ""}</div>
           ${route ? `<div class="hint">🛫 ${route}</div>` : ""}
@@ -1695,6 +1694,7 @@ class SpettroPanel extends HTMLElement {
           ${val(a.km != null ? `${a.km.toLocaleString("it-IT")} km` : "—")}
           ${val(a.bearing != null ? `<span class="hint">verso te</span> ${dir(a.bearing)} ${a.bearing}°` : "—")}
         </div>
+        ${a.photo ? `<img class="pphoto" src="${esc(a.photo)}" alt="" referrerpolicy="no-referrer" loading="lazy">` : ""}
       </div>`; }).join("")}</div>
       <div class="hint" style="margin-top:6px">Compagnia, paese e categoria sono ricavati senza internet. Con «Dettagli da internet» si aggiungono modello, immatricolazione e rotta (adsbdb.com). La posizione c'è solo per gli aerei che la trasmettono. Radar centrato su di te, nord in alto.</div>`;
   }
