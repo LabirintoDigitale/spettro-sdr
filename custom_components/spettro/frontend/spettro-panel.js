@@ -1,7 +1,7 @@
 // Pannello "Spettro" per Home Assistant: grafico dello spettro, waterfall e picchi.
 
 // deve coincidere con VERSION in const.py: se il backend ne riporta un'altra manca un riavvio
-const PANEL_VERSION = "1.41.0";
+const PANEL_VERSION = "1.42.0";
 
 const PRESETS = [
   ["Personalizzato", null, null],
@@ -1691,8 +1691,12 @@ class SpettroPanel extends HTMLElement {
     if (openNow) this._sqHang = 10;
     else if (this._sqHang > 0) this._sqHang--;
     const squelched = this._squelch > 0 && !openNow && this._sqHang <= 0;
+    this._dbgN = (this._dbgN || 0) + 1;
+    const dbgDec = (this._live && this._live.decoder) || "—";
+    const dbgPl = m.plugin ? "+plugin" : "";
     $("livelevel").textContent = `livello ${lvl} dBFS`
-      + (this._squelch > 0 ? ` · ${Math.round(snr)}/${this._squelch} dB sul rumore${squelched ? " · muto" : ""}` : "");
+      + (this._squelch > 0 ? ` · ${Math.round(snr)}/${this._squelch} dB sul rumore${squelched ? " · muto" : ""}` : "")
+      + ` · [dec=${dbgDec} f=${this._dbgN} ${dbgPl}]`;
     this._drawLiveRow(m.row);
     if (this._listen && this._audioCtx && !squelched) this._playPcm(m.audio);
     // plugin: il riquadro viene creato/aggiornato dal flusso dei frame (che gira di sicuro: la cascata
