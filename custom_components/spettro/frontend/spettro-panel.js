@@ -1,7 +1,7 @@
 // Pannello "Spettro" per Home Assistant: grafico dello spettro, waterfall e picchi.
 
 // deve coincidere con VERSION in const.py: se il backend ne riporta un'altra manca un riavvio
-const PANEL_VERSION = "1.31.5";
+const PANEL_VERSION = "1.32.0";
 
 const PRESETS = [
   ["Personalizzato", null, null],
@@ -215,6 +215,7 @@ class SpettroPanel extends HTMLElement {
     this._archSort = { key: "timestamp", desc: true }; // colonna e verso dell'ordinamento dell'archivio
     this._archSel = null; // id dell'analisi dell'archivio mostrata
     this._favs = []; // frequenze preferite
+    this._plugins = []; // plugin di terze parti (decoder ospitati)
     this._live = null; // analisi continua in corso: {freq_mhz, mode}
     this._listen = false; // audio della diretta attivo
     this._squelch = 0; // squelch: dB che il segnale deve superare il rumore per sentirsi (0 = spento)
@@ -302,6 +303,7 @@ class SpettroPanel extends HTMLElement {
       return;
     }
     if (m.kind === "favorites") { this._favs = m.favorites; this._renderFavs(); this._updateFavBtn(); return; }
+    if (m.kind === "plugins") { this._plugins = m.plugins || []; this._addPluginOptions(); return; }
     if (m.kind === "live") { this._onLive(m); return; }
     if (m.kind === "live_rds") { this._onLiveRds(m.rds); return; }
     if (m.kind === "live_dab") { this._onLiveDab(m); return; }
@@ -791,7 +793,11 @@ class SpettroPanel extends HTMLElement {
     $("selfreq").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); typed(); $("selfreq").blur(); } });
     $("selfreq").addEventListener("change", typed);
     $("livedec").addEventListener("change", (e) => {
-      if (this._live) this._liveStart(this._live.freq_mhz, this._live.mode, null, e.target.value || null, null, this._live.bw);
+      if (!this._live) return;
+      const dec = e.target.value || null;
+      const plug = (this._plugins || []).find((p) => p.id === dec);
+      const mode = plug && plug.mode ? plug.mode : this._live.mode; // un plugin può chiedere il suo modo
+      this._liveStart(this._live.freq_mhz, mode, null, dec, null, this._live.bw);
     });
     $("resume").addEventListener("click", async () => {
       try {
@@ -1513,10 +1519,10 @@ class SpettroPanel extends HTMLElement {
     // squelch solo per i modi audio analogici (muta l'altoparlante quando il segnale è debole)
     $("livesqwrap").style.display = ["wfm", "nfm", "am", "usb", "lsb", "cw"].includes(live.mode) ? "" : "none";
     $("livesq").value = this._squelch;
-    $("livedec").style.display = ["nfm", "am", "usb", "lsb", "cw"].includes(live.mode) ? "" : "none";
+    $("livedec").style.display = ["wfm", "nfm", "am", "usb", "lsb", "cw"].includes(live.mode) ? "" : "none";
     for (const o of $("livedec").options) {
       const d = LIVE_DECODERS.find(([v]) => v === o.value);
-      o.hidden = o.disabled = !!d && !d[2].includes(live.mode);
+      o.hidden = o.disabled = !!d && !d[2].includes(live.mode);  // i plugin (data-plugin) restano sempre visibili
     }
     $("livedec").value = live.decoder || "";
     const bws = BANDWIDTHS[live.mode];
@@ -1535,6 +1541,15 @@ class SpettroPanel extends HTMLElement {
       if (!was || was.decoder !== live.decoder || was.freq_mhz !== live.freq_mhz || this._liveText == null) {
         this._liveText = live.text || "";
         this._renderLiveText("in cerca del segnale…");
+      }
+    } else if ((this._plugins || []).some((p) => p.id === live.decoder)) {
+      if (!was || was.decoder !== live.decoder || was.freq_mhz !== live.freq_mhz) {
+        this._liveText = null; this._liveImgPreview = null;
+        const name = ((this._plugins || []).find((p) => p.id === live.decoder) || {}).name || "Plugin";
+        // l'HTML del plugin gira in un iframe sandbox, isolato dal resto del pannello
+        $("liveimg").innerHTML = `<iframe class="plugframe" sandbox="allow-scripts" title="${esc(name)}"`
+          + ` style="width:100%;height:96px;border:0;background:transparent"></iframe>`
+          + `<div class="hint plughint" style="margin-top:2px">🧩 ${esc(name)} · in attesa di dati…</div>`;
       }
     } else if (!was || was.decoder !== live.decoder || was.freq_mhz !== live.freq_mhz) {
       this._liveText = null;
@@ -1575,6 +1590,32 @@ class SpettroPanel extends HTMLElement {
     this.shadowRoot.getElementById("livetitle").textContent = `${live.freq_mhz.toFixed(4)} MHz${name ? ` «${name}»` : ""}`;
   }
 
+  _addPluginOptions() {
+    // aggiunge i plugin al menu dei decoder (sotto gli altri), togliendo le voci vecchie
+    const sel = this.shadowRoot.getElementById("livedec");
+    if (!sel) return;
+    [...sel.querySelectorAll("option[data-plugin]")].forEach((o) => o.remove());
+    for (const p of this._plugins) {
+      const o = document.createElement("option");
+      o.value = p.id;
+      o.textContent = "🧩 " + p.name;
+      o.dataset.plugin = "1";
+      sel.appendChild(o);
+    }
+  }
+
+  _renderPlugin(plugin) {
+    const box = this.shadowRoot.getElementById("liveimg");
+    if (!box) return;
+    const fr = box.querySelector(".plugframe");
+    if (fr && typeof plugin.html === "string") {
+      fr.srcdoc = `<!doctype html><meta charset="utf-8"><body style="margin:0;color:#ddd;`
+        + `background:transparent;font:13px system-ui,sans-serif">${plugin.html}</body>`;
+    }
+    const hint = box.querySelector(".plughint");
+    if (hint && typeof plugin.text === "string") hint.textContent = plugin.text;
+  }
+
   _onLive(m) {
     if (!this._live) this._setLive({ freq_mhz: m.freq_mhz, mode: m.mode });
     const $ = (id) => this.shadowRoot.getElementById(id);
@@ -1596,6 +1637,7 @@ class SpettroPanel extends HTMLElement {
       + (this._squelch > 0 ? ` · ${Math.round(snr)}/${this._squelch} dB sul rumore${squelched ? " · muto" : ""}` : "");
     this._drawLiveRow(m.row);
     if (this._listen && this._audioCtx && !squelched) this._playPcm(m.audio);
+    if (m.plugin) this._renderPlugin(m.plugin);
     if (m.digi && this._live && SLOT_DECODERS.includes(this._live.decoder)) { this._digiStatus = m.digi; this._renderDigiStatus(); }
     if (m.text_info !== undefined && this._live && TEXT_DECODERS.includes(this._live.decoder)) {
       if (this._liveText == null) this._liveText = "";
