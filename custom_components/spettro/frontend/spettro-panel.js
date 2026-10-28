@@ -1,7 +1,7 @@
 // Pannello "Spettro" per Home Assistant: grafico dello spettro, waterfall e picchi.
 
 // deve coincidere con VERSION in const.py: se il backend ne riporta un'altra manca un riavvio
-const PANEL_VERSION = "1.30.2";
+const PANEL_VERSION = "1.31.0";
 
 const PRESETS = [
   ["Personalizzato", null, null],
@@ -217,7 +217,7 @@ class SpettroPanel extends HTMLElement {
     this._favs = []; // frequenze preferite
     this._live = null; // analisi continua in corso: {freq_mhz, mode}
     this._listen = false; // audio della diretta attivo
-    this._squelch = null; // soglia squelch in dBFS: sotto, l'altoparlante tace (null = sempre acceso)
+    this._squelch = 0; // squelch: dB che il segnale deve superare il rumore per sentirsi (0 = spento)
     this._audioCtx = null;
     this._nextT = 0;
     this._rtHistory = []; // testi RDS ricevuti in diretta, dal più recente
@@ -529,7 +529,7 @@ class SpettroPanel extends HTMLElement {
                 <select id="livemode" title="Demodulazione"><option value="wfm">FM larga (radio)</option><option value="nfm">FM stretta (voce)</option><option value="am">AM</option><option value="usb">USB</option><option value="lsb">LSB</option><option value="cw">CW (Morse)</option></select>
                 <select id="livebw" title="Larghezza del filtro: più stretto toglie rumore e disturbi vicini, più largo fa passare tutto il segnale"></select>
                 <select id="livedec" title="Decodifica dell'audio: immagini o testo"><option value="">Nessuna decodifica</option>${LIVE_DECODERS.map(([v, t]) => `<option value="${v}">${t}</option>`).join("")}</select>
-                <label class="chk sq" id="livesqwrap" title="Squelch: l'altoparlante resta muto finché il segnale è più debole di questa soglia (in dBFS). Vuoto = sempre acceso.">squelch <input type="number" id="livesq" step="1" min="-100" max="0" placeholder="off" style="width:56px"> dB</label>
+                <label class="chk sq" id="livesqwrap" title="Squelch: apre l'altoparlante solo quando il segnale supera il rumore di almeno tanti dB. 0 = spento (sempre acceso); più alto = più selettivo.">squelch <input type="number" id="livesq" step="1" min="0" max="60" style="width:52px"> dB</label>
                 <button id="livelisten">🔇 Ascolta</button>
                 <button class="primary" id="livestop">■ Ferma</button>
               </div>
@@ -752,11 +752,15 @@ class SpettroPanel extends HTMLElement {
       try { await this._hass.callWS({ type: "spettro/live_stop" }); } catch (err) { this._msg(err.message || String(err), true); }
     });
     $("livelisten").addEventListener("click", () => this._setListen(!this._listen));
-    $("livesq").addEventListener("change", (e) => {
-      const v = e.target.value.trim();
-      this._squelch = v === "" ? null : Math.max(-100, Math.min(0, +v));
-      e.target.value = this._squelch == null ? "" : this._squelch;
-    });
+    const onSq = (e) => {
+      let v = parseInt(e.target.value, 10);
+      if (isNaN(v) || v < 0) v = 0;
+      if (v > 60) v = 60;
+      this._squelch = v;  // 0 = spento
+      if (e.type === "change") e.target.value = v;
+    };
+    $("livesq").addEventListener("input", onSq);   // aggiorna anche con le frecce, subito
+    $("livesq").addEventListener("change", onSq);  // normalizza il campo quando confermi
     $("livemode").addEventListener("change", (e) => {
       if (!this._live) return;
       const dec = LIVE_DECODERS.find(([v]) => v === this._live.decoder);
@@ -1373,7 +1377,7 @@ class SpettroPanel extends HTMLElement {
     try {
       if (fav) await this._hass.callWS({ type: "spettro/favorite_remove", freq_mhz: fav.freq_mhz, sid: fav.sid || null });
       else await this._hass.callWS({ type: "spettro/favorite_set", freq_mhz: t.mhz, sid: t.sid, name, ...(name ? { source } : {}),
-        ...(t.mode ? { mode: t.mode } : {}), ...(t.squelch != null ? { squelch: t.squelch } : {}) });
+        ...(t.mode ? { mode: t.mode } : {}), ...(t.squelch ? { squelch: t.squelch } : {}) });
     } catch (err) {
       this._msg(err.message || String(err), true);
     }
@@ -1421,7 +1425,7 @@ class SpettroPanel extends HTMLElement {
       tr.querySelector("button.play").addEventListener("click", () => {
         this._select(mhz * 1e6);
         if (fav.sid) this._liveStart(mhz, "dab", fav.sid);
-        else { this._squelch = fav.squelch != null ? fav.squelch : null; this._liveStart(mhz, fav.mode || null); }
+        else { this._squelch = fav.squelch > 0 ? fav.squelch : 0; this._liveStart(mhz, fav.mode || null); }
       });
       tr.querySelector("button.heart").addEventListener("click", () => this._toggleFav({ mhz, sid: fav.sid || null, name: fav.name }));
       tr.querySelector("button.edit").addEventListener("click", () => this._renameFav(fav));
@@ -1504,7 +1508,7 @@ class SpettroPanel extends HTMLElement {
     $("livelisten").style.display = live.mode === "tv" || live.mode === "sat" || live.mode === "meter" ? "none" : "";
     // squelch solo per i modi audio analogici (muta l'altoparlante quando il segnale è debole)
     $("livesqwrap").style.display = ["wfm", "nfm", "am", "usb", "lsb", "cw"].includes(live.mode) ? "" : "none";
-    $("livesq").value = this._squelch == null ? "" : this._squelch;
+    $("livesq").value = this._squelch;
     $("livedec").style.display = ["nfm", "am", "usb", "lsb", "cw"].includes(live.mode) ? "" : "none";
     for (const o of $("livedec").options) {
       const d = LIVE_DECODERS.find(([v]) => v === o.value);
@@ -1567,14 +1571,24 @@ class SpettroPanel extends HTMLElement {
     this.shadowRoot.getElementById("livetitle").textContent = `${live.freq_mhz.toFixed(4)} MHz${name ? ` «${name}»` : ""}`;
   }
 
+  _rowNoise(row) {
+    // stima del rumore di fondo del canale: il 20° percentile dei bin della riga spettro
+    if (!row || !row.length) return -120;
+    const s = [...row].sort((a, b) => a - b);
+    return s[Math.floor(s.length * 0.2)];
+  }
+
   _onLive(m) {
     if (!this._live) this._setLive({ freq_mhz: m.freq_mhz, mode: m.mode });
     const $ = (id) => this.shadowRoot.getElementById(id);
     const half = m.span_hz / 2;
     $("livelo").textContent = `${((m.freq_mhz * 1e6 - half) / 1e6).toFixed(3)}`;
     $("livehi").textContent = `${((m.freq_mhz * 1e6 + half) / 1e6).toFixed(3)}`;
-    const squelched = this._squelch != null && m.level_db < this._squelch;
-    $("livelevel").textContent = `livello ${m.level_db} dBFS${squelched ? " · muto (squelch)" : ""}`;
+    // squelch: apre l'audio solo se il livello supera il rumore (stimato dalla riga) di tanti dB
+    const snr = m.level_db - this._rowNoise(m.row);
+    const squelched = this._squelch > 0 && snr < this._squelch;
+    $("livelevel").textContent = `livello ${m.level_db} dBFS`
+      + (this._squelch > 0 ? ` · ${Math.round(snr)}/${this._squelch} dB sul rumore${squelched ? " · muto" : ""}` : "");
     this._drawLiveRow(m.row);
     if (this._listen && this._audioCtx && !squelched) this._playPcm(m.audio);
     if (m.digi && this._live && SLOT_DECODERS.includes(this._live.decoder)) { this._digiStatus = m.digi; this._renderDigiStatus(); }
