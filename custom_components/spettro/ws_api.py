@@ -408,7 +408,10 @@ async def ws_favorite_remove(hass: HomeAssistant, connection: websocket_api.Acti
         vol.Required("freq_mhz"): vol.All(vol.Coerce(float), vol.Range(min=0.5, max=2200)),
         vol.Optional("mode"): vol.Any(None, vol.In(["wfm", "nfm", "am", "usb", "lsb", "cw", "dab", "tv", "sat", "meter"])),
         vol.Optional("sid"): vol.Any(None, str),
-        vol.Optional("decoder"): vol.Any(None, vol.In(["sstv", "fax", "cw", "rtty45", "rtty50", "ft8", "wspr", "dati"])),
+        # decoder predefinito OPPURE id di un plugin (dinamico): si accetta una stringa qualsiasi,
+        # la validazione vera la fa scanner.live_start. Prima la lista fissa rifiutava gli id dei
+        # plugin a livello websocket, così la diretta col plugin non partiva mai.
+        vol.Optional("decoder"): vol.Any(None, str),
         vol.Optional("bw"): vol.Any(None, vol.All(vol.Coerce(float), vol.Range(min=100, max=50000))),
         vol.Optional("title"): vol.Any(None, str),
     }
