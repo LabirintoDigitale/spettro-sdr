@@ -12,7 +12,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.storage import Store
 
-from . import ws_api
+from . import pluginhost, ws_api
 from .const import (
     ARCHIVE_DIR,
     DATA_STATIC_REGISTERED,
@@ -48,6 +48,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: SpettroConfigEntry) -> b
     scanner.favorites = Favorites(hass)
     await scanner.favorites.async_load()
     await scanner.prune_archive()
+    # cartella plugin persistente (sotto la config di HA): non si cancella con gli aggiornamenti
+    await hass.async_add_executor_job(pluginhost.init_user_dir, hass.config.path("spettro_plugins"))
     await _setup_meteo(hass, scanner)
 
     _session = async_get_clientsession(hass)

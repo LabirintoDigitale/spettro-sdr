@@ -1,6 +1,8 @@
 """Plugin di terze parti per l'analisi in diretta.
 
-Un plugin è un file Python nella cartella `plugins/` di questa integrazione. Si innesta nel blocco
+Un plugin è un file Python nella cartella persistente `spettro_plugins/` della configurazione di Home
+Assistant (di solito /config/spettro_plugins/, creata al primo avvio con dentro gli esempi; non si
+cancella con gli aggiornamenti). Si innesta nel blocco
 "Analisi segnale" come un decoder: quando lo si sceglie, Spettro sintonizza la frequenza, demodula e
 passa al plugin, blocco per blocco, l'audio (o l'IQ grezzo del canale). Il plugin restituisce un
 pannello HTML da mostrare e/o l'audio da far sentire.
@@ -46,10 +48,38 @@ _LOGGER = logging.getLogger(__name__)
 AUDIO_RATE = 32_000  # frequenza dell'audio demodulato passato ai plugin "audio"
 
 _PLUGINS: dict[str, dict[str, Any]] | None = None
+_USER_DIR: Path | None = None  # cartella persistente nella config di HA (impostata all'avvio)
+
+
+def bundled_dir() -> Path:
+    """Gli esempi inclusi nell'integrazione (sovrascritti a ogni aggiornamento: solo riferimento)."""
+    return Path(__file__).parent / "plugins"
+
+
+def init_user_dir(path: str | Path) -> Path:
+    """Imposta la cartella utente dei plugin (persistente, sotto la config di HA) e, la prima volta,
+    ci copia gli esempi inclusi. Qui vanno i plugin dell'utente: NON si cancellano con gli aggiornamenti."""
+    global _USER_DIR
+    p = Path(path)
+    p.mkdir(parents=True, exist_ok=True)
+    if not any(p.glob("*.py")):  # cartella nuova/vuota: parti con gli esempi
+        import shutil  # noqa: PLC0415
+
+        for f in bundled_dir().glob("*"):
+            if f.is_file() and not (p / f.name).exists():
+                try:
+                    shutil.copy2(f, p / f.name)
+                except OSError:
+                    _LOGGER.warning("Non riesco a copiare l'esempio %s in %s", f.name, p)
+    _USER_DIR = p
+    _LOGGER.info("Cartella plugin di Spettro: %s", p)
+    return p
 
 
 def _folder() -> Path:
-    folder = Path(__file__).parent / "plugins"
+    if _USER_DIR is not None:
+        return _USER_DIR
+    folder = bundled_dir()
     folder.mkdir(exist_ok=True)
     return folder
 

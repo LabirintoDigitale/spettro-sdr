@@ -1,6 +1,11 @@
 # Plugin di Spettro
 
-Metti qui i tuoi plugin: un file `.py` per plugin. Si innestano nel blocco **Analisi segnale**
+I tuoi plugin vanno nella cartella **`spettro_plugins/` dentro la configurazione di Home Assistant**
+(di solito `/config/spettro_plugins/`) — **non** in `custom_components/spettro/plugins/`, che viene
+sovrascritta a ogni aggiornamento. La cartella `spettro_plugins/` è **persistente**: i tuoi plugin
+restano anche quando aggiorni Spettro. La prima volta viene creata e riempita con questi esempi.
+
+Un file `.py` per plugin. Si innestano nel blocco **Analisi segnale**
 come un decoder scelto dal menu. Quando lo selezioni, Spettro sintonizza la frequenza, demodula e
 passa al plugin — blocco per blocco — l'audio (o l'IQ grezzo del canale); il plugin restituisce un
 pannello **HTML** da mostrare e/o l'**audio** da far sentire.

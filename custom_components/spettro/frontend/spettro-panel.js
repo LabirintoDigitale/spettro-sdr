@@ -1,7 +1,7 @@
 // Pannello "Spettro" per Home Assistant: grafico dello spettro, waterfall e picchi.
 
 // deve coincidere con VERSION in const.py: se il backend ne riporta un'altra manca un riavvio
-const PANEL_VERSION = "1.33.0";
+const PANEL_VERSION = "1.33.1";
 
 const PRESETS = [
   ["Personalizzato", null, null],
@@ -533,6 +533,7 @@ class SpettroPanel extends HTMLElement {
                 <select id="livemode" title="Demodulazione"><option value="wfm">FM larga (radio)</option><option value="nfm">FM stretta (voce)</option><option value="am">AM</option><option value="usb">USB</option><option value="lsb">LSB</option><option value="cw">CW (Morse)</option></select>
                 <select id="livebw" title="Larghezza del filtro: più stretto toglie rumore e disturbi vicini, più largo fa passare tutto il segnale"></select>
                 <select id="livedec" title="Decodifica dell'audio: immagini o testo"><option value="">Nessuna decodifica</option>${LIVE_DECODERS.map(([v, t]) => `<option value="${v}">${t}</option>`).join("")}</select>
+                <button id="plugreload" title="Cerca nuovi plugin nella cartella spettro_plugins/ della configurazione (senza riavviare)">🔄</button>
                 <label class="chk sq" id="livesqwrap" title="Squelch: apre l'altoparlante solo quando il segnale supera il rumore di almeno tanti dB. 0 = spento (sempre acceso); più alto = più selettivo.">squelch <input type="number" id="livesq" step="1" min="0" max="60" style="width:52px"> dB</label>
                 <button id="livelisten">🔇 Ascolta</button>
                 <button class="primary" id="livestop">■ Ferma</button>
@@ -798,6 +799,14 @@ class SpettroPanel extends HTMLElement {
       const plug = (this._plugins || []).find((p) => p.id === dec);
       const mode = plug && plug.mode ? plug.mode : this._live.mode; // un plugin può chiedere il suo modo
       this._liveStart(this._live.freq_mhz, mode, null, dec, null, this._live.bw);
+    });
+    $("plugreload").addEventListener("click", async () => {
+      try {
+        const r = await this._hass.callWS({ type: "spettro/plugins_reload" });
+        this._plugins = r.plugins || [];
+        this._addPluginOptions();
+        this._msg(`Plugin ricaricati: ${this._plugins.length} trovati.`);
+      } catch (err) { this._startError(err.message || String(err)); }
     });
     $("resume").addEventListener("click", async () => {
       try {
@@ -1520,6 +1529,7 @@ class SpettroPanel extends HTMLElement {
     $("livesqwrap").style.display = ["wfm", "nfm", "am", "usb", "lsb", "cw"].includes(live.mode) ? "" : "none";
     $("livesq").value = this._squelch;
     $("livedec").style.display = ["wfm", "nfm", "am", "usb", "lsb", "cw"].includes(live.mode) ? "" : "none";
+    $("plugreload").style.display = $("livedec").style.display;
     for (const o of $("livedec").options) {
       const d = LIVE_DECODERS.find(([v]) => v === o.value);
       o.hidden = o.disabled = !!d && !d[2].includes(live.mode);  // i plugin (data-plugin) restano sempre visibili

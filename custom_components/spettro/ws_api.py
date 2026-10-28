@@ -16,6 +16,7 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import entity_registry as er
 
+from . import pluginhost
 from .analysis import describe
 from .download import FORMATS, IqDownloadView, iq_url
 from .const import DATA_WS_REGISTERED, DOMAIN, OPT_ENABLED
@@ -61,6 +62,7 @@ def async_setup(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, ws_favorite_remove)
     websocket_api.async_register_command(hass, ws_live_start)
     websocket_api.async_register_command(hass, ws_live_stop)
+    websocket_api.async_register_command(hass, ws_plugins_reload)
     websocket_api.async_register_command(hass, ws_iq_url)
     hass.http.register_view(IqDownloadView())
     websocket_api.async_register_command(hass, ws_meteo_list)
@@ -435,6 +437,18 @@ async def ws_live_stop(hass: HomeAssistant, connection: websocket_api.ActiveConn
         return
     await scanner.live_stop()
     connection.send_result(msg["id"])
+
+
+@websocket_api.websocket_command({vol.Required("type"): "spettro/plugins_reload"})
+@websocket_api.async_response
+async def ws_plugins_reload(hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]) -> None:
+    """Ri-cerca i plugin nella cartella plugins/ senza riavviare Home Assistant."""
+    _entry, scanner = _scanner(hass, connection, msg)
+    # il caricamento legge file ed esegue gli import: fuori dal loop
+    await hass.async_add_executor_job(pluginhost.load, True)
+    if scanner is not None:
+        scanner.plugins_changed()
+    connection.send_result(msg["id"], {"plugins": pluginhost.listing()})
 
 
 # --- satelliti meteo ----------------------------------------------------------------

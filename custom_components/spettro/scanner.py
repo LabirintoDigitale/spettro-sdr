@@ -450,6 +450,10 @@ class SpectrumScanner:
         if self.favorites is not None:
             self._emit({"kind": "favorites", "favorites": self.favorites.items})
 
+    def plugins_changed(self) -> None:
+        """Avvisa i pannelli che l'elenco dei plugin è cambiato (dopo una ricarica)."""
+        self._emit({"kind": "plugins", "plugins": pluginhost.listing()})
+
     def _emit(self, payload: dict[str, Any]) -> None:
         for cb in list(self._listeners):
             try:
