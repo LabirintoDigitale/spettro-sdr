@@ -1004,6 +1004,7 @@ class SpectrumScanner:
                                     "kind": "live",
                                     "freq_mhz": round(freq_hz / 1e6, 4),
                                     "mode": mode,
+                                    "decoder": decoder,  # così il pannello sa sempre cosa c'è in diretta
                                     "audio": base64.b64encode(out["pcm"]).decode(),
                                     "row": out["row"],
                                     "span_hz": out["span_hz"],
