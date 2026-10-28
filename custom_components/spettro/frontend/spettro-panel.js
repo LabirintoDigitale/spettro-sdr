@@ -1,7 +1,7 @@
 // Pannello "Spettro" per Home Assistant: grafico dello spettro, waterfall e picchi.
 
 // deve coincidere con VERSION in const.py: se il backend ne riporta un'altra manca un riavvio
-const PANEL_VERSION = "1.37.0";
+const PANEL_VERSION = "1.38.0";
 
 const PRESETS = [
   ["Personalizzato", null, null],
@@ -303,7 +303,16 @@ class SpettroPanel extends HTMLElement {
       return;
     }
     if (m.kind === "favorites") { this._favs = m.favorites; this._renderFavs(); this._updateFavBtn(); return; }
-    if (m.kind === "plugins") { this._plugins = m.plugins || []; this._addPluginOptions(); return; }
+    if (m.kind === "plugins") {
+      this._plugins = m.plugins || [];
+      this._addPluginOptions();
+      // se è già in corso una diretta con questo plugin ma il pannello non era ancora stato creato
+      // (elenco plugin arrivato dopo lo stato della diretta), crealo ora
+      if (this._live && this._plugins.some((p) => p.id === this._live.decoder)) {
+        if (!this.shadowRoot.querySelector("#liveimg .plugframe")) this._renderPlugin({});
+      }
+      return;
+    }
     if (m.kind === "live") { this._onLive(m); return; }
     if (m.kind === "live_rds") { this._onLiveRds(m.rds); return; }
     if (m.kind === "live_dab") { this._onLiveDab(m); return; }
@@ -1568,10 +1577,18 @@ class SpettroPanel extends HTMLElement {
           + ` style="width:100%;height:96px;border:0;background:transparent"></iframe>`
           + `<div class="hint plughint" style="margin-top:2px">🧩 ${esc(name)} · in attesa di dati…</div>`;
       }
+    } else if (live.decoder === "sstv" || live.decoder === "fax") {
+      if (!was || was.decoder !== live.decoder || was.freq_mhz !== live.freq_mhz) {
+        this._liveText = null;
+        this._liveImgPreview = null;
+        $("liveimg").innerHTML = `<div class="hint" style="margin-top:6px">In ascolto: ${live.decoder === "fax" ? "una carta inizia con il tono di avvio" : "ogni immagine SSTV inizia con il codice VIS"}…</div>`;
+      }
     } else if (!was || was.decoder !== live.decoder || was.freq_mhz !== live.freq_mhz) {
+      // decoder sconosciuto, o un plugin non ancora presente in elenco (lo stato della diretta può
+      // arrivare prima della lista plugin): niente messaggio fuorviante, l'iframe lo crea _renderPlugin
       this._liveText = null;
       this._liveImgPreview = null;
-      $("liveimg").innerHTML = `<div class="hint" style="margin-top:6px">In ascolto: ${live.decoder === "fax" ? "una carta inizia con il tono di avvio" : "ogni immagine SSTV inizia con il codice VIS"}…</div>`;
+      $("liveimg").innerHTML = "";
     }
     this._updateFavBtn();
     if (!digital) $("livemode").value = live.mode;
@@ -1624,7 +1641,17 @@ class SpettroPanel extends HTMLElement {
   _renderPlugin(plugin) {
     const box = this.shadowRoot.getElementById("liveimg");
     if (!box) return;
-    const fr = box.querySelector(".plugframe");
+    let fr = box.querySelector(".plugframe");
+    if (!fr) {
+      // l'iframe può non esserci ancora (lo stato della diretta è arrivato prima dell'elenco
+      // plugin): lo creo adesso, così il pannello compare comunque, in qualunque ordine
+      const dec = this._live && this._live.decoder;
+      const name = ((this._plugins || []).find((p) => p.id === dec) || {}).name || "Plugin";
+      box.innerHTML = `<iframe class="plugframe" sandbox="allow-scripts" title="${esc(name)}"`
+        + ` style="width:100%;height:96px;border:0;background:transparent"></iframe>`
+        + `<div class="hint plughint" style="margin-top:2px">🧩 ${esc(name)} · in attesa di dati…</div>`;
+      fr = box.querySelector(".plugframe");
+    }
     if (fr && typeof plugin.html === "string") {
       fr.srcdoc = `<!doctype html><meta charset="utf-8"><body style="margin:0;color:#ddd;`
         + `background:transparent;font:13px system-ui,sans-serif">${plugin.html}</body>`;
