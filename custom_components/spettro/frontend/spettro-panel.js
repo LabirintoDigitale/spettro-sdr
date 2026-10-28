@@ -1,7 +1,7 @@
 // Pannello "Spettro" per Home Assistant: grafico dello spettro, waterfall e picchi.
 
 // deve coincidere con VERSION in const.py: se il backend ne riporta un'altra manca un riavvio
-const PANEL_VERSION = "1.31.0";
+const PANEL_VERSION = "1.31.1";
 
 const PRESETS = [
   ["Personalizzato", null, null],
@@ -735,8 +735,8 @@ class SpettroPanel extends HTMLElement {
       }
     });
     $("scannow").addEventListener("click", async () => {
-      try { await this._hass.callWS({ type: "spettro/scan_now" }); this._msg("Scansione avviata."); }
-      catch (err) { this._msg(err.message || String(err), true); }
+      try { await this._hass.callWS({ type: "spettro/scan_now" }); this._msg("Scansione avviata."); this._revealCard("chartcard"); }
+      catch (err) { this._startError(err.message || String(err)); }
     });
     $("showmax").addEventListener("change", (e) => { this._showMax = e.target.checked; this._draw(); });
     $("clearmax").addEventListener("click", () => {
@@ -808,7 +808,7 @@ class SpettroPanel extends HTMLElement {
     this._setupFolds();
     $("dabscan").addEventListener("click", async () => {
       const running = this._dabScan && !this._dabScan.done;
-      try { await this._hass.callWS({ type: "spettro/dab_scan", stop: !!running }); } catch (err) { this._startError(err.message || String(err)); }
+      try { await this._hass.callWS({ type: "spettro/dab_scan", stop: !!running }); if (!running) this._revealCard("dabcard"); } catch (err) { this._startError(err.message || String(err)); }
     });
     $("dablist").addEventListener("click", (e) => {
       const b = e.target.closest("button.dabgo");
@@ -817,7 +817,7 @@ class SpettroPanel extends HTMLElement {
     $("adsbbtn").addEventListener("click", async () => {
       try {
         if (this._adsb) await this._hass.callWS({ type: "spettro/adsb", action: "stop" });
-        else await this._hass.callWS({ type: "spettro/adsb", action: "start", continuous: $("adsbcont").checked, online: $("adsbonline").checked });
+        else { await this._hass.callWS({ type: "spettro/adsb", action: "start", continuous: $("adsbcont").checked, online: $("adsbonline").checked }); this._revealCard("adsbcard"); }
       } catch (err) { this._startError(err.message || String(err)); }
     });
     const adsbOpts = async () => {
@@ -1463,7 +1463,7 @@ class SpettroPanel extends HTMLElement {
       await this._hass.callWS({ type: "spettro/live_start", freq_mhz: mhz, ...(mode ? { mode } : {}), ...(sid ? { sid } : {}),
         ...(decoder ? { decoder } : {}), ...(title ? { title } : {}), ...(bw ? { bw } : {}) });
       this._setListen(true); // partita davvero: ora si accende l'ascolto
-      this.shadowRoot.querySelector(".ana").scrollIntoView({ behavior: "smooth", block: "start" });
+      this._revealCard("anacard"); // apre e mostra il blocco Analisi segnale, anche se era compresso
     } catch (err) {
       this._setListen(false);
       // non è partita: messaggio in riga e, se la chiavetta è occupata, un popup col motivo
@@ -1571,11 +1571,14 @@ class SpettroPanel extends HTMLElement {
     this.shadowRoot.getElementById("livetitle").textContent = `${live.freq_mhz.toFixed(4)} MHz${name ? ` «${name}»` : ""}`;
   }
 
-  _rowNoise(row) {
-    // stima del rumore di fondo del canale: il 20° percentile dei bin della riga spettro
-    if (!row || !row.length) return -120;
+  _rowSnr(row) {
+    // quanto il segnale supera il rumore nel canale, dalla riga di spettro (differenza di percentili,
+    // così la scala si semplifica): rumore = 25° percentile dei bin, segnale = quasi il picco (98°)
+    if (!row || row.length < 8) return 0;
     const s = [...row].sort((a, b) => a - b);
-    return s[Math.floor(s.length * 0.2)];
+    const noise = s[Math.floor(s.length * 0.25)];
+    const sig = s[Math.floor(s.length * 0.98)];
+    return sig - noise;
   }
 
   _onLive(m) {
@@ -1584,8 +1587,8 @@ class SpettroPanel extends HTMLElement {
     const half = m.span_hz / 2;
     $("livelo").textContent = `${((m.freq_mhz * 1e6 - half) / 1e6).toFixed(3)}`;
     $("livehi").textContent = `${((m.freq_mhz * 1e6 + half) / 1e6).toFixed(3)}`;
-    // squelch: apre l'audio solo se il livello supera il rumore (stimato dalla riga) di tanti dB
-    const snr = m.level_db - this._rowNoise(m.row);
+    // squelch: apre l'audio solo se il segnale supera il rumore (stimato dalla riga) di tanti dB
+    const snr = this._rowSnr(m.row);
     const squelched = this._squelch > 0 && snr < this._squelch;
     $("livelevel").textContent = `livello ${m.level_db} dBFS`
       + (this._squelch > 0 ? ` · ${Math.round(snr)}/${this._squelch} dB sul rumore${squelched ? " · muto" : ""}` : "");
@@ -1631,6 +1634,7 @@ class SpettroPanel extends HTMLElement {
         // il grafico, riaperto, va ridisegnato (da chiuso il canvas aveva larghezza 0)
         if (!f && card.id === "chartcard") requestAnimationFrame(() => this._draw());
       };
+      card._fold = { key, apply };  // per poter aprire la scheda da fuori (es. quando parte un'azione)
       btn.addEventListener("click", () => {
         this._folded[key] = !this._folded[key];
         try { localStorage.setItem("spettro_folded", JSON.stringify(this._folded)); } catch (err) { /* vale fino alla chiusura */ }
@@ -1638,6 +1642,19 @@ class SpettroPanel extends HTMLElement {
       });
       apply();
     }
+  }
+
+  _revealCard(id) {
+    // apre la scheda (se era compressa) e la porta in vista: così quando si avvia qualcosa a
+    // pannello "chiuso" si vede subito cosa sta facendo
+    const card = this.shadowRoot.getElementById(id);
+    if (!card) return;
+    if (card._fold && this._folded[card._fold.key]) {
+      this._folded[card._fold.key] = false;
+      try { localStorage.setItem("spettro_folded", JSON.stringify(this._folded)); } catch (err) { /* ok */ }
+      card._fold.apply();
+    }
+    card.scrollIntoView({ behavior: "smooth", block: "start" });
   }
 
   _renderAdsb() {
