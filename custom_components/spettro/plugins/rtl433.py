@@ -12,8 +12,10 @@ from __future__ import annotations
 
 import json
 import os
+import queue
 import shutil
 import subprocess
+import threading
 import time
 
 import numpy as np
@@ -87,6 +89,29 @@ class Decoder:
         except OSError as e:
             self.err = f"rtl_433 non avviabile: {e}"
             self.proc = None
+            return
+        # La scrittura verso rtl_433 va fatta FUORI dal loop della diretta: a 1 Msps sono ~2 MB/s e,
+        # se rtl_433 resta indietro, una write bloccante inchioderebbe la diretta (che poi va in pausa).
+        # Un thread dedicato scrive dalla coda; se la coda è piena si scartano blocchi (meglio perdere
+        # qualche campione che bloccare tutto).
+        self._stop = False
+        self._q: queue.Queue = queue.Queue(maxsize=8)
+        self._writer = threading.Thread(target=self._write_loop, name="rtl433_writer", daemon=True)
+        self._writer.start()
+
+    def _write_loop(self) -> None:
+        while not self._stop:
+            try:
+                data = self._q.get(timeout=0.5)
+            except queue.Empty:
+                continue
+            if data is None:
+                break
+            try:
+                self.proc.stdin.write(data)
+            except (BrokenPipeError, OSError, ValueError):
+                self.err = "rtl_433 si è chiuso (controlla che sia installato correttamente)."
+                break
 
     def feed(self, z: np.ndarray) -> dict | None:
         if self.err:
@@ -98,10 +123,9 @@ class Decoder:
         iq[0::2] = np.clip(z.real + 127.5, 0, 255).astype(np.uint8)
         iq[1::2] = np.clip(z.imag + 127.5, 0, 255).astype(np.uint8)
         try:
-            self.proc.stdin.write(iq.tobytes())
-        except (BrokenPipeError, OSError):
-            self.err = "rtl_433 si è chiuso (controlla che sia installato correttamente)."
-            return {"html": f'<div style="color:#e53935;font:13px sans-serif">⚠ {self.err}</div>'}
+            self._q.put_nowait(iq.tobytes())  # consegna al thread di scrittura, senza mai bloccare
+        except queue.Full:
+            pass  # rtl_433 è indietro: scarta questo blocco (interi, così resta allineato)
         try:
             data = self.proc.stdout.read()
             if data:
@@ -149,9 +173,16 @@ class Decoder:
         return head + f'<table style="margin-top:6px;border-collapse:collapse;width:100%">{rows}</table></div>'
 
     def __del__(self) -> None:
+        self._stop = True
+        q = getattr(self, "_q", None)
+        if q is not None:
+            try:
+                q.put_nowait(None)  # sveglia il thread di scrittura perché esca
+            except Exception:  # noqa: BLE001
+                pass
         if getattr(self, "proc", None):
             try:
-                self.proc.terminate()
+                self.proc.terminate()  # chiude le pipe e sblocca una eventuale write ferma
             except OSError:
                 pass
 
