@@ -23,15 +23,25 @@ PLUGIN = {
     "name": "Sensori ISM (rtl_433)",
     "mode": "nfm",
     "input": "baseband",
-    "rate": 250_000,   # rtl_433 lavora bene attorno a 250 kHz per l'OOK a 433 MHz
-    "bw": 200_000,     # banda larga: i dispositivi stanno a qualche kHz dalla portante
+    # 1 Msps come quando si lancia rtl_433 normalmente: va bene sia per l'OOK a 433 sia, soprattutto,
+    # per l'FSK a 868 (stazioni meteo Fine Offset/Ecowitt), che a 250 kHz spesso non aggancia.
+    "rate": 1_000_000,
+    "bw": 300_000,     # canale largo: i dispositivi stanno a decine di kHz dalla portante
 }
 
 
 def _find_rtl433() -> str | None:
-    for cand in (shutil.which("rtl_433"), "/config/spettro_plugins/bin/rtl_433",
+    import pathlib  # noqa: PLC0415
+    bundled = pathlib.Path(__file__).parent / "bin" / "rtl_433"  # binario incluso nella release
+    for cand in (str(bundled), shutil.which("rtl_433"), "/config/spettro_plugins/bin/rtl_433",
                  "/usr/bin/rtl_433", "/usr/local/bin/rtl_433"):
         if cand and os.path.exists(cand):
+            try:  # lo zip di release può perdere il bit di esecuzione: lo rimetto se serve
+                st = os.stat(cand)
+                if not st.st_mode & 0o111:
+                    os.chmod(cand, st.st_mode | 0o111)
+            except OSError:
+                pass
             return cand
     return None
 

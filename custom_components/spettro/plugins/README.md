@@ -1,21 +1,20 @@
 # Plugin di Spettro
 
-I tuoi plugin vanno nella cartella **`spettro_plugins/` dentro la configurazione di Home Assistant**
-(di solito `/config/spettro_plugins/`) — **non** in `custom_components/spettro/plugins/`, che viene
-sovrascritta a ogni aggiornamento. La cartella `spettro_plugins/` è **persistente**: i tuoi plugin
-restano anche quando aggiorni Spettro. Al primo avvio viene creata e riempita con questi esempi.
+I plugin **inclusi nella release** (gli esempi e quelli pronti all'uso, come `rtl433.py`) stanno qui,
+in `custom_components/spettro/plugins/`, e vengono **caricati direttamente da qui**: si aggiornano da
+soli a ogni aggiornamento di Spettro, senza che tu debba copiare nulla.
 
-I plugin **inclusi nella release** (gli esempi e quelli pronti all'uso, come `rtl433.py`) vengono
-consegnati nella tua cartella automaticamente: ognuno viene copiato una sola volta, la prima volta
-che compare in un aggiornamento. Spettro **non** sovrascrive mai un plugin che hai modificato (copia
-solo se il file non c'è) e **non** ripristina quelli che hai cancellato di proposito (tiene un
-registro in `.spettro_bundled.json`). Dopo un aggiornamento, **riavvia Home Assistant** e il nuovo
-plugin comparirà nel menu (eventualmente premi 🔄 Ricarica plugin).
+I **tuoi** plugin vanno invece nella cartella **`spettro_plugins/` dentro la configurazione di Home
+Assistant** (di solito `/config/spettro_plugins/`). Quella cartella è **persistente**: i tuoi plugin
+restano tra un aggiornamento e l'altro. Se metti lì un file con lo **stesso id** di un plugin incluso,
+il tuo ha la precedenza (puoi così personalizzarne uno).
 
-Allo stesso modo viene consegnata anche l'eventuale cartella **`bin/`** inclusa nella release (per i
-programmi di appoggio, es. il binario `rtl_433`): i file in `bin/` vengono copiati in
-`/config/spettro_plugins/bin/` e resi eseguibili, con le stesse regole (una sola volta, senza
-sovrascrivere né ripristinare i cancellati).
+Dopo aver aggiunto o modificato un plugin, premi 🔄 **Ricarica plugin** nel pannello (o riavvia Home
+Assistant) e ricarica la pagina.
+
+> Nota: le versioni fino alla 1.45 copiavano i plugin inclusi dentro `spettro_plugins/`. Dalla 1.47
+> quelle vecchie copie vengono rimosse in automatico (i tuoi plugin non si toccano), così la versione
+> aggiornata inclusa nella release non resta coperta da una copia datata.
 
 Un file `.py` per plugin. Si innestano nel blocco **Analisi segnale**
 come un decoder scelto dal menu. Quando lo selezioni, Spettro sintonizza la frequenza, demodula e

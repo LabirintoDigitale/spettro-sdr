@@ -1,8 +1,9 @@
 """Plugin di terze parti per l'analisi in diretta.
 
-Un plugin è un file Python nella cartella persistente `spettro_plugins/` della configurazione di Home
-Assistant (di solito /config/spettro_plugins/, creata al primo avvio con dentro gli esempi; non si
-cancella con gli aggiornamenti). Si innesta nel blocco
+Un plugin è un file Python. Quelli inclusi nell'integrazione (esempi e rtl_433) stanno in
+`custom_components/spettro/plugins/` e si caricano direttamente da lì (aggiornati con la release). I
+plugin dell'utente vanno nella cartella persistente `spettro_plugins/` della configurazione di Home
+Assistant (di solito /config/spettro_plugins/; non si cancella con gli aggiornamenti). Si innesta nel blocco
 "Analisi segnale" come un decoder: quando lo si sceglie, Spettro sintonizza la frequenza, demodula e
 passa al plugin, blocco per blocco, l'audio (o l'IQ grezzo del canale). Il plugin restituisce un
 pannello HTML da mostrare e/o l'audio da far sentire.
@@ -58,63 +59,52 @@ def bundled_dir() -> Path:
 
 
 def init_user_dir(path: str | Path) -> Path:
-    """Imposta la cartella utente dei plugin (persistente, sotto la config di HA) e vi consegna i
-    plugin inclusi nella release. Qui vanno i plugin dell'utente: NON si cancellano con gli
-    aggiornamenti.
+    """Imposta la cartella dei plugin **dell'utente** (persistente, sotto la config di HA).
 
-    Ogni file incluso nell'integrazione (esempi e plugin pronti, come rtl_433) viene copiato nella
-    cartella utente una sola volta, al primo avvio in cui compare. Così i plugin aggiunti in una
-    nuova release arrivano da soli anche a chi ha già la cartella, ma senza mai:
-      - sovrascrivere un plugin che l'utente ha modificato (si copia solo se il file non c'è);
-      - ripristinare un plugin che l'utente ha cancellato di proposito (si tiene un registro dei
-        file già consegnati in `.spettro_bundled.json`).
+    I plugin inclusi nell'integrazione (esempi e rtl_433) NON stanno più qui: si caricano direttamente
+    dall'integrazione, così gli aggiornamenti della release li aggiornano da soli. Qui vanno solo i
+    plugin aggiunti dall'utente, che restano tra un aggiornamento e l'altro.
+
+    Migrazione: le versioni precedenti copiavano qui i plugin inclusi (tenendone un registro in
+    `.spettro_bundled.json`). Quelle vecchie copie vengono rimosse, per non avere doppioni datati che
+    coprirebbero la versione aggiornata inclusa nella release. I file aggiunti dall'utente non si
+    toccano.
     """
     global _USER_DIR
     import json  # noqa: PLC0415
-    import os  # noqa: PLC0415
-    import shutil  # noqa: PLC0415
 
     p = Path(path)
     p.mkdir(parents=True, exist_ok=True)
 
-    manifest = p / ".spettro_bundled.json"  # file già consegnati dalla release (percorso -> visto)
+    manifest = p / ".spettro_bundled.json"
     try:
-        known = set(json.loads(manifest.read_text("utf-8")))
+        delivered = list(json.loads(manifest.read_text("utf-8")))
     except (OSError, ValueError):
-        known = set()
-
-    changed = False
-    # si scorre ricorsivamente: così arrivano anche le sottocartelle incluse, come `bin/`
-    # (dove può stare un programma di appoggio, es. il binario `rtl_433` per i sensori ISM).
-    base = bundled_dir()
-    for f in sorted(base.rglob("*")):
-        if not f.is_file():
-            continue
-        rel = f.relative_to(base)       # es. "rtl433.py" oppure "bin/rtl_433"
-        key = str(rel)
-        if key in known:
-            continue
-        dest = p / rel
-        if not dest.exists():  # file nuovo: consegnalo (mai sovrascrivere l'esistente)
-            try:
-                dest.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(f, dest)
-                if rel.parts[0] == "bin":  # i programmi in bin/ devono essere eseguibili
-                    os.chmod(dest, os.stat(dest).st_mode | 0o111)
-                _LOGGER.info("File incluso consegnato: %s", key)
-            except OSError:
-                _LOGGER.warning("Non riesco a copiare %s in %s", key, p)
-        known.add(key)
-        changed = True
-
-    if changed:
+        delivered = []
+    for rel in delivered:  # rimuovi le copie che avevamo consegnato noi (solo quelle)
+        f = p / rel
         try:
-            manifest.write_text(json.dumps(sorted(known)), "utf-8")
+            if f.is_file():
+                f.unlink()
+                _LOGGER.info("Rimossa vecchia copia inclusa: %s", rel)
         except OSError:
-            _LOGGER.warning("Non riesco a salvare il registro dei plugin inclusi in %s", p)
+            _LOGGER.warning("Non riesco a rimuovere la vecchia copia %s", f)
+    try:
+        if manifest.exists():
+            manifest.unlink()
+    except OSError:
+        pass
+    # togli eventuali sottocartelle rimaste vuote (es. bin/)
+    for sub in sorted({Path(rel).parts[0] for rel in delivered if len(Path(rel).parts) > 1}):
+        d = p / sub
+        try:
+            if d.is_dir() and not any(d.iterdir()):
+                d.rmdir()
+        except OSError:
+            pass
 
     _USER_DIR = p
-    _LOGGER.info("Cartella plugin di Spettro: %s", p)
+    _LOGGER.info("Cartella plugin dell'utente: %s", p)
     return p
 
 
@@ -126,48 +116,61 @@ def _folder() -> Path:
     return folder
 
 
+def _load_one(py: Path, found: dict[str, dict[str, Any]], errors: list[dict[str, str]]) -> None:
+    """Carica un singolo file plugin e lo aggiunge a `found` (o a `errors` se è rotto)."""
+    try:
+        spec = importlib.util.spec_from_file_location(f"spettro_plugin_{py.stem}", py)
+        if spec is None or spec.loader is None:
+            return
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        meta = getattr(mod, "PLUGIN", None)
+        cls = getattr(mod, "Decoder", None)
+        if not isinstance(meta, dict) or "id" not in meta or cls is None:
+            msg = "manca il dizionario PLUGIN{id,…} o la classe Decoder"
+            _LOGGER.warning("Plugin %s ignorato: %s", py.name, msg)
+            errors.append({"file": py.name, "error": msg})
+            return
+        pid = str(meta["id"])
+        inp = meta.get("input")
+        inp = inp if inp in ("iq", "baseband") else "audio"
+        desc = {
+            "id": pid,
+            "name": str(meta.get("name", pid)),
+            "mode": meta.get("mode"),
+            "input": inp,
+            "cls": cls,
+        }
+        if inp == "baseband":
+            # canale pronto: a banda base, filtrato e decimato alla frequenza chiesta
+            desc["rate"] = int(meta.get("rate", 48_000))      # frequenza d'uscita desiderata (Hz)
+            desc["bw"] = float(meta.get("bw", 25_000))        # larghezza del canale da far passare (Hz)
+        found[pid] = desc  # a parità di id, l'ultimo caricato vince (l'utente ha la precedenza)
+        _LOGGER.info("Plugin Spettro caricato: %s (%s)", pid, py.name)
+    except Exception as err:  # noqa: BLE001 - un plugin rotto non deve impedire l'avvio
+        _LOGGER.exception("Errore caricando il plugin %s", py.name)
+        errors.append({"file": py.name, "error": f"{type(err).__name__}: {err}"})
+
+
 def load(reload: bool = False) -> dict[str, dict[str, Any]]:
-    """Carica i plugin dalla cartella (una volta sola, salvo reload). {id: descrittore}."""
+    """Carica i plugin (una volta sola, salvo reload). {id: descrittore}.
+
+    Si caricano prima i plugin **inclusi nell'integrazione** (sempre aggiornati con la release) e poi
+    quelli **dell'utente** nella cartella persistente: a parità di id, quello dell'utente ha la
+    precedenza (così si può sovrascrivere un plugin incluso mettendone uno con lo stesso id).
+    """
     global _PLUGINS, _ERRORS
     if _PLUGINS is not None and not reload:
         return _PLUGINS
     found: dict[str, dict[str, Any]] = {}
     errors: list[dict[str, str]] = []
-    for py in sorted(_folder().glob("*.py")):
-        if py.name.startswith("_"):
-            continue
-        try:
-            spec = importlib.util.spec_from_file_location(f"spettro_plugin_{py.stem}", py)
-            if spec is None or spec.loader is None:
-                continue
-            mod = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(mod)
-            meta = getattr(mod, "PLUGIN", None)
-            cls = getattr(mod, "Decoder", None)
-            if not isinstance(meta, dict) or "id" not in meta or cls is None:
-                msg = "manca il dizionario PLUGIN{id,…} o la classe Decoder"
-                _LOGGER.warning("Plugin %s ignorato: %s", py.name, msg)
-                errors.append({"file": py.name, "error": msg})
-                continue
-            pid = str(meta["id"])
-            inp = meta.get("input")
-            inp = inp if inp in ("iq", "baseband") else "audio"
-            desc = {
-                "id": pid,
-                "name": str(meta.get("name", pid)),
-                "mode": meta.get("mode"),
-                "input": inp,
-                "cls": cls,
-            }
-            if inp == "baseband":
-                # canale pronto: a banda base, filtrato e decimato alla frequenza chiesta
-                desc["rate"] = int(meta.get("rate", 48_000))      # frequenza d'uscita desiderata (Hz)
-                desc["bw"] = float(meta.get("bw", 25_000))        # larghezza del canale da far passare (Hz)
-            found[pid] = desc
-            _LOGGER.info("Plugin Spettro caricato: %s (%s)", pid, py.name)
-        except Exception as err:  # noqa: BLE001 - un plugin rotto non deve impedire l'avvio
-            _LOGGER.exception("Errore caricando il plugin %s", py.name)
-            errors.append({"file": py.name, "error": f"{type(err).__name__}: {err}"})
+    dirs = [bundled_dir()]
+    if _USER_DIR is not None and _USER_DIR.resolve() != bundled_dir().resolve():
+        dirs.append(_USER_DIR)
+    for folder in dirs:
+        for py in sorted(folder.glob("*.py")):
+            if not py.name.startswith("_"):
+                _load_one(py, found, errors)
     _PLUGINS = found
     _ERRORS = errors
     return _PLUGINS
