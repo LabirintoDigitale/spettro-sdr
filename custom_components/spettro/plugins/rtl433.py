@@ -78,7 +78,9 @@ class Decoder:
             return
         try:
             self.proc = subprocess.Popen(
-                [exe, "-r", "cu8:-", "-s", str(self.rate), "-F", "json"],
+                # -C si: unità metriche standard (temperatura in °C, vento in km/h, ecc.) a prescindere
+                # da come il sensore le trasmette, così sono coerenti con Home Assistant.
+                [exe, "-r", "cu8:-", "-s", str(self.rate), "-C", "si", "-F", "json"],
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=0,
             )
             os.set_blocking(self.proc.stdout.fileno(), False)
