@@ -862,6 +862,13 @@ class SpectrumScanner:
             raise RuntimeError("FT8 e WSPR si ricevono in USB")
         if decoder == "dati" and mode != "nfm":
             raise RuntimeError("Il riconoscimento dei dati funziona in FM stretta")
+        # un decoder scelto che non è né predefinito né un plugin caricato = plugin non disponibile
+        # nel backend (cartella non sincronizzata, errore di caricamento, o HA non riavviato): meglio
+        # dirlo subito con un popup invece di avviare una diretta muta senza plugin
+        builtin = decoder in IMAGE_DECODERS or decoder in SLOT_DECODERS or decoder in textdec.DECODERS or decoder == "dati"
+        if decoder and not builtin and pluginhost.get(decoder) is None:
+            raise RuntimeError(f"Plugin «{decoder}» non disponibile nel backend: premi 🔄 Ricarica plugin, "
+                               "e se non basta riavvia Home Assistant (dopo un aggiornamento serve il riavvio)")
         if bw is not None and mode in BANDWIDTHS:
             bw = min(BANDWIDTHS[mode][1], key=lambda b: abs(b - bw))
         else:
