@@ -1,7 +1,7 @@
 // Pannello "Spettro" per Home Assistant: grafico dello spettro, waterfall e picchi.
 
 // deve coincidere con VERSION in const.py: se il backend ne riporta un'altra manca un riavvio
-const PANEL_VERSION = "1.55.0";
+const PANEL_VERSION = "1.56.0";
 
 const PRESETS = [
   ["Personalizzato", null, null],
@@ -622,7 +622,8 @@ class SpettroPanel extends HTMLElement {
             <button class="primary" id="ismbtn">▶ Avvia</button>
             <span class="hint" id="ismstat"></span>
           </div>
-          <div id="ismsensors"></div>
+          <label class="chk" style="margin-top:8px" title="Mostra l'elenco dei messaggi decodificati. Toglila per non riempire il pannello di righe."><input type="checkbox" id="ismlog"> Visualizza log</label>
+          <div id="ismsensors" style="max-height:260px;overflow-y:auto;margin-top:2px"></div>
         </div>
         <div class="card" id="mqttcard">
           <h3 style="margin:0">📡 Pubblica su MQTT</h3>
@@ -942,6 +943,12 @@ class SpettroPanel extends HTMLElement {
         if (this._ismOn) await this._hass.callWS({ type: "spettro/ism", action: "stop" });
         else { await this._hass.callWS({ type: "spettro/ism", action: "start" }); this._revealCard("ismcard"); }
       } catch (err) { this._startError(err.message || String(err)); }
+    });
+    // "Visualizza log": mostra/nasconde l'elenco dei messaggi; la scelta resta nel browser
+    try { $("ismlog").checked = localStorage.getItem("spettro_ismlog") !== "0"; } catch (err) { $("ismlog").checked = true; }
+    $("ismlog").addEventListener("change", (e) => {
+      try { localStorage.setItem("spettro_ismlog", e.target.checked ? "1" : "0"); } catch (err) { /* memoria non disponibile */ }
+      this._renderIsmSensors();
     });
     $("mqttsave").addEventListener("click", async () => {
       const pass = $("mqttpass").value;
@@ -2203,6 +2210,8 @@ class SpettroPanel extends HTMLElement {
   _renderIsmSensors() {
     const el = this.shadowRoot.getElementById("ismsensors");
     if (!el) return;
+    const logOn = this.shadowRoot.getElementById("ismlog") && this.shadowRoot.getElementById("ismlog").checked;
+    if (!logOn) { el.innerHTML = ""; return; }  // log nascosto: nessuna riga
     const list = this._ismSensors || [];
     if (!list.length) { el.innerHTML = `<div class="hint" style="margin-top:8px">In ascolto… i sensori che passano compaiono qui (trasmettono ogni 30–60 s).</div>`; return; }
     el.innerHTML = `<table style="margin-top:8px;border-collapse:collapse;width:100%"><tbody>${list.map((r) =>
