@@ -11,7 +11,7 @@ import asyncio
 import base64
 from collections import deque
 from collections.abc import Callable
-from dataclasses import asdict, dataclass, fields
+from dataclasses import asdict, dataclass, field, fields
 from datetime import UTC, datetime, timedelta
 import json
 import logging
@@ -26,7 +26,7 @@ import numpy as np
 from . import adsb as adsb_mod
 from . import adsb_db
 from . import adsb_online
-from . import dab, dvbt, rds, satellite, slots, textdec, verify, weather
+from . import dab, dvbt, ism, rds, satellite, slots, textdec, verify, weather
 from .analysis import encode_png
 from .fax import FaxDecoder
 from .sstv import SstvDecoder, ToneTracker
@@ -84,6 +84,7 @@ IMAGE_DECODERS = ("sstv", "fax")
 SLOT_DECODERS = ("ft8", "wspr")  # modi digitali a periodi UTC
 KEEP_RUNNING = IMAGE_DECODERS + SLOT_DECODERS  # questi continuano anche a pannello chiuso
 DIGI_LOG = 600  # messaggi FT8/WSPR tenuti in memoria
+ISM_ROWS = 60  # sensori ISM (rtl_433) tenuti in memoria per il pannello
 DAB_SCAN_S = 1.2  # registrazione per ogni canale nella ricerca dei multiplex DAB
 ADSB_PRUNE_S = 60.0  # un aereo sparisce dalla lista se non si sente da tanto
 ADSB_HISTORY_H = 24.0  # ore dopo cui un volo nello storico si cancella da solo
@@ -139,6 +140,11 @@ class ScanSettings:
     adsb_port: int = 0
     meteo_host: str = ""  # satelliti meteo (Meteor)
     meteo_port: int = 0
+    ism_host: str = ""    # sensori ISM (rtl_433, 433/868/315 MHz)
+    ism_port: int = 0
+    # sensori ISM: frequenze (MHz) scorse a ciclo e secondi di ascolto su ognuna
+    ism_freqs: list[float] = field(default_factory=lambda: [433.92, 868.3])
+    ism_dwell_s: float = 30.0
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> ScanSettings:
@@ -350,6 +356,10 @@ class SpectrumScanner:
         self._meteo_done: set[tuple[int, float]] = set()  # passaggi già ricevuti (norad, aos)
         self.meteo_log: deque[dict[str, Any]] = deque(maxlen=15)  # ultime ricezioni dei satelliti
         self.digi_log: deque[dict[str, Any]] = deque(maxlen=DIGI_LOG)  # messaggi FT8/WSPR ricevuti (dal più vecchio)
+        self._ism_task: asyncio.Task | None = None  # ricevitore sensori ISM (rtl_433) a ciclo di frequenze
+        self._ism_resume = False  # ISM da riavviare dopo che un'altra funzione libera la sua chiavetta
+        self.ism_rows: deque[dict[str, Any]] = deque(maxlen=ISM_ROWS)  # ultimi sensori decodificati
+        self.ism_status: dict[str, Any] | None = None  # {freq_mhz, freqs, dwell_s, count} mentre è attivo
         # un lucchetto per ogni chiavetta (host, porta): le funzioni su chiavette diverse non si
         # bloccano tra loro; quelle sulla stessa chiavetta restano "una alla volta".
         self._locks: dict[tuple[str, int], asyncio.Lock] = {}
@@ -438,6 +448,8 @@ class SpectrumScanner:
             out.append({"kind": "meteo_log", "log": list(self.meteo_log)})
         if self.digi_log:
             out.append({"kind": "digi_log", "log": list(self.digi_log)})
+        if self.ism_status is not None:
+            out.append({"kind": "ism", **self.ism_status, "sensors": list(self.ism_rows)})
         if self.dab_list or self._dab_task is not None:
             out.append({"kind": "dab_scan", "done": self._dab_task is None, "found": self.dab_list,
                         "time": self.dab_scan_time})
@@ -488,6 +500,7 @@ class SpectrumScanner:
             "live": (s.live_host, s.live_port),
             "adsb": (s.adsb_host, s.adsb_port),
             "meteo": (s.meteo_host, s.meteo_port),
+            "ism": (s.ism_host, s.ism_port),
         }.get(what, ("", 0))
         return ((host or "").strip() or self.host, int(port or 0) or self.port)
 
@@ -508,6 +521,8 @@ class SpectrumScanner:
             return "satellite"
         if self._adsb_task is not None and self._server("adsb") == scan:
             return "adsb"
+        if self._ism_task is not None and self._server("ism") == scan:
+            return "ism"
         if self.analyzing:  # l'analisi a colpo singolo usa sempre la chiavetta della scansione
             return "analysis"
         if self.status["live"] and self._server("live") == scan:
@@ -1307,37 +1322,153 @@ class SpectrumScanner:
         return {f["id"]: f.get("path", []) for f in self.adsb_history if f["id"] in want}
 
     async def _adsb_yield(self, resume: bool, server: tuple[str, int] | None = None) -> None:
-        """Libera la chiavetta dall'ADS-B per un'altra operazione. resume=True: la riprende dopo.
-
-        Se l'ADS-B è su una chiavetta diversa da quella che serve (`server`), non c'è nulla da liberare:
-        gli aerei continuano indisturbati sulla loro chiavetta.
+        """Libera la chiavetta dai ricevitori continui (aerei ADS-B e sensori ISM) per un'altra
+        operazione. resume=True: li riprende dopo. Un ricevitore su una chiavetta diversa da quella
+        che serve (`server`) non viene toccato: continua indisturbato sulla sua chiavetta.
         """
-        if self._adsb_task is None:
-            return
-        if server is not None and self._server("adsb") != server:
-            return
-        if resume and self.status["adsb"]:
-            self._adsb_resume = {"continuous": self.status["adsb"]["continuous"],
-                                 "online": self.status["adsb"]["online"]}
-        await self.adsb_stop()
+        if self._adsb_task is not None and (server is None or self._server("adsb") == server):
+            if resume and self.status["adsb"]:
+                self._adsb_resume = {"continuous": self.status["adsb"]["continuous"],
+                                     "online": self.status["adsb"]["online"]}
+            await self.adsb_stop()
+        if self._ism_task is not None and (server is None or self._server("ism") == server):
+            if resume:
+                self._ism_resume = True
+            await self.ism_stop()
 
     async def _adsb_maybe_resume(self) -> None:
-        """Riavvia l'ADS-B dopo un passaggio, se era stato sospeso e la SUA chiavetta è di nuovo libera."""
-        opts = self._adsb_resume
-        if opts is None or self._adsb_task is not None:
-            return
-        adsb = self._server("adsb")
+        """Riavvia i ricevitori continui (aerei, ISM) sospesi, quando la loro chiavetta è di nuovo libera."""
         scan = self._server("scan")
-        busy = ((self.status["live"] and self._server("live") == adsb)
-                or (self.meteo_rx is not None and self._server("meteo") == adsb)
-                or ((self.analyzing or self._dab_task is not None) and scan == adsb))
-        if busy:
-            return  # qualcos'altro sta ancora usando la stessa chiavetta: si riproverà più tardi
+
+        def free(server: tuple[str, int]) -> bool:
+            return not ((self.status["live"] and self._server("live") == server)
+                        or (self.meteo_rx is not None and self._server("meteo") == server)
+                        or ((self.analyzing or self._dab_task is not None) and scan == server))
+
+        if self._ism_resume and self._ism_task is None and free(self._server("ism")):
+            self._ism_resume = False
+            try:
+                await self.ism_start()
+            except RuntimeError:
+                pass
+        opts = self._adsb_resume
+        if opts is None or self._adsb_task is not None or not free(self._server("adsb")):
+            return
         self._adsb_resume = None
         try:
             await self.adsb_start(opts["continuous"], opts["online"])
         except RuntimeError:
             pass
+
+    # --- sensori ISM (rtl_433) --------------------------------------------
+
+    def _emit_ism(self) -> None:
+        if self.ism_status is not None:
+            self._emit({"kind": "ism", **self.ism_status, "sensors": list(self.ism_rows)})
+
+    async def ism_start(self) -> dict[str, Any]:
+        """Avvia la ricezione dei sensori ISM: scorre a ciclo le frequenze della lista."""
+        if self._ism_task is not None:
+            raise RuntimeError("Ricezione sensori ISM già in corso")
+        freqs = [round(float(f), 4) for f in (self.settings.ism_freqs or []) if f]
+        if not freqs:
+            raise RuntimeError("Aggiungi almeno una frequenza alla lista dei sensori ISM")
+        if ism.find_rtl433() is None:
+            raise RuntimeError("rtl_433 non trovato (dovrebbe essere incluso nell'integrazione)")
+        server = self._server("ism")
+        # se l'ISM condivide la chiavetta con un altro ricevitore continuo, quello si ferma
+        await self._adsb_yield(resume=False, server=server)
+        self.ism_status = {"freqs": freqs, "dwell_s": max(2.0, float(self.settings.ism_dwell_s)),
+                           "freq_mhz": None, "count": 0, "error": None}
+        self._ism_task = asyncio.get_running_loop().create_task(self._ism_run(), name="spettro_ism")
+        self._update_active()
+        self._emit_ism()
+        return self.ism_status
+
+    async def ism_stop(self) -> None:
+        task, self._ism_task = self._ism_task, None
+        if task is not None:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+    async def _ism_run(self) -> None:
+        """Scorre a ciclo le frequenze: sintonizza, riceve per `dwell_s` passando i byte cu8 a rtl_433,
+        raccoglie i sensori decodificati, poi passa alla successiva."""
+        loop = asyncio.get_running_loop()
+        server = self._server("ism")
+        rate = ism.RATE
+        freqs = list(self.ism_status["freqs"])
+        dwell = float(self.ism_status["dwell_s"])
+        chunk = rate // 4 * 2  # ~0,25 s di byte
+        discard = RCV_BUF + 2 * READ_LIMIT + int(rate * 2 * max(self.settings.settle_ms, 100) / 1000)
+        discard -= discard % 2
+        rtl = ism.Rtl433(rate)
+        if rtl.err:
+            self.ism_status["error"] = rtl.err
+            self._emit_ism()
+        last_emit = 0.0
+        fails = 0
+        try:
+            async with self._lock(server):
+                while True:  # un reset non ferma l'ISM: si prova a riconnettersi
+                    try:
+                        reader, writer, _tuner = await _open(*server)
+                        try:
+                            await self._configure(writer, rate)
+                            while self._ism_task is not None:
+                                for fmhz in freqs:
+                                    center = float(round(fmhz * 1e6))
+                                    await self._tune(writer, center, reader)
+                                    async with asyncio.timeout(IO_TIMEOUT):
+                                        await self._discard(reader, discard)
+                                    if self.ism_status is not None:
+                                        self.ism_status["freq_mhz"] = fmhz
+                                    self._emit_ism()
+                                    end = loop.time() + dwell
+                                    while loop.time() < end:
+                                        async with asyncio.timeout(IO_TIMEOUT):
+                                            raw = await reader.readexactly(chunk)
+                                        fails = 0
+                                        rtl.feed(raw)
+                                        new = rtl.poll()
+                                        for row in new:
+                                            self.ism_rows.appendleft(row)
+                                        if self.ism_status is not None and new:
+                                            self.ism_status["count"] += len(new)
+                                        if new or loop.time() - last_emit > 1.0:
+                                            last_emit = loop.time()
+                                            self._emit_ism()
+                        finally:
+                            writer.close()
+                            try:
+                                await writer.wait_closed()
+                            except OSError:
+                                pass
+                    except asyncio.CancelledError:
+                        raise
+                    except (OSError, TimeoutError, asyncio.IncompleteReadError, RtlTcpError) as err:
+                        fails += 1
+                        if fails > ADSB_RETRY_MAX:
+                            raise
+                        _LOGGER.warning("Sensori ISM: riconnessione dopo errore: %s", err)
+                        await asyncio.sleep(min(fails, 3))
+        except asyncio.CancelledError:
+            raise
+        except (OSError, TimeoutError, asyncio.IncompleteReadError, RtlTcpError) as err:
+            if self.ism_status is not None:
+                self.ism_status["error"] = str(err) or type(err).__name__
+                self._emit_ism()
+        finally:
+            rtl.close()
+            if asyncio.current_task() is self._ism_task:
+                self._ism_task = None
+            self.ism_status = None
+            self._update_active()
+            self._emit({"kind": "ism", "done": True})
+            await self._adsb_maybe_resume()
 
     async def _adsb_run(self) -> None:
         loop = asyncio.get_running_loop()

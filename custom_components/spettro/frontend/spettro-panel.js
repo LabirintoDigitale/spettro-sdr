@@ -1,7 +1,7 @@
 // Pannello "Spettro" per Home Assistant: grafico dello spettro, waterfall e picchi.
 
 // deve coincidere con VERSION in const.py: se il backend ne riporta un'altra manca un riavvio
-const PANEL_VERSION = "1.53.0";
+const PANEL_VERSION = "1.54.0";
 
 const PRESETS = [
   ["Personalizzato", null, null],
@@ -216,6 +216,9 @@ class SpettroPanel extends HTMLElement {
     this._archSel = null; // id dell'analisi dell'archivio mostrata
     this._favs = []; // frequenze preferite
     this._plugins = []; // plugin di terze parti (decoder ospitati)
+    this._ismFreqs = []; // frequenze (MHz) dei sensori ISM scorse a ciclo
+    this._ismOn = false; // ricezione sensori ISM in corso
+    this._ismSensors = []; // ultimi sensori decodificati
     this._live = null; // analisi continua in corso: {freq_mhz, mode}
     this._listen = false; // audio della diretta attivo
     this._squelch = 0; // squelch: dB che il segnale deve superare il rumore per sentirsi (0 = spento)
@@ -299,6 +302,7 @@ class SpettroPanel extends HTMLElement {
       }
       this.shadowRoot.getElementById("enabled").checked = m.enabled !== false;
       if (!this._formDirty) this._fillForm(m.settings);
+      this._fillIsm(m.settings);
       this._updateStatus();
       return;
     }
@@ -325,6 +329,7 @@ class SpettroPanel extends HTMLElement {
     if (m.kind === "meteo_live") { this._onMeteoLive(m); return; }
     if (m.kind === "meteo_log") { this._meteoLog = m.log; this._renderMeteoLog(); return; }
     if (m.kind === "dab_scan") { this._dabScan = m; this._renderDabScan(); return; }
+    if (m.kind === "ism") { this._onIsm(m); return; }
     if (m.kind === "adsb") { this._adsb = m.done ? null : m; this._renderAdsb(); return; }
     if (m.kind === "adsb_error") { this._msg(`ADS-B: ${m.error}`, true); return; }
     if (m.kind === "adsb_history") { this._adsbHistory = m.flights || []; this._adsbRecord = !!m.record; this._adsbHistHours = m.hours; this._adsbHome = m.home || this._adsbHome; this._renderAdsbHist(); return; }
@@ -593,6 +598,29 @@ class SpettroPanel extends HTMLElement {
           <canvas id="adsbradar" style="display:none;width:100%;max-width:420px;margin:10px auto 0;aspect-ratio:1"></canvas>
           <div id="adsblist"></div>
           <div id="adsbhist"></div>
+        </div>
+        <div class="card" id="ismcard">
+          <h3 style="margin:0">📟 Sensori ISM (rtl_433)</h3>
+          <div class="hint">Riceve i sensori senza fili — stazioni meteo, termometri/igrometri, TPMS delle auto, contatti… — a
+            433/868/315 MHz. Scorre a ciclo le frequenze della lista: si sintonizza, ascolta per qualche secondo, poi passa
+            alla successiva (i sensori stanno su bande diverse). Conviene dargli una <b>chiavetta dedicata</b> (Impostazioni →
+            Avanzate → Chiavette separate): così riceve mentre continui a scansionare.</div>
+          <div class="row" style="margin-top:6px;align-items:center;flex-wrap:wrap;gap:6px">
+            <input id="ismfreq" type="number" step="0.001" placeholder="es. 433.920" style="width:120px"> <span class="hint">MHz</span>
+            <button id="ismadd">+ Aggiungi</button>
+            <span class="hint">scorciatoie:</span>
+            <button class="ismquick" data-f="433.92">433.92</button>
+            <button class="ismquick" data-f="868.3">868.3</button>
+            <button class="ismquick" data-f="868.35">868.35</button>
+            <button class="ismquick" data-f="315">315</button>
+            <label style="margin-left:auto">ascolto per <input id="ismdwell" type="number" step="1" min="2" max="600" style="width:56px"> s</label>
+          </div>
+          <div id="ismfreqs" class="row" style="margin-top:6px;flex-wrap:wrap;gap:6px"></div>
+          <div class="row" style="margin-top:6px;align-items:center">
+            <button class="primary" id="ismbtn">▶ Avvia</button>
+            <span class="hint" id="ismstat"></span>
+          </div>
+          <div id="ismsensors"></div>
         </div>
         <div class="card" id="meteocard">
           <h3 style="margin:0">🛰️ Satelliti meteo e immagini</h3>
@@ -871,6 +899,25 @@ class SpettroPanel extends HTMLElement {
     $("adsbonline").addEventListener("change", adsbOpts);
     $("adsbrec").addEventListener("change", async (e) => {
       try { await this._hass.callWS({ type: "spettro/adsb", action: "record", record: e.target.checked }); } catch (err) { this._msg(err.message || String(err), true); }
+    });
+    const addIsm = (f) => {
+      if (!(f > 0)) return;
+      f = Math.round(f * 1e4) / 1e4;
+      if (!this._ismFreqs.includes(f)) { this._ismFreqs = [...this._ismFreqs, f]; this._renderIsmFreqs(); this._saveIsm(); }
+    };
+    $("ismadd").addEventListener("click", () => { addIsm(parseFloat($("ismfreq").value)); $("ismfreq").value = ""; });
+    $("ismfreq").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); addIsm(parseFloat($("ismfreq").value)); $("ismfreq").value = ""; } });
+    this.shadowRoot.querySelectorAll(".ismquick").forEach((b) => b.addEventListener("click", () => addIsm(parseFloat(b.dataset.f))));
+    $("ismfreqs").addEventListener("click", (e) => {
+      const chip = e.target.closest("[data-rm]");
+      if (chip) { const f = parseFloat(chip.dataset.rm); this._ismFreqs = this._ismFreqs.filter((x) => x !== f); this._renderIsmFreqs(); this._saveIsm(); }
+    });
+    $("ismdwell").addEventListener("change", () => this._saveIsm());
+    $("ismbtn").addEventListener("click", async () => {
+      try {
+        if (this._ismOn) await this._hass.callWS({ type: "spettro/ism", action: "stop" });
+        else { await this._hass.callWS({ type: "spettro/ism", action: "start" }); this._revealCard("ismcard"); }
+      } catch (err) { this._startError(err.message || String(err)); }
     });
     $("adsbhist").addEventListener("click", async (e) => {
       const act = e.target.closest("[data-hact]");
@@ -2069,6 +2116,58 @@ class SpettroPanel extends HTMLElement {
       g.restore();
       if (idx < 16 || a.emergency) label(a.call || a.icao, x, y, fg);
     });
+  }
+
+  // ---- sensori ISM (rtl_433) ----
+  _fillIsm(s) {
+    if (!s) return;
+    if (Array.isArray(s.ism_freqs) && this.shadowRoot.activeElement !== this.shadowRoot.getElementById("ismfreq")) {
+      this._ismFreqs = s.ism_freqs.slice();
+      this._renderIsmFreqs();
+    }
+    const dw = this.shadowRoot.getElementById("ismdwell");
+    if (dw && this.shadowRoot.activeElement !== dw) dw.value = s.ism_dwell_s ?? 30;
+  }
+
+  _renderIsmFreqs() {
+    const el = this.shadowRoot.getElementById("ismfreqs");
+    if (!el) return;
+    if (!this._ismFreqs.length) { el.innerHTML = `<span class="hint">Nessuna frequenza: aggiungine almeno una (es. 433.92).</span>`; return; }
+    el.innerHTML = this._ismFreqs.map((f) => `<span class="chip" style="display:inline-flex;align-items:center;gap:6px;padding:2px 8px;border:1px solid #555;border-radius:12px">${f.toFixed(f % 1 ? 3 : 0)} MHz<button data-rm="${f}" title="Togli" style="background:none;border:0;color:#e53935;cursor:pointer;padding:0;font-size:15px">✕</button></span>`).join("");
+  }
+
+  async _saveIsm() {
+    const dwell = parseFloat(this.shadowRoot.getElementById("ismdwell").value) || 30;
+    try { await this._hass.callWS({ type: "spettro/ism_config", ism_freqs: this._ismFreqs, ism_dwell_s: dwell }); }
+    catch (err) { this._msg(err.message || String(err), true); }
+  }
+
+  _onIsm(m) {
+    const $ = (id) => this.shadowRoot.getElementById(id);
+    if (m.done) {
+      this._ismOn = false;
+      $("ismbtn").textContent = "▶ Avvia";
+      $("ismstat").textContent = "";
+      return;
+    }
+    this._ismOn = true;
+    $("ismbtn").textContent = "■ Ferma";
+    $("ismbtn").classList.add("primary");
+    if (Array.isArray(m.sensors)) this._ismSensors = m.sensors;
+    const cur = m.freq_mhz ? `in ascolto su ${m.freq_mhz.toFixed(m.freq_mhz % 1 ? 3 : 0)} MHz` : "avvio…";
+    $("ismstat").textContent = `${cur} · ${m.count || 0} letture` + (m.error ? ` · ⚠ ${m.error}` : "");
+    this._renderIsmSensors();
+  }
+
+  _renderIsmSensors() {
+    const el = this.shadowRoot.getElementById("ismsensors");
+    if (!el) return;
+    const list = this._ismSensors || [];
+    if (!list.length) { el.innerHTML = `<div class="hint" style="margin-top:8px">In ascolto… i sensori che passano compaiono qui (trasmettono ogni 30–60 s).</div>`; return; }
+    el.innerHTML = `<table style="margin-top:8px;border-collapse:collapse;width:100%"><tbody>${list.map((r) =>
+      `<tr><td style="color:#888;padding-right:8px">${esc(r.t)}</td>`
+      + `<td style="padding-right:8px"><b>${esc(r.model)}</b>${r.id ? " #" + esc(r.id) : ""}</td>`
+      + `<td>${esc(r.vals)}</td></tr>`).join("")}</tbody></table>`;
   }
 
   _renderDabScan() {

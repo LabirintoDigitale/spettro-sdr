@@ -52,6 +52,8 @@ def async_setup(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, ws_dab_scan)
     websocket_api.async_register_command(hass, ws_adsb)
     websocket_api.async_register_command(hass, ws_adsb_history)
+    websocket_api.async_register_command(hass, ws_ism)
+    websocket_api.async_register_command(hass, ws_ism_config)
     websocket_api.async_register_command(hass, ws_set_enabled)
     websocket_api.async_register_command(hass, ws_analyze)
     websocket_api.async_register_command(hass, ws_ask_ai)
@@ -138,6 +140,8 @@ def ws_subscribe(hass: HomeAssistant, connection: websocket_api.ActiveConnection
         vol.Optional("adsb_port"): vol.All(vol.Coerce(int), vol.Range(min=0, max=65535)),
         vol.Optional("meteo_host"): vol.Any(None, str),
         vol.Optional("meteo_port"): vol.All(vol.Coerce(int), vol.Range(min=0, max=65535)),
+        vol.Optional("ism_host"): vol.Any(None, str),
+        vol.Optional("ism_port"): vol.All(vol.Coerce(int), vol.Range(min=0, max=65535)),
     }
 )
 @websocket_api.require_admin
@@ -204,6 +208,52 @@ async def ws_adsb(hass: HomeAssistant, connection: websocket_api.ActiveConnectio
             connection.send_result(msg["id"], await scanner.adsb_start(msg["continuous"], msg["online"]))
     except RuntimeError as err:
         connection.send_error(msg["id"], "adsb_failed", str(err))
+
+
+@websocket_api.websocket_command({
+    vol.Required("type"): "spettro/ism",
+    vol.Optional("action", default="start"): vol.In(["start", "stop"]),
+})
+@websocket_api.async_response
+async def ws_ism(hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]) -> None:
+    """Avvia/ferma la ricezione dei sensori ISM (rtl_433) a ciclo di frequenze."""
+    _entry, scanner = _scanner(hass, connection, msg)
+    if scanner is None:
+        return
+    try:
+        if msg["action"] == "stop":
+            await scanner.ism_stop()
+            connection.send_result(msg["id"], {})
+        else:
+            connection.send_result(msg["id"], await scanner.ism_start())
+    except RuntimeError as err:
+        connection.send_error(msg["id"], "ism_failed", str(err))
+
+
+@websocket_api.websocket_command({
+    vol.Required("type"): "spettro/ism_config",
+    vol.Optional("ism_freqs"): [vol.All(vol.Coerce(float), vol.Range(min=0.1, max=2200))],
+    vol.Optional("ism_dwell_s"): vol.All(vol.Coerce(float), vol.Range(min=2, max=600)),
+})
+@websocket_api.require_admin
+@callback
+def ws_ism_config(hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]) -> None:
+    """Imposta la lista di frequenze e la durata per frequenza dei sensori ISM."""
+    entry, scanner = _scanner(hass, connection, msg)
+    if scanner is None:
+        return
+    changes = {k: v for k, v in msg.items() if k not in ("id", "type")}
+    if "ism_freqs" in changes:  # togli i doppioni mantenendo l'ordine, arrotonda
+        seen, uniq = set(), []
+        for f in changes["ism_freqs"]:
+            r = round(float(f), 4)
+            if r not in seen:
+                seen.add(r); uniq.append(r)
+        changes["ism_freqs"] = uniq
+    merged = {**ScanSettings().as_dict(), **entry.options, **changes}
+    hass.config_entries.async_update_entry(entry, options=merged)
+    scanner.update_settings(ScanSettings.from_dict(merged))
+    connection.send_result(msg["id"], {"ism_freqs": merged.get("ism_freqs"), "ism_dwell_s": merged.get("ism_dwell_s")})
 
 
 @websocket_api.websocket_command({
