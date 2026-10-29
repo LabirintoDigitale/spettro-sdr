@@ -130,6 +130,15 @@ class ScanSettings:
     meteo_days: float = 7.0  # giorni dopo cui si cancellano le immagini meteo
     iss_sstv: bool = False  # riceve l'SSTV della ISS ai suoi passaggi
     hf_sampling: int = 2  # onde corte: direct sampling sul ramo Q (2), I (1) o spento (0, es. RTL-SDR Blog V4)
+    # Chiavette separate (rtl_tcp) per funzione: host+porta opzionali; vuoti = usa la principale.
+    # Così aerei/meteo/ascolto possono stare su chiavette diverse e NON si bloccano tra loro; la regola
+    # "una cosa alla volta" vale solo tra funzioni sulla stessa chiavetta (stesso host E porta).
+    live_host: str = ""   # ascolto (Analisi continua, DAB/TV/SAT, puntamento)
+    live_port: int = 0
+    adsb_host: str = ""   # aerei (ADS-B, 1090 MHz)
+    adsb_port: int = 0
+    meteo_host: str = ""  # satelliti meteo (Meteor)
+    meteo_port: int = 0
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> ScanSettings:
@@ -341,9 +350,11 @@ class SpectrumScanner:
         self._meteo_done: set[tuple[int, float]] = set()  # passaggi già ricevuti (norad, aos)
         self.meteo_log: deque[dict[str, Any]] = deque(maxlen=15)  # ultime ricezioni dei satelliti
         self.digi_log: deque[dict[str, Any]] = deque(maxlen=DIGI_LOG)  # messaggi FT8/WSPR ricevuti (dal più vecchio)
-        self._radio = asyncio.Lock()  # una sola connessione rtl_tcp alla volta
-        self._direct: dict[int, int] = {}  # direct sampling attivo per connessione
-        self._rate = 2_048_000  # sample rate della connessione in corso
+        # un lucchetto per ogni chiavetta (host, porta): le funzioni su chiavette diverse non si
+        # bloccano tra loro; quelle sulla stessa chiavetta restano "una alla volta".
+        self._locks: dict[tuple[str, int], asyncio.Lock] = {}
+        self._direct: dict[int, int] = {}  # direct sampling attivo per connessione (chiave id(writer))
+        self._rates: dict[int, int] = {}   # sample rate per connessione (chiave id(writer))
         self._floor_prev: tuple[tuple[float, float, int], np.ndarray] | None = None  # rumore dell'ultima scansione
         self._listeners: list[Callable[[dict[str, Any]], None]] = []
         self._task: asyncio.Task | None = None
@@ -465,16 +476,41 @@ class SpectrumScanner:
         self.status.update(changes)
         self._emit(dict(self.status))
 
+    # --- chiavette (rtl_tcp) ----------------------------------------------
+
+    def _server(self, what: str) -> tuple[str, int]:
+        """Host e porta della chiavetta per una funzione: 'scan', 'live', 'adsb' o 'meteo'.
+
+        Se la funzione non ha un server dedicato (campi vuoti) usa quello principale.
+        """
+        s = self.settings
+        host, port = {
+            "live": (s.live_host, s.live_port),
+            "adsb": (s.adsb_host, s.adsb_port),
+            "meteo": (s.meteo_host, s.meteo_port),
+        }.get(what, ("", 0))
+        return ((host or "").strip() or self.host, int(port or 0) or self.port)
+
+    def _lock(self, server: tuple[str, int]) -> asyncio.Lock:
+        """Il lucchetto di quella chiavetta (uno per coppia host+porta)."""
+        lock = self._locks.get(server)
+        if lock is None:
+            lock = self._locks[server] = asyncio.Lock()
+        return lock
+
     # --- pausa -------------------------------------------------------------
 
     def _pause_reason(self) -> str | None:
-        if self.meteo_rx:
+        # la scansione si ferma solo per chi userebbe la SUA stessa chiavetta; funzioni su chiavette
+        # diverse girano in parallelo senza fermare la scansione
+        scan = self._server("scan")
+        if self.meteo_rx and self._server("meteo") == scan:
             return "satellite"
-        if self._adsb_task is not None:
+        if self._adsb_task is not None and self._server("adsb") == scan:
             return "adsb"
-        if self.analyzing:
+        if self.analyzing:  # l'analisi a colpo singolo usa sempre la chiavetta della scansione
             return "analysis"
-        if self.status["live"]:
+        if self.status["live"] and self._server("live") == scan:
             return "live"
         if self._one_shot:
             return None  # "Scansiona ora": un giro anche con la scansione spenta
@@ -500,16 +536,20 @@ class SpectrumScanner:
         if emit:
             self._emit(dict(self.status))
 
-    def _pass_busy(self) -> str | None:
+    def _pass_busy(self, server: tuple[str, int] | None = None) -> str | None:
         """Satellite in ricezione adesso (Meteor o ISS automatici), da non interrompere a metà.
 
         Serve a proteggere il passaggio da scansioni/analisi avviate a mano: queste non partono e
         mostrano un avviso col motivo, invece di rubargli la chiavetta durante la ricezione.
+
+        `server`: se dato, la ricezione satellitare "occupa" solo se è sulla STESSA chiavetta; su una
+        chiavetta diversa non dà fastidio e non blocca nulla.
         """
-        if self.meteo_rx:
+        if self.meteo_rx and (server is None or self._server("meteo") == server):
             return (self.meteo_rx.get("pass") or {}).get("satellite") or "Meteor"
         live = self.status.get("live")
-        if live and live.get("auto") and self._live_task is not None:
+        if (live and live.get("auto") and self._live_task is not None
+                and (server is None or self._server("live") == server)):
             return live.get("title") or "satellite"
         return None
 
@@ -607,13 +647,14 @@ class SpectrumScanner:
         chans = list(dab.CHANNELS.items())
         discard = RCV_BUF + 2 * READ_LIMIT + int(dab.RATE * 2 * max(self.settings.settle_ms, 100) / 1000)
         discard -= discard % 2
-        await self._adsb_yield(resume=False)
+        server = self._server("scan")
+        await self._adsb_yield(resume=False, server=server)
         self.analyzing = True
         self._update_active()
         error = None
         try:
-            async with self._radio:
-                reader, writer, _tuner = await _open(self.host, self.port)
+            async with self._lock(server):
+                reader, writer, _tuner = await _open(*server)
                 try:
                     await self._configure(writer, dab.RATE)
                     for i, (ch, mhz) in enumerate(chans):
@@ -665,9 +706,10 @@ class SpectrumScanner:
             raise RuntimeError("C'è già un'analisi in corso")
         if self._live_task is not None:
             raise RuntimeError("Ferma prima l'analisi continua")
-        if (sat := self._pass_busy()):
+        server = self._server("scan")
+        if (sat := self._pass_busy(server)):
             raise RuntimeError(f"Ricezione satellitare in corso ({sat}): aspetta la fine o fermala prima")
-        await self._adsb_yield(resume=False)
+        await self._adsb_yield(resume=False, server=server)
         rate = int(self.settings.sample_rate)
         capture_bytes = int(rate * min(duration_s, ANALYSIS_MAX_S)) * 2
         discard_bytes = RCV_BUF + 2 * READ_LIMIT + int(rate * 2 * max(self.settings.settle_ms, 100) / 1000)
@@ -676,8 +718,8 @@ class SpectrumScanner:
         self.analyzing = True
         self._update_active()  # la scansione in corso si ferma al passo successivo e libera la chiavetta
         try:
-            async with self._radio:
-                reader, writer, tuner = await _open(self.host, self.port)
+            async with self._lock(server):
+                reader, writer, tuner = await _open(*server)
                 try:
                     self.status["tuner"] = TUNER_NAMES.get(tuner, f"Tipo {tuner}")
                     await self._configure(writer, rate)
@@ -845,14 +887,15 @@ class SpectrumScanner:
         pannelli aperti (fino a `until`, se c'è). decoder "cw"/"rtty45"/"rtty50": testo Morse o RTTY.
         bw: larghezza del canale in Hz (None = quella predefinita del modo).
         """
-        if self.analyzing:
+        if self.analyzing and self._server("live") == self._server("scan"):
             raise RuntimeError("C'è un'analisi in corso, riprova tra qualche secondo")
-        if not auto and (sat := self._pass_busy()):
+        live_server = self._server("live")
+        if not auto and (sat := self._pass_busy(live_server)):
             raise RuntimeError(f"Ricezione satellitare in corso ({sat}): aspetta la fine o fermala prima")
         if mode == "dab" and not sid:
             raise RuntimeError("Scegli una radio del multiplex")
         await self.live_stop()
-        await self._adsb_yield(resume=False)
+        await self._adsb_yield(resume=False, server=live_server)
         mode = mode or self.live_mode_for(freq_hz)
         if decoder in IMAGE_DECODERS and mode not in ("nfm", "am", "usb", "lsb"):
             raise RuntimeError("SSTV e radiofax si decodificano in FM stretta, AM o SSB")
@@ -919,6 +962,7 @@ class SpectrumScanner:
                         until: datetime | None = None, title: str | None = None, auto: bool = False,
                         bw: float | None = None) -> None:
         loop = asyncio.get_running_loop()
+        server = self._server("live")
         img = _ImageListener(decoder, freq_hz, title) if decoder in IMAGE_DECODERS else None
         text = textdec.DECODERS[decoder]() if decoder in textdec.DECODERS else None
         slot = (slots.SlotDecoder(decoder, freq_hz, self.meteo.location if self.meteo else None)
@@ -963,10 +1007,10 @@ class SpectrumScanner:
         rds_task: asyncio.Task | None = None
         fails = 0  # errori di connessione consecutivi (azzerati appena arrivano campioni)
         try:
-            async with self._radio:
+            async with self._lock(server):
                 while True:  # un reset non ferma l'analisi: si prova a riconnettersi
                     try:
-                        reader, writer, tuner = await _open(self.host, self.port)
+                        reader, writer, tuner = await _open(*server)
                         try:
                             self.status["tuner"] = TUNER_NAMES.get(tuner, f"Tipo {tuner}")
                             await self._configure(writer, LIVE_RATE)
@@ -1070,6 +1114,7 @@ class SpectrumScanner:
     async def _live_dab_run(self, freq_hz: float, sid: str) -> None:
         """Radio DAB+ in diretta: chiavetta al centro del canale a 2,048 MS/s, AU AAC al pannello."""
         loop = asyncio.get_running_loop()
+        server = self._server("live")
         ch = dab.channel_for(freq_hz / 1e6)
         center = ch[1] * 1e6 if ch else freq_hz
         discard = RCV_BUF + 2 * READ_LIMIT + int(dab.RATE * 2 * max(self.settings.settle_ms, 100) / 1000)
@@ -1080,8 +1125,8 @@ class SpectrumScanner:
         chunk = dab.FRAME_LEN * 2  # due trame (192 ms) per lettura
         last_stats = 0.0
         try:
-            async with self._radio:
-                reader, writer, tuner = await _open(self.host, self.port)
+            async with self._lock(server):
+                reader, writer, tuner = await _open(*server)
                 try:
                     self.status["tuner"] = TUNER_NAMES.get(tuner, f"Tipo {tuner}")
                     await self._configure(writer, dab.RATE)
@@ -1261,21 +1306,33 @@ class SpectrumScanner:
         want = set(ids)
         return {f["id"]: f.get("path", []) for f in self.adsb_history if f["id"] in want}
 
-    async def _adsb_yield(self, resume: bool) -> None:
-        """Libera la chiavetta dall'ADS-B per un'altra operazione. resume=True: la riprende dopo."""
-        if self._adsb_task is not None:
-            if resume and self.status["adsb"]:
-                self._adsb_resume = {"continuous": self.status["adsb"]["continuous"],
-                                     "online": self.status["adsb"]["online"]}
-            await self.adsb_stop()
+    async def _adsb_yield(self, resume: bool, server: tuple[str, int] | None = None) -> None:
+        """Libera la chiavetta dall'ADS-B per un'altra operazione. resume=True: la riprende dopo.
+
+        Se l'ADS-B è su una chiavetta diversa da quella che serve (`server`), non c'è nulla da liberare:
+        gli aerei continuano indisturbati sulla loro chiavetta.
+        """
+        if self._adsb_task is None:
+            return
+        if server is not None and self._server("adsb") != server:
+            return
+        if resume and self.status["adsb"]:
+            self._adsb_resume = {"continuous": self.status["adsb"]["continuous"],
+                                 "online": self.status["adsb"]["online"]}
+        await self.adsb_stop()
 
     async def _adsb_maybe_resume(self) -> None:
-        """Riavvia l'ADS-B dopo un passaggio, se era stato sospeso e la chiavetta è di nuovo libera."""
+        """Riavvia l'ADS-B dopo un passaggio, se era stato sospeso e la SUA chiavetta è di nuovo libera."""
         opts = self._adsb_resume
         if opts is None or self._adsb_task is not None:
             return
-        if self.status["live"] or self.meteo_rx is not None or self.analyzing or self._dab_task is not None:
-            return  # qualcos'altro sta ancora usando la chiavetta: si riproverà più tardi
+        adsb = self._server("adsb")
+        scan = self._server("scan")
+        busy = ((self.status["live"] and self._server("live") == adsb)
+                or (self.meteo_rx is not None and self._server("meteo") == adsb)
+                or ((self.analyzing or self._dab_task is not None) and scan == adsb))
+        if busy:
+            return  # qualcos'altro sta ancora usando la stessa chiavetta: si riproverà più tardi
         self._adsb_resume = None
         try:
             await self.adsb_start(opts["continuous"], opts["online"])
@@ -1284,6 +1341,7 @@ class SpectrumScanner:
 
     async def _adsb_run(self) -> None:
         loop = asyncio.get_running_loop()
+        server = self._server("adsb")
         tracker = self.adsb_tracker
         rate = adsb_mod.RATE
         discard = RCV_BUF + 2 * READ_LIMIT + int(rate * 2 * max(self.settings.settle_ms, 100) / 1000)
@@ -1299,12 +1357,12 @@ class SpectrumScanner:
         fails = 0  # errori di connessione consecutivi (azzerati appena arrivano dati)
         stop = False
         try:
-            async with self._radio:
+            async with self._lock(server):
                 while not stop:
                     tail = b""
                     no_viewer_since = None
                     try:
-                        reader, writer, tuner = await _open(self.host, self.port)
+                        reader, writer, tuner = await _open(*server)
                         try:
                             self.status["tuner"] = TUNER_NAMES.get(tuner, f"Tipo {tuner}")
                             await self._configure(writer, rate)
@@ -1408,6 +1466,7 @@ class SpectrumScanner:
         """Misuratore di puntamento: tiene la frequenza e mostra di continuo il livello e il picco,
         per orientare l'antenna (satelliti, 137 MHz, ripetitori…). Nessun audio."""
         loop = asyncio.get_running_loop()
+        server = self._server("live")
         rate = LIVE_RATE
         center = float(round(freq_hz + rate / 8))
         discard = RCV_BUF + 2 * READ_LIMIT + int(rate * 2 * max(self.settings.settle_ms, 100) / 1000)
@@ -1425,8 +1484,8 @@ class SpectrumScanner:
             return round(level, 1), round(peak, 1), row
 
         try:
-            async with self._radio:
-                reader, writer, tuner = await _open(self.host, self.port)
+            async with self._lock(server):
+                reader, writer, tuner = await _open(*server)
                 try:
                     self.status["tuner"] = TUNER_NAMES.get(tuner, f"Tipo {tuner}")
                     await self._configure(writer, rate)
@@ -1477,6 +1536,7 @@ class SpectrumScanner:
     async def _live_tv_run(self, freq_hz: float, sat: bool = False) -> None:
         """Misuratore di campo: TV terrestre (livello e qualità del multiplex) o transponder satellitare (livello)."""
         loop = asyncio.get_running_loop()
+        server = self._server("live")
         if sat:
             live = self.status["live"] or {}
             freq_hz = (live.get("freq_mhz") or freq_hz / 1e6) * 1e6  # centro del transponder, se riconosciuto
@@ -1499,8 +1559,8 @@ class SpectrumScanner:
             return m, dvbt.spectrum_row(iq), round(level, 1)
 
         try:
-            async with self._radio:
-                reader, writer, tuner = await _open(self.host, self.port)
+            async with self._lock(server):
+                reader, writer, tuner = await _open(*server)
                 try:
                     self.status["tuner"] = TUNER_NAMES.get(tuner, f"Tipo {tuner}")
                     await self._configure(writer, rate)
@@ -1652,8 +1712,10 @@ class SpectrumScanner:
         norad, freqs = p["norad"], p["freqs"]
         info = weather.pass_json(p)
         self.meteo_rx = {"pass": info, "stats": None, "preview": None, "rows": 0, "error": None}
-        await self.live_stop()
-        await self._adsb_yield(resume=True)
+        server = self._server("meteo")
+        if self._server("live") == server:  # l'ascolto va fermato solo se è sulla stessa chiavetta
+            await self.live_stop()
+        await self._adsb_yield(resume=True, server=server)
         self._update_active()
         self._emit({"kind": "meteo_live", **self.meteo_rx})
         rate = weather.IN_RATE
@@ -1664,8 +1726,8 @@ class SpectrumScanner:
         log = self._log_start(p["satellite"], "meteor", bool(p.get("auto")))
         saved_rows = 0
         try:
-            async with self._radio:
-                reader, writer, tuner = await _open(self.host, self.port)
+            async with self._lock(server):
+                reader, writer, tuner = await _open(*server)
                 try:
                     self.status["tuner"] = TUNER_NAMES.get(tuner, f"Tipo {tuner}")
                     await self._configure(writer, rate)
@@ -1910,13 +1972,15 @@ class SpectrumScanner:
             await self._set_gain(writer)
         await self._send(writer, CMD_SET_FREQ, int(round(freq_hz)))
         if changed:
-            await self._discard(reader, int(self._rate * 2 * DIRECT_SETTLE_S) // 2 * 2)
+            rate = self._rates.get(id(writer), self.settings.sample_rate)
+            await self._discard(reader, int(rate * 2 * DIRECT_SETTLE_S) // 2 * 2)
 
     async def _configure(self, writer: asyncio.StreamWriter, rate: int) -> None:
         """Sample rate, correzione ppm e guadagno presi dalle impostazioni."""
         s = self.settings
-        self._direct = {id(writer): -1}  # nuova connessione: il direct sampling va reimpostato alla prima sintonia
-        self._rate = rate
+        # stato per QUESTA connessione (chiave id(writer)): con più chiavette insieme non si pestano
+        self._direct[id(writer)] = -1  # il direct sampling va reimpostato alla prima sintonia
+        self._rates[id(writer)] = rate
         await self._send(writer, CMD_SET_SAMPLE_RATE, rate)
         await self._send(writer, CMD_SET_FREQ_CORRECTION, int(s.ppm))
         await self._set_gain(writer)
@@ -1931,12 +1995,14 @@ class SpectrumScanner:
             await self._send(writer, CMD_SET_GAIN, int(round(s.gain_db * 10)))
 
     async def _sweep(self) -> None:
-        async with self._radio:
+        server = self._server("scan")
+        async with self._lock(server):
             if not self._active.is_set():
                 raise ScanPaused
             await self._sweep_locked()
 
     async def _sweep_locked(self) -> None:
+        server = self._server("scan")
         s = self.settings
         f_start = s.start_mhz * 1e6
         f_stop = s.stop_mhz * 1e6
@@ -1963,7 +2029,7 @@ class SpectrumScanner:
         sweep_id = self._sweep_id
 
         self._set_status(state="connecting", error=None, progress=0.0, next_scan=None)
-        reader, writer, tuner = await _open(self.host, self.port)
+        reader, writer, tuner = await _open(*server)
         try:
             self.status["tuner"] = TUNER_NAMES.get(tuner, f"Tipo {tuner}")
             await self._configure(writer, rate)

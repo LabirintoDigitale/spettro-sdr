@@ -1,7 +1,7 @@
 // Pannello "Spettro" per Home Assistant: grafico dello spettro, waterfall e picchi.
 
 // deve coincidere con VERSION in const.py: se il backend ne riporta un'altra manca un riavvio
-const PANEL_VERSION = "1.52.0";
+const PANEL_VERSION = "1.53.0";
 
 const PRESETS = [
   ["Personalizzato", null, null],
@@ -705,6 +705,15 @@ class SpettroPanel extends HTMLElement {
               </div>
               <label class="chk" style="margin-top:6px" title="Le analisi fatte a mano salvano sempre la registrazione grezza (circa 4 MB al secondo); le automatiche solo con questa opzione, perché riempirebbero il disco">
                 <input type="checkbox" id="saveiq"> Salva la registrazione IQ anche delle analisi automatiche</label>
+              <div class="hint" style="margin-top:12px">📡 <b>Chiavette separate</b> (rtl_tcp) — opzionale. Lascia vuoto per usare la chiavetta principale. Se metti l'IP (e porta) di un'altra chiavetta, quella funzione la userà in parallelo, senza fermare le altre. «Una cosa alla volta» vale solo tra funzioni sulla <b>stessa</b> chiavetta (stesso IP+porta; anche solo porta diversa = chiavetta diversa).</div>
+              <div class="grid2" style="margin-top:4px">
+                <label>Ascolto · IP<input id="livehost" type="text" placeholder="come principale" autocomplete="off"></label>
+                <label>Ascolto · porta<input id="liveport" type="number" step="1" min="0" max="65535" placeholder="0"></label>
+                <label>Aerei · IP<input id="adsbhost" type="text" placeholder="come principale" autocomplete="off"></label>
+                <label>Aerei · porta<input id="adsbport" type="number" step="1" min="0" max="65535" placeholder="0"></label>
+                <label>Meteo · IP<input id="meteohost" type="text" placeholder="come principale" autocomplete="off"></label>
+                <label>Meteo · porta<input id="meteoport" type="number" step="1" min="0" max="65535" placeholder="0"></label>
+              </div>
             </details>
             <div class="row" style="margin-top:10px">
               <button class="primary" id="apply">Applica</button>
@@ -723,7 +732,8 @@ class SpettroPanel extends HTMLElement {
     this._menu.narrow = this._narrow;
 
     const form = ["start", "stop", "interval", "gain", "threshold", "viewonly", "autoana", "lnb", "reana", "archhours", "limstep", "maxstep", "limsweep", "maxsweep",
-      "rate", "fft", "settle", "ppm", "anadur", "hfs", "saveiq"];
+      "rate", "fft", "settle", "ppm", "anadur", "hfs", "saveiq",
+      "livehost", "liveport", "adsbhost", "adsbport", "meteohost", "meteoport"];
     for (const id of form) $(id).addEventListener("input", () => {
       this._formDirty = true;
       if (id === "start" || id === "stop") $("preset").value = "0";
@@ -954,6 +964,10 @@ class SpettroPanel extends HTMLElement {
     $("maxstep").value = s.auto_max_per_step || 3;
     $("limsweep").checked = !!s.auto_limit_sweep;
     $("maxsweep").value = s.auto_max_per_sweep || 20;
+    for (const [id, host, port] of [["live", s.live_host, s.live_port], ["adsb", s.adsb_host, s.adsb_port], ["meteo", s.meteo_host, s.meteo_port]]) {
+      if (this.shadowRoot.activeElement !== $(id + "host")) $(id + "host").value = host || "";
+      if (this.shadowRoot.activeElement !== $(id + "port")) $(id + "port").value = port || "";
+    }
     this._syncLimits();
     const idx = PRESETS.findIndex((p) => p[1] === s.start_mhz && p[2] === s.stop_mhz);
     $("preset").value = String(idx > 0 ? idx : 0);
@@ -989,6 +1003,12 @@ class SpettroPanel extends HTMLElement {
       auto_max_per_step: Math.max(1, parseInt($("maxstep").value, 10) || 3),
       auto_limit_sweep: $("limsweep").checked,
       auto_max_per_sweep: Math.max(1, parseInt($("maxsweep").value, 10) || 20),
+      live_host: $("livehost").value.trim(),
+      live_port: parseInt($("liveport").value, 10) || 0,
+      adsb_host: $("adsbhost").value.trim(),
+      adsb_port: parseInt($("adsbport").value, 10) || 0,
+      meteo_host: $("meteohost").value.trim(),
+      meteo_port: parseInt($("meteoport").value, 10) || 0,
     };
     $("apply").disabled = true;
     try {

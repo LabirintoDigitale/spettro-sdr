@@ -131,6 +131,13 @@ def ws_subscribe(hass: HomeAssistant, connection: websocket_api.ActiveConnection
         vol.Optional("auto_max_per_step"): vol.All(vol.Coerce(int), vol.Range(min=1, max=1000)),
         vol.Optional("auto_limit_sweep"): bool,
         vol.Optional("auto_max_per_sweep"): vol.All(vol.Coerce(int), vol.Range(min=1, max=100000)),
+        # chiavette separate per funzione (host vuoto = usa la principale; porta 0 = porta principale)
+        vol.Optional("live_host"): vol.Any(None, str),
+        vol.Optional("live_port"): vol.All(vol.Coerce(int), vol.Range(min=0, max=65535)),
+        vol.Optional("adsb_host"): vol.Any(None, str),
+        vol.Optional("adsb_port"): vol.All(vol.Coerce(int), vol.Range(min=0, max=65535)),
+        vol.Optional("meteo_host"): vol.Any(None, str),
+        vol.Optional("meteo_port"): vol.All(vol.Coerce(int), vol.Range(min=0, max=65535)),
     }
 )
 @websocket_api.require_admin
