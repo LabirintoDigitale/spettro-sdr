@@ -168,8 +168,10 @@ class MqttPublisher:
             return
         model = str(d.get("model", "sensore"))
         did = str(d.get("id", d.get("channel", "")))
-        node = f"ism_{_slug(model)}_{_slug(did)}" if did else f"ism_{_slug(model)}"
-        state_topic = f"spettro/ism/{node}/state"
+        dev_slug = f"{_slug(model)}_{_slug(did)}" if did else _slug(model)
+        node = f"ism_{dev_slug}"  # identificativo univoco per l'auto-discovery
+        # topic: spettro / tipo (ism) / dispositivo / stato
+        state_topic = f"spettro/ism/{dev_slug}/stato"
         device = self._device(node, f"{model}{(' ' + did) if did else ''}", model=model)
         for key, val in d.items():
             if key in _SKIP or key.startswith("_") or not isinstance(val, (int, float)):
@@ -185,10 +187,11 @@ class MqttPublisher:
         if self._client is None:
             return
         node = "adsb"
-        state_topic = "spettro/adsb/last/state"
-        attr_topic = "spettro/adsb/last/attr"
+        # topic: spettro / tipo (adsb) / lettura (ultimo)
+        state_topic = "spettro/adsb/ultimo/stato"
+        attr_topic = "spettro/adsb/ultimo/attributi"
         device = self._device(node, "Spettro Aerei", model="ADS-B")
-        self._discover_sensor(node, "last", "Ultimo aereo", device, state_topic,
+        self._discover_sensor(node, "ultimo", "Ultimo aereo", device, state_topic,
                               icon="mdi:airplane", json_attrs_topic=attr_topic)
         label = (flight.get("call") or flight.get("callsign") or flight.get("registration")
                  or flight.get("icao") or flight.get("hex") or "?")
@@ -199,8 +202,10 @@ class MqttPublisher:
     def publish_image(self, kind: str, name: str, png: bytes, attrs: dict | None = None) -> None:
         if self._client is None or not png:
             return
-        node = f"img_{_slug(kind)}"
-        img_topic = f"spettro/{node}/image"
+        k = _slug(kind)
+        node = f"foto_{k}"
+        # topic: spettro / tipo (foto) / lettura (meteo|iss|radiofax)
+        img_topic = f"spettro/foto/{k}/immagine"
         uid = f"{node}_image"
         if uid not in self._discovered:
             cfg = {"name": name, "uniq_id": uid, "image_topic": img_topic, "content_type": "image/png",
@@ -209,4 +214,4 @@ class MqttPublisher:
             self._discovered.add(uid)
         self._pub(img_topic, png, retain=True)
         if attrs:
-            self._pub(f"spettro/{node}/attr", attrs, retain=True)
+            self._pub(f"spettro/foto/{k}/attributi", attrs, retain=True)

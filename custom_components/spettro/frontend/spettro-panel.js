@@ -1,7 +1,7 @@
 // Pannello "Spettro" per Home Assistant: grafico dello spettro, waterfall e picchi.
 
 // deve coincidere con VERSION in const.py: se il backend ne riporta un'altra manca un riavvio
-const PANEL_VERSION = "1.56.0";
+const PANEL_VERSION = "1.57.0";
 
 const PRESETS = [
   ["Personalizzato", null, null],
