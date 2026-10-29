@@ -54,6 +54,7 @@ def async_setup(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, ws_adsb_history)
     websocket_api.async_register_command(hass, ws_ism)
     websocket_api.async_register_command(hass, ws_ism_config)
+    websocket_api.async_register_command(hass, ws_mqtt_config)
     websocket_api.async_register_command(hass, ws_set_enabled)
     websocket_api.async_register_command(hass, ws_analyze)
     websocket_api.async_register_command(hass, ws_ask_ai)
@@ -159,7 +160,7 @@ def ws_set_config(hass: HomeAssistant, connection: websocket_api.ActiveConnectio
     hass.config_entries.async_update_entry(entry, options=merged)
     scanner.update_settings(ScanSettings.from_dict(merged))
     hass.async_create_task(scanner.prune_archive())  # le ore di conservazione possono essere cambiate
-    connection.send_result(msg["id"], merged)
+    connection.send_result(msg["id"], {**merged, "mqtt_pass": "***" if merged.get("mqtt_pass") else ""})
 
 
 @websocket_api.websocket_command({vol.Required("type"): "spettro/dab_scan", vol.Optional("stop", default=False): bool})
@@ -228,6 +229,34 @@ async def ws_ism(hass: HomeAssistant, connection: websocket_api.ActiveConnection
             connection.send_result(msg["id"], await scanner.ism_start())
     except RuntimeError as err:
         connection.send_error(msg["id"], "ism_failed", str(err))
+
+
+@websocket_api.websocket_command({
+    vol.Required("type"): "spettro/mqtt_config",
+    vol.Optional("mqtt_host"): vol.Any(None, str),
+    vol.Optional("mqtt_port"): vol.All(vol.Coerce(int), vol.Range(min=1, max=65535)),
+    vol.Optional("mqtt_user"): vol.Any(None, str),
+    vol.Optional("mqtt_pass"): vol.Any(None, str),
+    vol.Optional("mqtt_prefix"): vol.Any(None, str),
+    vol.Optional("mqtt_pub_ism"): bool,
+    vol.Optional("mqtt_pub_adsb"): bool,
+    vol.Optional("mqtt_pub_photos"): bool,
+})
+@websocket_api.require_admin
+@callback
+def ws_mqtt_config(hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]) -> None:
+    """Imposta il broker MQTT e cosa pubblicare; (ri)collega subito."""
+    entry, scanner = _scanner(hass, connection, msg)
+    if scanner is None:
+        return
+    changes = {k: v for k, v in msg.items() if k not in ("id", "type")}
+    # password: "***" (o assente) = tieni quella salvata; stringa vuota = nessuna password
+    if changes.get("mqtt_pass") == "***":
+        changes.pop("mqtt_pass")
+    merged = {**ScanSettings().as_dict(), **entry.options, **changes}
+    hass.config_entries.async_update_entry(entry, options=merged)
+    scanner.update_settings(ScanSettings.from_dict(merged))
+    connection.send_result(msg["id"], scanner._mqtt.status())  # noqa: SLF001
 
 
 @websocket_api.websocket_command({
@@ -584,7 +613,7 @@ def ws_meteo_config(hass: HomeAssistant, connection: websocket_api.ActiveConnect
     merged = {**ScanSettings().as_dict(), **entry.options, **changes}
     hass.config_entries.async_update_entry(entry, options=merged)
     scanner.settings = ScanSettings.from_dict(merged)
-    scanner.status["settings"] = scanner.settings.as_dict()
+    scanner.status["settings"] = scanner.settings.safe_dict()
     scanner._emit(dict(scanner.status))  # noqa: SLF001
     hass.async_create_task(scanner.prune_meteo())
     connection.send_result(msg["id"], merged)

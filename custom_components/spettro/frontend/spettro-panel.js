@@ -1,7 +1,7 @@
 // Pannello "Spettro" per Home Assistant: grafico dello spettro, waterfall e picchi.
 
 // deve coincidere con VERSION in const.py: se il backend ne riporta un'altra manca un riavvio
-const PANEL_VERSION = "1.54.0";
+const PANEL_VERSION = "1.55.0";
 
 const PRESETS = [
   ["Personalizzato", null, null],
@@ -303,6 +303,7 @@ class SpettroPanel extends HTMLElement {
       this.shadowRoot.getElementById("enabled").checked = m.enabled !== false;
       if (!this._formDirty) this._fillForm(m.settings);
       this._fillIsm(m.settings);
+      this._fillMqtt(m.settings);
       this._updateStatus();
       return;
     }
@@ -330,6 +331,7 @@ class SpettroPanel extends HTMLElement {
     if (m.kind === "meteo_log") { this._meteoLog = m.log; this._renderMeteoLog(); return; }
     if (m.kind === "dab_scan") { this._dabScan = m; this._renderDabScan(); return; }
     if (m.kind === "ism") { this._onIsm(m); return; }
+    if (m.kind === "mqtt") { this._onMqtt(m); return; }
     if (m.kind === "adsb") { this._adsb = m.done ? null : m; this._renderAdsb(); return; }
     if (m.kind === "adsb_error") { this._msg(`ADS-B: ${m.error}`, true); return; }
     if (m.kind === "adsb_history") { this._adsbHistory = m.flights || []; this._adsbRecord = !!m.record; this._adsbHistHours = m.hours; this._adsbHome = m.home || this._adsbHome; this._renderAdsbHist(); return; }
@@ -621,6 +623,28 @@ class SpettroPanel extends HTMLElement {
             <span class="hint" id="ismstat"></span>
           </div>
           <div id="ismsensors"></div>
+        </div>
+        <div class="card" id="mqttcard">
+          <h3 style="margin:0">📡 Pubblica su MQTT</h3>
+          <div class="hint">Manda i dati al tuo broker MQTT (Mosquitto) con l'auto-discovery di Home Assistant: i
+            sensori ISM, gli aerei e le foto satellitari compaiono <b>da soli come entità</b> in Home Assistant (con
+            unità e grafici). Metti il broker che usa Home Assistant. Lascia il broker vuoto per spegnere la pubblicazione.</div>
+          <div class="grid2" style="margin-top:6px">
+            <label>Broker (IP)<input id="mqtthost" type="text" placeholder="es. 127.0.0.1" autocomplete="off"></label>
+            <label>Porta<input id="mqttport" type="number" min="1" max="65535" placeholder="1883"></label>
+            <label>Utente<input id="mqttuser" type="text" autocomplete="off"></label>
+            <label>Password<input id="mqttpass" type="password" autocomplete="new-password" placeholder=""></label>
+            <label>Prefisso discovery<input id="mqttprefix" type="text" placeholder="homeassistant"></label>
+          </div>
+          <div style="margin-top:8px">Cosa pubblicare:
+            <label class="chk"><input type="checkbox" id="mqttism"> Sensori ISM</label>
+            <label class="chk"><input type="checkbox" id="mqttadsb"> Aerei (nuovi voli)</label>
+            <label class="chk"><input type="checkbox" id="mqttphotos"> Foto meteo/ISS</label>
+          </div>
+          <div class="row" style="margin-top:8px;align-items:center">
+            <button class="primary" id="mqttsave">Salva e collega</button>
+            <span class="hint" id="mqttstat"></span>
+          </div>
         </div>
         <div class="card" id="meteocard">
           <h3 style="margin:0">🛰️ Satelliti meteo e immagini</h3>
@@ -918,6 +942,23 @@ class SpettroPanel extends HTMLElement {
         if (this._ismOn) await this._hass.callWS({ type: "spettro/ism", action: "stop" });
         else { await this._hass.callWS({ type: "spettro/ism", action: "start" }); this._revealCard("ismcard"); }
       } catch (err) { this._startError(err.message || String(err)); }
+    });
+    $("mqttsave").addEventListener("click", async () => {
+      const pass = $("mqttpass").value;
+      const msg = {
+        type: "spettro/mqtt_config",
+        mqtt_host: $("mqtthost").value.trim(),
+        mqtt_port: parseInt($("mqttport").value, 10) || 1883,
+        mqtt_user: $("mqttuser").value.trim(),
+        mqtt_prefix: $("mqttprefix").value.trim() || "homeassistant",
+        mqtt_pub_ism: $("mqttism").checked,
+        mqtt_pub_adsb: $("mqttadsb").checked,
+        mqtt_pub_photos: $("mqttphotos").checked,
+      };
+      // password vuota + già impostata = tieni quella salvata ("***"); altrimenti manda ciò che c'è
+      msg.mqtt_pass = (pass === "" && this._mqttHasPass) ? "***" : pass;
+      try { await this._hass.callWS(msg); this._msg("MQTT: impostazioni salvate."); }
+      catch (err) { this._startError(err.message || String(err)); }
     });
     $("adsbhist").addEventListener("click", async (e) => {
       const act = e.target.closest("[data-hact]");
@@ -2168,6 +2209,32 @@ class SpettroPanel extends HTMLElement {
       `<tr><td style="color:#888;padding-right:8px">${esc(r.t)}</td>`
       + `<td style="padding-right:8px"><b>${esc(r.model)}</b>${r.id ? " #" + esc(r.id) : ""}</td>`
       + `<td>${esc(r.vals)}</td></tr>`).join("")}</tbody></table>`;
+  }
+
+  // ---- MQTT ----
+  _fillMqtt(s) {
+    if (!s) return;
+    const $ = (id) => this.shadowRoot.getElementById(id);
+    const set = (id, v) => { const e = $(id); if (e && this.shadowRoot.activeElement !== e) e.value = v; };
+    set("mqtthost", s.mqtt_host || "");
+    set("mqttport", s.mqtt_port || 1883);
+    set("mqttuser", s.mqtt_user || "");
+    set("mqttprefix", s.mqtt_prefix || "homeassistant");
+    this._mqttHasPass = s.mqtt_pass === "***";
+    const pw = $("mqttpass");
+    if (pw && this.shadowRoot.activeElement !== pw) { pw.value = ""; pw.placeholder = this._mqttHasPass ? "•••• (impostata)" : ""; }
+    for (const [id, k] of [["mqttism", "mqtt_pub_ism"], ["mqttadsb", "mqtt_pub_adsb"], ["mqttphotos", "mqtt_pub_photos"]]) {
+      const e = $(id); if (e) e.checked = !!s[k];
+    }
+  }
+
+  _onMqtt(m) {
+    const el = this.shadowRoot.getElementById("mqttstat");
+    if (!el) return;
+    if (!m.enabled) { el.textContent = "spento (nessun broker impostato)"; el.className = "hint"; return; }
+    if (m.error) { el.textContent = "⚠ " + m.error; el.className = "hint err"; return; }
+    el.className = "hint";
+    el.textContent = m.connected ? `✓ collegato a ${m.host}` : `collegamento a ${m.host}…`;
   }
 
   _renderDabScan() {

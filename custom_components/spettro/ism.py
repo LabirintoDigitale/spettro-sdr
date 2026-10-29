@@ -129,7 +129,11 @@ class Rtl433:
             pass  # rtl_433 è indietro: scarta (meglio perdere campioni che bloccare)
 
     def poll(self) -> list[dict[str, Any]]:
-        """I messaggi JSON decodificati finora (già pronti per il pannello). Non blocca."""
+        """I messaggi JSON grezzi decodificati finora (così come li dà rtl_433). Non blocca.
+
+        Per la riga pronta per il pannello usa `describe(d)`; il JSON grezzo serve anche a MQTT
+        (nomi dei campi e unità).
+        """
         if self.proc is None:
             return []
         out: list[dict[str, Any]] = []
@@ -144,7 +148,7 @@ class Rtl433:
                 line = line.strip()
                 if line.startswith(b"{"):
                     try:
-                        out.append(describe(json.loads(line.decode("utf-8", "ignore"))))
+                        out.append(json.loads(line.decode("utf-8", "ignore")))
                     except ValueError:
                         pass
         return out

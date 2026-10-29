@@ -26,7 +26,7 @@ import numpy as np
 from . import adsb as adsb_mod
 from . import adsb_db
 from . import adsb_online
-from . import dab, dvbt, ism, rds, satellite, slots, textdec, verify, weather
+from . import dab, dvbt, ism, mqtt_pub, rds, satellite, slots, textdec, verify, weather
 from .analysis import encode_png
 from .fax import FaxDecoder
 from .sstv import SstvDecoder, ToneTracker
@@ -145,6 +145,15 @@ class ScanSettings:
     # sensori ISM: frequenze (MHz) scorse a ciclo e secondi di ascolto su ognuna
     ism_freqs: list[float] = field(default_factory=lambda: [433.92, 868.3])
     ism_dwell_s: float = 30.0
+    # MQTT: broker Mosquitto dell'utente e cosa pubblicare (auto-discovery di Home Assistant)
+    mqtt_host: str = ""   # vuoto = pubblicazione MQTT spenta
+    mqtt_port: int = 1883
+    mqtt_user: str = ""
+    mqtt_pass: str = ""
+    mqtt_prefix: str = "homeassistant"  # prefisso dell'auto-discovery di HA
+    mqtt_pub_ism: bool = True    # sensori ISM
+    mqtt_pub_adsb: bool = False  # aerei (nuovi voli)
+    mqtt_pub_photos: bool = False  # foto meteo/ISS scaricate
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> ScanSettings:
@@ -160,6 +169,12 @@ class ScanSettings:
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+    def safe_dict(self) -> dict[str, Any]:
+        """Come as_dict ma senza la password MQTT (si manda al pannello 'impostata'/vuota, non il valore)."""
+        d = asdict(self)
+        d["mqtt_pass"] = "***" if self.mqtt_pass else ""
+        return d
 
 
 class RtlTcpError(Exception):
@@ -360,6 +375,7 @@ class SpectrumScanner:
         self._ism_resume = False  # ISM da riavviare dopo che un'altra funzione libera la sua chiavetta
         self.ism_rows: deque[dict[str, Any]] = deque(maxlen=ISM_ROWS)  # ultimi sensori decodificati
         self.ism_status: dict[str, Any] | None = None  # {freq_mhz, freqs, dwell_s, count} mentre è attivo
+        self._mqtt = mqtt_pub.MqttPublisher()  # pubblicazione su MQTT (broker dell'utente)
         # un lucchetto per ogni chiavetta (host, porta): le funzioni su chiavette diverse non si
         # bloccano tra loro; quelle sulla stessa chiavetta restano "una alla volta".
         self._locks: dict[tuple[str, int], asyncio.Lock] = {}
@@ -397,7 +413,7 @@ class SpectrumScanner:
             "next_scan": None,
             "host": host,
             "port": port,
-            "settings": settings.as_dict(),
+            "settings": settings.safe_dict(),
             "enabled": enabled,
             "paused": None,
             "auto_mhz": None,  # picco in analisi automatica
@@ -450,6 +466,7 @@ class SpectrumScanner:
             out.append({"kind": "digi_log", "log": list(self.digi_log)})
         if self.ism_status is not None:
             out.append({"kind": "ism", **self.ism_status, "sensors": list(self.ism_rows)})
+        out.append({"kind": "mqtt", **self._mqtt.status()})
         if self.dab_list or self._dab_task is not None:
             out.append({"kind": "dab_scan", "done": self._dab_task is None, "found": self.dab_list,
                         "time": self.dab_scan_time})
@@ -581,12 +598,21 @@ class SpectrumScanner:
             self._task = asyncio.get_running_loop().create_task(self._run(), name="spettro_scanner")
         if self.meteo is not None and (self._meteo_loop_task is None or self._meteo_loop_task.done()):
             self._meteo_loop_task = asyncio.get_running_loop().create_task(self._meteo_loop(), name="spettro_meteo")
+        self._mqtt_configure()
+
+    def _mqtt_configure(self) -> None:
+        """(Ri)collega il broker MQTT secondo le impostazioni e avvisa il pannello dello stato."""
+        s = self.settings
+        self._mqtt.configure(s.mqtt_host, s.mqtt_port, s.mqtt_user, s.mqtt_pass, s.mqtt_prefix)
+        self._emit({"kind": "mqtt", **self._mqtt.status()})
 
     async def stop(self) -> None:
+        self._mqtt.close()
         await self.dab_scan_stop()
         await self.adsb_stop()
         await self.live_stop()
         await self.meteo_stop()
+        await self.ism_stop()
         if self._meteo_loop_task is not None:
             self._meteo_loop_task.cancel()
             self._meteo_loop_task = None
@@ -601,8 +627,9 @@ class SpectrumScanner:
     def update_settings(self, settings: ScanSettings) -> None:
         """Applica i nuovi parametri ripartendo subito con una scansione."""
         self.settings = settings
-        self.status["settings"] = settings.as_dict()
+        self.status["settings"] = settings.safe_dict()
         self._update_active()
+        self._mqtt_configure()
         if self._task is not None:
             self._task.cancel()
             self._task = None
@@ -1258,7 +1285,12 @@ class SpectrumScanner:
         for pl in planes:
             if not pl.get("call") and not pl.get("path"):
                 continue  # nulla di utile (né sigla né posizione)
-            self.adsb_history.insert(0, self._adsb_flight_record(pl))
+            rec = self._adsb_flight_record(pl)
+            self.adsb_history.insert(0, rec)
+            if self.settings.mqtt_pub_adsb:
+                self._mqtt.publish_aircraft({k: rec.get(k) for k in
+                    ("call", "icao", "type", "manufacturer", "owner", "registration", "route",
+                     "first", "last", "msgs")})
             added = True
         if added:
             self._prune_adsb_history()
@@ -1434,8 +1466,10 @@ class SpectrumScanner:
                                         fails = 0
                                         rtl.feed(raw)
                                         new = rtl.poll()
-                                        for row in new:
-                                            self.ism_rows.appendleft(row)
+                                        for d in new:
+                                            self.ism_rows.appendleft(ism.describe(d))
+                                            if self.settings.mqtt_pub_ism:
+                                                self._mqtt.publish_ism(d)
                                         if self.ism_status is not None and new:
                                             self.ism_status["count"] += len(new)
                                         if new or loop.time() - last_emit > 1.0:
@@ -1939,6 +1973,9 @@ class SpectrumScanner:
         entry = await loop.run_in_executor(None, self.meteo_archive.add, meta, png, ir)
         self.last_meteo_png = png
         self._emit({"kind": "meteo_image", "entry": entry})
+        if self.settings.mqtt_pub_photos:
+            self._mqtt.publish_image("meteo", "Ultima foto meteo (Meteor)", png,
+                                     {"satellite": p["satellite"], "righe": rows, "composite": name})
         await self.prune_meteo()
         return rows
 
@@ -1986,6 +2023,9 @@ class SpectrumScanner:
         img.saved += 1
         self.last_meteo_png = png
         self._emit({"kind": "meteo_image", "entry": entry})
+        if self.settings.mqtt_pub_photos:
+            kind, label = ("iss", "Ultima foto ISS (SSTV)") if img.kind == "sstv" else ("radiofax", "Ultimo radiofax")
+            self._mqtt.publish_image(kind, label, png, {"titolo": title, "freq_mhz": f_mhz})
         return entry
 
     async def _live_data(self, raw: bytes, offset_hz: float) -> None:
