@@ -44,7 +44,7 @@ _SENSOR_MAP = {
     "wind_dir_deg": ("Direzione vento", "°", None, "measurement"),
     "rain_mm": ("Pioggia totale", "mm", "precipitation", "total_increasing"),
     "rain_mm_h": ("Intensità pioggia", "mm/h", "precipitation_intensity", "measurement"),
-    "uv": ("UV", None, None, "measurement"),
+    "uv": ("Irraggiamento solare", "W/m²", "irradiance", "measurement"),
     "uvi": ("Indice UV", None, None, "measurement"),
     "light_lux": ("Luce", "lx", "illuminance", "measurement"),
     "lux": ("Luce", "lx", "illuminance", "measurement"),

@@ -37,7 +37,7 @@ _LABELS = {
     "wind_max_km_h": "raffica km/h", "wind_dir_deg": "direzione °",
     "rain_mm": "pioggia mm", "rain_mm_h": "pioggia mm/h", "rain_in": "pioggia in",
     "pressure_hPa": "pressione hPa", "pressure_kPa": "pressione kPa",
-    "uv": "UV", "uvi": "indice UV", "light_lux": "luce lux", "lux": "luce lux",
+    "uv": "irraggiamento W/m²", "uvi": "indice UV", "light_lux": "luce lux", "lux": "luce lux",
     "battery_ok": "batteria ok", "battery_V": "batteria V",
 }
 
