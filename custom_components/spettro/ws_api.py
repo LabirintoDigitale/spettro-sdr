@@ -55,6 +55,7 @@ def async_setup(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, ws_ism)
     websocket_api.async_register_command(hass, ws_ism_config)
     websocket_api.async_register_command(hass, ws_mqtt_config)
+    websocket_api.async_register_command(hass, ws_autostart)
     websocket_api.async_register_command(hass, ws_set_enabled)
     websocket_api.async_register_command(hass, ws_analyze)
     websocket_api.async_register_command(hass, ws_ask_ai)
@@ -229,6 +230,27 @@ async def ws_ism(hass: HomeAssistant, connection: websocket_api.ActiveConnection
             connection.send_result(msg["id"], await scanner.ism_start())
     except RuntimeError as err:
         connection.send_error(msg["id"], "ism_failed", str(err))
+
+
+@websocket_api.websocket_command({
+    vol.Required("type"): "spettro/autostart",
+    vol.Optional("adsb_autostart"): bool,
+    vol.Optional("ism_autostart"): bool,
+})
+@websocket_api.require_admin
+@callback
+def ws_autostart(hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]) -> None:
+    """Attiva/disattiva l'avvio automatico (persistente) di ADS-B o Sensori ISM all'accensione di HA."""
+    entry, scanner = _scanner(hass, connection, msg)
+    if scanner is None:
+        return
+    changes = {k: v for k, v in msg.items() if k not in ("id", "type")}
+    merged = {**ScanSettings().as_dict(), **entry.options, **changes}
+    hass.config_entries.async_update_entry(entry, options=merged)
+    scanner.settings = ScanSettings.from_dict(merged)
+    scanner.status["settings"] = scanner.settings.safe_dict()
+    scanner._emit(dict(scanner.status))  # noqa: SLF001
+    connection.send_result(msg["id"], {"adsb_autostart": merged["adsb_autostart"], "ism_autostart": merged["ism_autostart"]})
 
 
 @websocket_api.websocket_command({

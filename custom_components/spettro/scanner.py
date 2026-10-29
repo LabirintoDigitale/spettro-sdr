@@ -154,6 +154,9 @@ class ScanSettings:
     mqtt_pub_ism: bool = True    # sensori ISM
     mqtt_pub_adsb: bool = False  # aerei (nuovi voli)
     mqtt_pub_photos: bool = False  # foto meteo/ISS scaricate
+    # avvio automatico all'accensione di Home Assistant (persistente ai riavvii)
+    adsb_autostart: bool = False
+    ism_autostart: bool = False
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> ScanSettings:
@@ -376,6 +379,7 @@ class SpectrumScanner:
         self.ism_rows: deque[dict[str, Any]] = deque(maxlen=ISM_ROWS)  # ultimi sensori decodificati
         self.ism_status: dict[str, Any] | None = None  # {freq_mhz, freqs, dwell_s, count} mentre è attivo
         self._mqtt = mqtt_pub.MqttPublisher()  # pubblicazione su MQTT (broker dell'utente)
+        self._autostarted = False  # avvio automatico fatto una volta sola all'accensione
         # un lucchetto per ogni chiavetta (host, porta): le funzioni su chiavette diverse non si
         # bloccano tra loro; quelle sulla stessa chiavetta restano "una alla volta".
         self._locks: dict[tuple[str, int], asyncio.Lock] = {}
@@ -599,6 +603,24 @@ class SpectrumScanner:
         if self.meteo is not None and (self._meteo_loop_task is None or self._meteo_loop_task.done()):
             self._meteo_loop_task = asyncio.get_running_loop().create_task(self._meteo_loop(), name="spettro_meteo")
         self._mqtt_configure()
+        if not self._autostarted and (self.settings.adsb_autostart or self.settings.ism_autostart):
+            self._autostarted = True
+            asyncio.get_running_loop().create_task(self._run_autostart(), name="spettro_autostart")
+
+    async def _run_autostart(self) -> None:
+        """Avvia i ricevitori segnati per l'avvio automatico. Sulla stessa chiavetta parte prima
+        l'ADS-B e poi l'ISM, quindi il secondo (ISM) ferma il primo; su chiavette diverse vanno insieme."""
+        await asyncio.sleep(2)  # lascia stabilizzare l'avvio dell'integrazione
+        if self.settings.adsb_autostart:
+            try:
+                await self.adsb_start(continuous=True, online=True)
+            except RuntimeError as err:
+                _LOGGER.info("Avvio automatico ADS-B non riuscito: %s", err)
+        if self.settings.ism_autostart:
+            try:
+                await self.ism_start()
+            except RuntimeError as err:
+                _LOGGER.info("Avvio automatico ISM non riuscito: %s", err)
 
     def _mqtt_configure(self) -> None:
         """(Ri)collega il broker MQTT secondo le impostazioni e avvisa il pannello dello stato."""
@@ -1226,13 +1248,18 @@ class SpectrumScanner:
         continuous=True: resta sintonizzato anche a pannello chiuso (finché non lo fermi).
         online=True: scarica da internet modello, immatricolazione e rotta (adsbdb.com).
         """
-        if self.analyzing or self._dab_task is not None:
+        adsb_server = self._server("adsb")
+        if (self.analyzing or self._dab_task is not None) and self._server("scan") == adsb_server:
             raise RuntimeError("C'è un'altra operazione in corso, riprova tra poco")
-        if self.meteo_rx is not None:
+        if self.meteo_rx is not None and self._server("meteo") == adsb_server:
             raise RuntimeError("C'è una ricezione satellitare in corso")
         if online and self.http_get is None:
             online = False
-        await self.live_stop()
+        if self._server("live") == adsb_server:
+            await self.live_stop()
+        # sulla stessa chiavetta i due ricevitori continui si escludono: avviando gli aerei si ferma l'ISM
+        if self._ism_task is not None and self._server("ism") == adsb_server:
+            await self.ism_stop()
         if self._adsb_task is not None:
             self.status["adsb"]["continuous"] = continuous  # già attivo: cambio solo le opzioni
             self.status["adsb"]["online"] = online and self.http_get is not None
@@ -1408,8 +1435,12 @@ class SpectrumScanner:
         if ism.find_rtl433() is None:
             raise RuntimeError("rtl_433 non trovato (dovrebbe essere incluso nell'integrazione)")
         server = self._server("ism")
-        # se l'ISM condivide la chiavetta con un altro ricevitore continuo, quello si ferma
+        if self.meteo_rx is not None and self._server("meteo") == server:
+            raise RuntimeError("C'è una ricezione satellitare in corso su questa chiavetta")
+        # sulla stessa chiavetta l'ISM esclude gli altri: ferma aerei e ascolto se sono qui
         await self._adsb_yield(resume=False, server=server)
+        if self._server("live") == server:
+            await self.live_stop()
         self.ism_status = {"freqs": freqs, "dwell_s": max(2.0, float(self.settings.ism_dwell_s)),
                            "freq_mhz": None, "count": 0, "error": None}
         self._ism_task = asyncio.get_running_loop().create_task(self._ism_run(), name="spettro_ism")

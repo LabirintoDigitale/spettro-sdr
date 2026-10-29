@@ -1,7 +1,7 @@
 // Pannello "Spettro" per Home Assistant: grafico dello spettro, waterfall e picchi.
 
 // deve coincidere con VERSION in const.py: se il backend ne riporta un'altra manca un riavvio
-const PANEL_VERSION = "1.58.0";
+const PANEL_VERSION = "1.59.0";
 
 const PRESETS = [
   ["Personalizzato", null, null],
@@ -304,7 +304,9 @@ class SpettroPanel extends HTMLElement {
       if (!this._formDirty) this._fillForm(m.settings);
       this._fillIsm(m.settings);
       this._fillMqtt(m.settings);
+      this._fillAuto(m.settings);
       this._updateStatus();
+      this._updateLeds();
       return;
     }
     if (m.kind === "favorites") { this._favs = m.favorites; this._renderFavs(); this._updateFavBtn(); return; }
@@ -327,12 +329,12 @@ class SpettroPanel extends HTMLElement {
     if (m.kind === "live_meter") { this._onLiveMeter(m); return; }
     if (m.kind === "live_image") { this._onLiveImage(m); return; }
     if (m.kind === "meteo_passes") { this._meteoPasses = m; this._renderMeteoPasses(); return; }
-    if (m.kind === "meteo_live") { this._onMeteoLive(m); return; }
+    if (m.kind === "meteo_live") { this._onMeteoLive(m); this._updateLeds(); return; }
     if (m.kind === "meteo_log") { this._meteoLog = m.log; this._renderMeteoLog(); return; }
-    if (m.kind === "dab_scan") { this._dabScan = m; this._renderDabScan(); return; }
-    if (m.kind === "ism") { this._onIsm(m); return; }
+    if (m.kind === "dab_scan") { this._dabScan = m; this._renderDabScan(); this._updateLeds(); return; }
+    if (m.kind === "ism") { this._onIsm(m); this._updateLeds(); return; }
     if (m.kind === "mqtt") { this._onMqtt(m); return; }
-    if (m.kind === "adsb") { this._adsb = m.done ? null : m; this._renderAdsb(); return; }
+    if (m.kind === "adsb") { this._adsb = m.done ? null : m; this._renderAdsb(); this._updateLeds(); return; }
     if (m.kind === "adsb_error") { this._msg(`ADS-B: ${m.error}`, true); return; }
     if (m.kind === "adsb_history") { this._adsbHistory = m.flights || []; this._adsbRecord = !!m.record; this._adsbHistHours = m.hours; this._adsbHome = m.home || this._adsbHome; this._renderAdsbHist(); return; }
     if (m.kind === "live_data") {
@@ -418,6 +420,10 @@ class SpettroPanel extends HTMLElement {
         .cardfold { margin-left:auto; padding:2px 10px; font-size:16px; line-height:1; min-width:34px; }
         .card.folded > :not(.cardhead) { display:none !important; }
         .card.folded > .cardhead { margin:0 !important; }
+        .led { display:inline-block; width:9px; height:9px; border-radius:50%; margin-left:8px; vertical-align:middle;
+               background:#555; flex:none; transition:background .2s; }
+        .led.on { background:#2ecc40; box-shadow:0 0 6px #2ecc40; animation:ledblink 1.1s ease-in-out infinite; }
+        @keyframes ledblink { 0%,100% { opacity:1; } 50% { opacity:.25; } }
         label.selfreq { display:flex; align-items:center; gap:6px; white-space:nowrap; }
         label.selfreq input { width:130px; }
         h4.sub { margin:14px 0 2px; font-size:14px; font-weight:500; border-top:1px solid var(--divider-color); padding-top:10px; }
@@ -533,7 +539,7 @@ class SpettroPanel extends HTMLElement {
       <div class="content">
         <div class="maincol">
         <div class="card ana" id="anacard">
-            <h3 style="margin:0">Analisi segnale</h3>
+            <h3 style="margin:0">Analisi segnale<span class="led" id="analed" title="Ascolto in diretta attivo"></span></h3>
             <div class="row">
               <label class="selfreq" title="Frequenza da analizzare: si prende dal clic sul grafico o si scrive qui (Invio per confermare)">MHz
                 <input id="selfreq" type="text" inputmode="decimal" placeholder="es. 99.6" autocomplete="off"></label>
@@ -578,7 +584,7 @@ class SpettroPanel extends HTMLElement {
           <div class="hint">Trascina sul grafico per ingrandire, doppio clic per tornare all'intervallo completo.</div>
         </div>
         <div class="card" id="dabcard">
-          <h3 style="margin:0">📻 Radio DAB+</h3>
+          <h3 style="margin:0">📻 Radio DAB+<span class="led" id="dabled" title="DAB in ascolto o ricerca in corso"></span></h3>
           <div class="hint">I multiplex vicini (es. 12A–12D) nello spettro si fondono in un unico blocco e la scansione può
             non vederli tutti: la ricerca prova ogni canale della banda III (5A–13F, circa un minuto, scansione sospesa) e
             ne legge nome e radio. Il risultato resta salvato.</div>
@@ -586,7 +592,7 @@ class SpettroPanel extends HTMLElement {
           <div id="dablist"></div>
         </div>
         <div class="card" id="adsbcard">
-          <h3 style="margin:0">✈️ Aerei (ADS-B)</h3>
+          <h3 style="margin:0">✈️ Aerei (ADS-B)<span class="led" id="adsbled" title="Ricezione aerei attiva"></span></h3>
           <div class="hint">La chiavetta resta su 1090 MHz e raccoglie gli aerei che trasmettono in chiaro la loro posizione
             (ADS-B): volo, quota, velocità e distanza da te. La scansione è sospesa mentre è attivo. Serve un'antenna per i
             1090 MHz (un'antennina corta, ~6,9 cm, va bene).</div>
@@ -595,6 +601,7 @@ class SpettroPanel extends HTMLElement {
             <label class="chk" title="Tiene la chiavetta su 1090 MHz anche quando chiudi il pannello, finché non lo fermi"><input type="checkbox" id="adsbcont"> Resta attivo a pannello chiuso</label>
             <label class="chk" title="Scarica da internet (adsbdb.com) modello, immatricolazione, compagnia e rotta partenza→arrivo"><input type="checkbox" id="adsbonline"> Dettagli da internet</label>
             <label class="chk" title="Tieni in uno storico i voli intercettati (con la traccia); si cancellano da soli dopo 24 ore"><input type="checkbox" id="adsbrec"> Registra storico</label>
+            <label class="chk" title="Fa partire gli aerei da solo quando si avvia Home Assistant (resta attivo tra i riavvii). Se un'altra funzione usa la stessa chiavetta, l'ultima avviata ferma l'altra."><input type="checkbox" id="adsbauto"> Avvia all'avvio di HA</label>
             <span class="hint" id="adsbstat"></span>
           </div>
           <canvas id="adsbradar" style="display:none;width:100%;max-width:420px;margin:10px auto 0;aspect-ratio:1"></canvas>
@@ -602,7 +609,7 @@ class SpettroPanel extends HTMLElement {
           <div id="adsbhist"></div>
         </div>
         <div class="card" id="ismcard">
-          <h3 style="margin:0">📟 Sensori ISM (rtl_433)</h3>
+          <h3 style="margin:0">📟 Sensori ISM (rtl_433)<span class="led" id="ismled" title="Ricezione sensori attiva"></span></h3>
           <div class="hint">Riceve i sensori senza fili — stazioni meteo, termometri/igrometri, TPMS delle auto, contatti… — a
             433/868/315 MHz. Scorre a ciclo le frequenze della lista: si sintonizza, ascolta per qualche secondo, poi passa
             alla successiva (i sensori stanno su bande diverse). Conviene dargli una <b>chiavetta dedicata</b> (Impostazioni →
@@ -620,6 +627,7 @@ class SpettroPanel extends HTMLElement {
           <div id="ismfreqs" class="row" style="margin-top:6px;flex-wrap:wrap;gap:6px"></div>
           <div class="row" style="margin-top:6px;align-items:center">
             <button class="primary" id="ismbtn">▶ Avvia</button>
+            <label class="chk" title="Fa partire i sensori ISM da soli quando si avvia Home Assistant (resta attivo tra i riavvii). Se un'altra funzione usa la stessa chiavetta, l'ultima avviata ferma l'altra."><input type="checkbox" id="ismauto"> Avvia all'avvio di HA</label>
             <span class="hint" id="ismstat"></span>
           </div>
           <label class="chk" style="margin-top:8px" title="Mostra l'elenco dei messaggi decodificati. Toglila per non riempire il pannello di righe."><input type="checkbox" id="ismlog"> Visualizza log</label>
@@ -648,7 +656,7 @@ class SpettroPanel extends HTMLElement {
           </div>
         </div>
         <div class="card" id="meteocard">
-          <h3 style="margin:0">🛰️ Satelliti meteo e immagini</h3>
+          <h3 style="margin:0">🛰️ Satelliti meteo e immagini<span class="led" id="meteoled" title="Ricezione satellitare in corso"></span></h3>
           <div id="meteolive"></div>
           <h4 class="sub">Satelliti in passaggio</h4>
           <div class="hint">Meteor e ISS si ricevono solo quando passano sopra di te: ecco i prossimi passaggi. Con le caselle la
@@ -950,6 +958,12 @@ class SpettroPanel extends HTMLElement {
       try { localStorage.setItem("spettro_ismlog", e.target.checked ? "1" : "0"); } catch (err) { /* memoria non disponibile */ }
       this._renderIsmSensors();
     });
+    const saveAuto = async () => {
+      try { await this._hass.callWS({ type: "spettro/autostart", adsb_autostart: $("adsbauto").checked, ism_autostart: $("ismauto").checked }); }
+      catch (err) { this._msg(err.message || String(err), true); }
+    };
+    $("adsbauto").addEventListener("change", saveAuto);
+    $("ismauto").addEventListener("change", saveAuto);
     $("mqttsave").addEventListener("click", async () => {
       const pass = $("mqttpass").value;
       const msg = {
@@ -1704,6 +1718,7 @@ class SpettroPanel extends HTMLElement {
     this._updateFavBtn();
     if (!digital) $("livemode").value = live.mode;
     this._liveTitle();
+    this._updateLeds();
   }
 
   _liveTitle() {
@@ -2244,6 +2259,24 @@ class SpettroPanel extends HTMLElement {
     if (m.error) { el.textContent = "⚠ " + m.error; el.className = "hint err"; return; }
     el.className = "hint";
     el.textContent = m.connected ? `✓ collegato a ${m.host}` : `collegamento a ${m.host}…`;
+  }
+
+  _fillAuto(s) {
+    if (!s) return;
+    for (const [id, k] of [["adsbauto", "adsb_autostart"], ["ismauto", "ism_autostart"]]) {
+      const e = this.shadowRoot.getElementById(id);
+      if (e && this.shadowRoot.activeElement !== e) e.checked = !!s[k];
+    }
+  }
+
+  // LED verdi accanto ai titoli: lampeggiano quando quella funzione è attiva
+  _updateLeds() {
+    const set = (id, on) => { const e = this.shadowRoot.getElementById(id); if (e) e.classList.toggle("on", !!on); };
+    set("analed", !!this._live && this._live.mode !== "dab");
+    set("adsbled", !!this._adsb);
+    set("ismled", !!this._ismOn);
+    set("meteoled", !!this._meteoKey);
+    set("dabled", (this._dabScan && !this._dabScan.done) || (this._live && this._live.mode === "dab"));
   }
 
   _renderDabScan() {
