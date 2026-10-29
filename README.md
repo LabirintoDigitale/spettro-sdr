@@ -32,6 +32,11 @@ Integrazione custom per **Home Assistant** che trasforma una chiavetta RTL-SDR c
 - **Aerei (ADS-B)**: gli aerei sui 1090 MHz, con radar e distanza da casa. Vedi [Aerei](#aerei-ads-b-1090-mhz).
 - **FT8 e WSPR**: i messaggi digitali dei radioamatori di tutto il mondo, con la distanza di chi trasmette. Vedi [Modi digitali](#modi-digitali-ft8-e-wspr).
 - **SSTV e radiofax**: immagini dalla ISS e dai radioamatori (SSTV) e carte del tempo in onde corte (radiofax DWD), con ascolto continuo e galleria. Onde corte con il direct sampling della chiavetta. Vedi [Immagini dalla radio](#immagini-dalla-radio-sstv-e-radiofax).
+- **Sensori ISM (rtl_433)**: stazioni meteo, termometri/igrometri, pluviometri, anemometri, TPMS delle auto, contatti… a 433/868/315 MHz, decodificati con `rtl_433` (incluso). Una lista di frequenze scorsa a ciclo e la durata d'ascolto su ognuna. Vedi [Sensori ISM](#sensori-ism-rtl_433).
+- **Plugin**: funzioni aggiuntive di terze parti che si innestano nell'analisi in diretta; Spettro fornisce il canale (audio, IQ grezzo o banda base pronta per PSK/FSK) e il plugin mostra un pannello HTML e/o manda audio. Con esempi inclusi. Vedi [Plugin](#plugin-funzioni-aggiuntive).
+- **Pubblicazione su MQTT**: manda sensori ISM, aerei e foto satellitari al tuo broker Mosquitto con l'**auto-discovery di Home Assistant**: compaiono da soli come entità (con unità e grafici). Vedi [MQTT](#pubblicazione-su-mqtt).
+- **Più chiavette**: ascolto, aerei e sensori ISM si possono assegnare a chiavette (rtl_tcp) diverse, così girano in parallelo senza fermare la scansione. Vedi [Più chiavette](#più-chiavette-una-per-funzione).
+- **A colpo d'occhio e automatico**: un **LED verde** accanto al titolo dei blocchi si accende quando quella funzione è attiva; **Aerei** e **Sensori ISM** possono partire da soli all'avvio di Home Assistant (*Avvia all'avvio di HA*), e restano attivi tra i riavvii.
 - **Preferiti**: con il cuoricino ♡ accanto ad *Analizza* la frequenza selezionata (dal grafico o dall'archivio) entra nei preferiti e il cuore diventa ❤. La scheda *Preferiti* li elenca con il nome: quello RDS per le radio FM, altrimenti *NONAME 1*, *NONAME 2*…; con ✏ lo cambi a mano (un nome scritto da te non viene mai sostituito dall'RDS; lasciandolo vuoto torna automatico). Toccando la riga si seleziona la frequenza, ▶ avvia l'analisi continua, ❤ la toglie. I preferiti sono salvati in Home Assistant, quindi uguali su telefono e computer.
 - **Analisi continua (in diretta)**: dal pulsante *▶ Analisi continua* o dai preferiti la chiavetta resta sintonizzata fissa sulla frequenza (la scansione si sospende e alla fine riparte, solo se era attiva) e il pannello mostra in diretta la cascata che scorre, il livello del segnale e l'**audio** (FM larga, FM stretta o AM, con *Ascolta*/*Muto*). Per le radio FM l'**RDS si aggiorna** ogni secondo, con lo storico dei testi ricevuti (titoli, conduttori…). In diretta si usa 1,024 MS/s (circa 2 MB/s in rete); l'elaborazione avviene sul computer di Home Assistant. Se tutti i pannelli vengono chiusi l'analisi continua si ferma da sola dopo 30 s, per liberare la chiavetta.
 - **Ascolto**: la registrazione viene demodulata in FM larga (radio), FM stretta (voce) e AM (in onde corte anche USB, LSB e CW); il pannello propone la più adatta in un lettore audio e si può passare alle altre.
@@ -248,6 +253,48 @@ Per ogni aereo, **senza internet**, si ricavano anche la **compagnia** (dalle pr
 Sul radar ogni aereo lascia una **scia** che svanisce dietro di sé, così si vede da dove arriva e dove sta andando; con i dettagli online compare anche la **foto reale** dell'aereo accanto al volo. Un aereo sparisce dopo un minuto che non si sente. Se mentre il radar è attivo inizia un passaggio di un satellite meteo (Meteor automatico, o ISS), l'ADS-B **si sospende da solo** per lasciare la chiavetta al satellite e **riprende automaticamente** alla fine del passaggio.
 
 **Storico dei voli.** Con la spunta **Registra storico** i voli intercettati (con la loro traccia) vengono salvati; si cancellano da soli dopo 24 ore. Nella sezione **Storico voli** li rivedi con compagnia, rotta, orario, distanza minima e numero di punti, puoi **mostrare sul radar** le tracce dei voli che selezioni (con **Mostra tutti sul radar** / **Nessuno**) — anche a ricevitore spento — e **🗑 Svuota storico** cancella tutto. Lo storico è salvato su disco (`spettro_adsb_history.json`); la traccia registra **ogni posizione ricevuta** (fedele come la scia in diretta). In pratica occupa pochi MB (un volo tipico qualche decina di KB); limiti: 24 ore, 800 voli, 3000 punti per traccia. La posizione viene calcolata da un solo messaggio usando la posizione della stazione (da Home Assistant). Con l'opzione **Resta attivo a pannello chiuso** la chiavetta resta su 1090 MHz finché non premi **■ Ferma**; altrimenti si ferma da sola poco dopo aver chiuso il pannello. Due **sensori** — *Aerei in vista* e *Aereo più vicino* (con volo, quota e distanza negli attributi) — si possono usare in dashboard e automazioni. Il decoder (preambolo a impulsi, 112 bit, CRC a 24 bit, posizione CPR) è lo stesso usato nelle analisi.
+
+## Sensori ISM (rtl_433)
+
+Il blocco **📟 Sensori ISM (rtl_433)** riceve i dispositivi senza fili che trasmettono in chiaro sulle bande ISM — **stazioni meteo** (temperatura, umidità, vento, direzione, raffica, pioggia, irraggiamento solare, UV), **termometri/igrometri**, **TPMS** (pressione gomme), **contatti porta/finestra**, telecomandi e [centinaia di altri modelli](https://triq.org/rtl_433/) — usando il programma **`rtl_433`**, già incluso nell'integrazione (binario x86-64 statico; su altre architetture basta metterne uno in `/config/spettro_plugins/bin/rtl_433` o nel PATH).
+
+I sensori non stanno tutti su una frequenza: la più usata è **433,92 MHz**, le stazioni meteo più recenti (Fine Offset/Ecowitt) stanno su **868,3/868,35 MHz**, i TPMS di auto estere su **315 MHz**. Per questo si dà a Spettro una **lista di frequenze** (con l'aggiunta rapida dei valori comuni) e una **durata d'ascolto** per ognuna: la chiavetta scorre a ciclo — si sintonizza, ascolta per quei secondi, passa alla successiva. I sensori trasmettono a raffiche ogni 16–60 s, quindi conviene una durata ≥ 30 s. I messaggi decodificati compaiono in una lista (con una casella **Visualizza log** per nasconderli se non servono) con modello, id e tutte le misure in unità metriche.
+
+Conviene dare all'ISM una **chiavetta dedicata** (vedi [Più chiavette](#più-chiavette-una-per-funzione)): così riceve i sensori h24 mentre continui a usare la scansione. Con **Avvia all'avvio di HA** parte da solo a ogni riavvio. I sensori si possono anche pubblicare come entità di Home Assistant via [MQTT](#pubblicazione-su-mqtt).
+
+## Plugin (funzioni aggiuntive)
+
+Chi vuole può aggiungere **funzioni proprie** senza modificare Spettro, con dei plugin che si innestano nel blocco **Analisi segnale** come una voce in più del menu di decodifica. Quando selezioni un plugin, Spettro sintonizza la frequenza, demodula e passa al plugin — blocco per blocco — i dati del canale; il plugin restituisce un **pannello HTML** da mostrare e/o l'**audio** da far sentire (come il DAB).
+
+Un plugin sceglie che dati ricevere:
+
+- **audio** — l'audio demodulato (float, 32 kHz);
+- **iq** — l'IQ grezzo dell'intero blocco (complesso, 1,024 MS/s);
+- **baseband** — il canale **già a banda base** (portante a 0), filtrato e decimato alla frequenza che chiede: pronto per demodulare π/4-DQPSK, FSK, PSK… senza doversi riportare a zero il segnale.
+
+Un plugin è un file `.py` nella cartella **`/config/spettro_plugins/`** (persistente tra gli aggiornamenti; lì metti i tuoi). I plugin **inclusi** nella release stanno dentro l'integrazione e si aggiornano da soli:
+
+- **esempio · misuratore di livello** (`esempio_livello.py`) — ingresso *audio*, mostra livello e picco: il modello più semplice;
+- **esempio · canale baseband** (`esempio_baseband.py`) — ingresso *baseband*, mostra campionamento e potenza del canale;
+- **🧩 Sensori ISM (rtl_433)** (`rtl433.py`) — decodifica i sensori ISM con `rtl_433` (la stessa cosa del blocco nativo, ma come plugin, utile come esempio d'uso del *baseband*).
+
+Il pulsante **🔄** nel blocco Analisi segnale ricarica i plugin dalla cartella senza riavviare. L'HTML di un plugin è mostrato in modo isolato nel pannello. ⚠️ Un plugin è **codice Python eseguito dentro Home Assistant**, con i suoi permessi: installa solo plugin di cui ti fidi. La documentazione dell'interfaccia è nel `README.md` dentro la cartella dei plugin.
+
+## Pubblicazione su MQTT
+
+Il blocco **📡 Pubblica su MQTT** collega Spettro al tuo broker **Mosquitto** (IP, porta, utente, password) e pubblica con l'**auto-discovery di Home Assistant**: le cose scelte compaiono **da sole come entità** in HA, con unità, `device_class` e grafici. Con le caselle scegli cosa pubblicare:
+
+- **Sensori ISM** — una entità sensore per ogni misura (temperatura, umidità, vento, pioggia, irraggiamento…), raggruppate per dispositivo;
+- **Aerei** — una entità *Ultimo aereo* aggiornata a ogni nuovo volo, col volo negli attributi;
+- **Foto meteo/ISS** — due entità **immagine** con l'ultima foto Meteor e l'ultima SSTV dell'ISS.
+
+I dati seguono lo schema di topic `spettro/<tipo>/<lettura>` (es. `spettro/ism/<modello>_<id>/stato`, `spettro/adsb/ultimo/stato`, `spettro/foto/meteo/immagine`). Perché l'auto-discovery crei le entità, il broker dev'essere **quello usato da Home Assistant**. La password non viene mai rimandata al pannello.
+
+## Più chiavette (una per funzione)
+
+Di base tutto usa un'unica chiavetta (rtl_tcp) e una funzione alla volta. In **Impostazioni → Avanzate → Chiavette separate** puoi dare a **Ascolto** (Analisi continua, DAB/TV/SAT, puntamento), **Aerei** e **Sensori ISM** un IP+porta a scelta. Se li lasci vuoti usano la chiavetta principale (come prima); se metti l'indirizzo di un'altra chiavetta, quella funzione la usa in parallelo e **non ferma le altre**. La regola «una cosa alla volta» vale **solo tra funzioni sulla stessa chiavetta** — stesso IP **e** porta (anche solo porta diversa = chiavetta diversa, utile quando sullo stesso PC giri più `rtl_tcp`, uno per dongle: `rtl_tcp -d 0 -p 1234`, `rtl_tcp -d 1 -p 1235`, …).
+
+Così, per esempio, puoi scansionare di continuo mentre ricevi gli aerei su una seconda chiavetta e i sensori meteo su una terza. Sulla stessa chiavetta, invece, l'ultima funzione avviata ferma la precedente.
 
 ## Puntamento dell'antenna e satelliti UHF
 
