@@ -11,6 +11,7 @@ Solo numpy. Le formule CPR e il CRC sono quelle dello standard (DO-260 / ICAO An
 
 from __future__ import annotations
 
+import contextlib
 import math
 import time
 from typing import Any
@@ -19,7 +20,23 @@ import numpy as np
 
 from . import adsb_db
 
+# La ricostruzione ai minimi quadrati usa BLAS, che per default si spalma su TUTTI i core
+# (su una macchina multi-core = CPU al 200%+ e load altissimo durante lo scan aerei). La
+# limitiamo a un solo thread: più prevedibile e, su matrici piccole come queste, anche più
+# veloce. threadpoolctl è leggero (puro Python) ed è tra i requirements; se manca, nessun
+# limite (i tetti MAX_REFINE/MAX_CAND bastano comunque a non far esplodere il lavoro).
+try:
+    from threadpoolctl import threadpool_limits
+
+    def _un_solo_core():
+        return threadpool_limits(limits=1)
+except Exception:  # pragma: no cover - threadpoolctl non installato
+    def _un_solo_core():
+        return contextlib.nullcontext()
+
 RATE = 2_400_000  # campionamento del ricevitore ADS-B in diretta (≥ 2 MS/s)
+MAX_REFINE = 64  # max ricostruzioni ai minimi quadrati per blocco (0,25 s): tetto anti-saturazione CPU
+MAX_CAND = 400  # max candidati preambolo elaborati per blocco (si tengono i più forti): ~1600/s
 PATH_MAX = 3000  # punti massimi della traccia di un volo (una posizione ~2/s → copre ~25 min interi)
 FREQ = 1_090_000_000.0
 _CHARS = "#ABCDEFGHIJKLMNOPQRSTUVWXYZ##### ###############0123456789######"
@@ -134,6 +151,14 @@ def decode_frames(iq: np.ndarray, rate: int, offset_hz: float = 0.0, carry_us: f
     lo /= len(q)
     noise = float(np.median(m)) + 1e-9
     cand = np.nonzero((hi > 1.8 * lo) & (hi > 3 * noise))[0]
+    # un vero preambolo accende più campioni adiacenti: tieni solo il picco di ogni gruppo. Senza questo,
+    # con segnale/rumore forte si elaborano migliaia di candidati quasi identici (e la ricostruzione ai
+    # minimi quadrati, pesante, satura la CPU su tutti i core).
+    if len(cand) > 1:
+        brk = np.nonzero(np.diff(cand) > int(us))[0] + 1
+        cand = np.array([g[int(np.argmax(hi[g]))] for g in np.split(cand, brk)], dtype=cand.dtype)
+    if len(cand) > MAX_CAND:  # ambiente affollato/disturbato: elabora solo i candidati più forti
+        cand = np.sort(cand[np.argsort(hi[cand])[-MAX_CAND:]])
     h = 0.5 * us
     nchip = 224
     base = float(np.median(m))
@@ -157,32 +182,37 @@ def decode_frames(iq: np.ndarray, rate: int, offset_hz: float = 0.0, carry_us: f
         soft = chips[0::2] - chips[1::2]
         return _fix((soft > 0).astype(int).tolist(), np.abs(soft))
 
-    for c in cand:
-        if c - last < int(100 * us):
-            continue
-        bits = None
-        for shift in (0.0, -0.2, 0.2):
-            t0 = c + shift + 8 * us
-            if int(t0 + 112 * us) + 1 >= len(m):
-                break
-            if fast:
-                # filtro veloce: decisione dura ai centri dei mezzi bit; la parte pesante
-                # (ricostruzione) parte solo se il tipo (DF) è giusto ma il CRC no
-                a = m[(t0 + bit_c + 0.25 * us).astype(np.int64)]
-                b = m[(t0 + bit_c + 0.75 * us).astype(np.int64)]
-                hard = (a > b).astype(np.int64)
-                if (hard[0] << 4 | hard[1] << 3 | hard[2] << 2 | hard[3] << 1 | hard[4]) not in (17, 18):
-                    continue
-                hl = hard.tolist()
-                if _crc24(hl) == 0:
-                    bits = hl
+    refines = 0  # tetto alle ricostruzioni pesanti per blocco: le trame pulite passano comunque dal CRC
+    with _un_solo_core():  # niente fan-out BLAS su tutti i core durante la ricostruzione
+        for c in cand:
+            if c - last < int(100 * us):
+                continue
+            bits = None
+            for shift in (0.0, -0.2, 0.2):
+                t0 = c + shift + 8 * us
+                if int(t0 + 112 * us) + 1 >= len(m):
                     break
-            bits = refine(t0)
+                if fast:
+                    # filtro veloce: decisione dura ai centri dei mezzi bit; la parte pesante
+                    # (ricostruzione) parte solo se il tipo (DF) è giusto ma il CRC no
+                    a = m[(t0 + bit_c + 0.25 * us).astype(np.int64)]
+                    b = m[(t0 + bit_c + 0.75 * us).astype(np.int64)]
+                    hard = (a > b).astype(np.int64)
+                    if (hard[0] << 4 | hard[1] << 3 | hard[2] << 2 | hard[3] << 1 | hard[4]) not in (17, 18):
+                        continue
+                    hl = hard.tolist()
+                    if _crc24(hl) == 0:
+                        bits = hl
+                        break
+                if refines >= MAX_REFINE:  # limite di sicurezza: non far saturare la CPU in ambienti affollati
+                    continue
+                refines += 1
+                bits = refine(t0)
+                if bits is not None:
+                    break
             if bits is not None:
-                break
-        if bits is not None:
-            out.append(bits)
-            last = c
+                out.append(bits)
+                last = c
     return out
 
 
