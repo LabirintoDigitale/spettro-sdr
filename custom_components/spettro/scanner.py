@@ -46,10 +46,17 @@ CMD_SET_SAMPLE_RATE = 0x02
 CMD_SET_GAIN_MODE = 0x03
 CMD_SET_GAIN = 0x04
 CMD_SET_FREQ_CORRECTION = 0x05
+CMD_SET_TESTMODE = 0x07
 CMD_SET_AGC_MODE = 0x08
 CMD_SET_DIRECT_SAMPLING = 0x09
 HF_MAX_HZ = 24e6  # sotto questa frequenza (onde corte) si usa il direct sampling, se attivo
 DIRECT_SETTLE_S = 0.3  # campioni scartati dopo un cambio di direct sampling
+# Segnaposto dopo un cambio di frequenza: per un attimo la chiavetta in test mode manda un contatore
+MARK_S = 0.02  # durata del contatore
+MARK_RUN = 512  # byte consecutivi cresciuti di 1 che lo riconoscono (impossibile in un segnale vero)
+MARK_PROBE_S = 3.0  # secondi di campioni in cui cercarlo la prima volta: se non c'è, il server non lo supporta
+MARK_MAX_S = 10.0  # secondi di campioni in cui cercarlo su un server che lo supporta (coda lunga di rtl_tcp)
+MARK_RETRY_S = 600  # un server senza segnaposto si riprova dopo un po' (la prima prova può essere sfortunata)
 
 TUNER_NAMES = {
     0: "Sconosciuto",
@@ -66,6 +73,7 @@ FFT_SIZES = [256, 512, 1024, 2048, 4096]
 
 READ_LIMIT = 64 * 1024  # buffer dello StreamReader
 RCV_BUF = 128 * 1024  # buffer socket piccolo: meno campioni "vecchi" dopo un cambio frequenza
+STALE_BYTES = RCV_BUF + 2 * READ_LIMIT  # campioni vecchi nei buffer locali (scarto fisso senza segnaposto)
 USABLE_FRACTION = 0.75  # parte centrale della banda tenuta (i bordi sono attenuati dal filtro)
 AVERAGES = 16  # FFT mediate per ogni passo
 MAX_POINTS = 6000  # punti massimi inviati al pannello (riduzione con max-hold, i picchi restano)
@@ -250,6 +258,36 @@ async def probe(host: str, port: int) -> str:
     return TUNER_NAMES.get(tuner, f"Tipo {tuner}")
 
 
+async def _read_some(reader: asyncio.StreamReader) -> bytes:
+    """Legge quel che è arrivato (fino a READ_LIMIT) senza spezzare una coppia I/Q: un numero dispari di
+    byte sfaserebbe I e Q in tutte le letture successive (spettro rovesciato attorno al centro)."""
+    chunk = await reader.read(READ_LIMIT)
+    if len(chunk) % 2:
+        chunk += await reader.readexactly(1)
+    return chunk
+
+
+def find_mark_end(step: np.ndarray, run: int, inside: bool) -> tuple[int | None, int, bool]:
+    """Cerca in un blocco la fine del contatore del test mode (vedi SpectrumScanner._wait_mark).
+
+    step[i] dice se il byte i vale il precedente + 1. Restituisce l'indice del primo byte dopo il
+    contatore (None se non è finito in questo blocco), più la serie crescente in corso e se si è dentro
+    al contatore, da passare alla chiamata per il blocco successivo.
+    """
+    breaks = np.flatnonzero(~step)
+    if inside:
+        return (int(breaks[0]), 0, False) if len(breaks) else (None, 0, True)
+    # lunghezza delle serie crescenti tra un'interruzione e l'altra (la prima continua quella del blocco prima)
+    bounds = np.concatenate(([-1], breaks, [len(step)]))
+    lens = np.diff(bounds) - 1
+    lens[0] += run
+    hit = np.flatnonzero(lens >= MARK_RUN)
+    if not len(hit):
+        return None, int(lens[-1]), False
+    end = int(bounds[hit[0] + 1])
+    return (end, 0, False) if end < len(step) else (None, 0, True)
+
+
 def compute_psd(raw: bytes, fft_size: int, window: np.ndarray, norm: float) -> np.ndarray:
     """Spettro di potenza in dBFS (fftshift: frequenze negative a sinistra)."""
     a = np.frombuffer(raw, dtype=np.uint8).astype(np.float32) - 127.5
@@ -385,6 +423,9 @@ class SpectrumScanner:
         self._locks: dict[tuple[str, int], asyncio.Lock] = {}
         self._direct: dict[int, int] = {}  # direct sampling attivo per connessione (chiave id(writer))
         self._rates: dict[int, int] = {}   # sample rate per connessione (chiave id(writer))
+        self._mark_ok: set[Any] = set()  # server (peername) che mandano il segnaposto dopo la sintonia
+        self._mark_off: dict[Any, float] = {}  # server senza segnaposto -> quando lo si è visto (monotonic)
+        self._marked: set[int] = set()  # connessioni (id(reader)) appena passate il segnaposto
         self._floor_prev: tuple[tuple[float, float, int], np.ndarray] | None = None  # rumore dell'ultima scansione
         self._listeners: list[Callable[[dict[str, Any]], None]] = []
         self._task: asyncio.Task | None = None
@@ -709,7 +750,7 @@ class SpectrumScanner:
         loop = asyncio.get_running_loop()
         found: list[dict[str, Any]] = []
         chans = list(dab.CHANNELS.items())
-        discard = RCV_BUF + 2 * READ_LIMIT + int(dab.RATE * 2 * max(self.settings.settle_ms, 100) / 1000)
+        discard = STALE_BYTES + int(dab.RATE * 2 * max(self.settings.settle_ms, 100) / 1000)
         discard -= discard % 2
         server = self._server("scan")
         await self._adsb_yield(resume=False, server=server)
@@ -734,7 +775,7 @@ class SpectrumScanner:
                         while not job.done():
                             try:
                                 async with asyncio.timeout(0.1):
-                                    await reader.read(READ_LIMIT)
+                                    await _read_some(reader)
                             except TimeoutError:
                                 pass
                         res = await job
@@ -776,7 +817,7 @@ class SpectrumScanner:
         await self._adsb_yield(resume=False, server=server)
         rate = int(self.settings.sample_rate)
         capture_bytes = int(rate * min(duration_s, ANALYSIS_MAX_S)) * 2
-        discard_bytes = RCV_BUF + 2 * READ_LIMIT + int(rate * 2 * max(self.settings.settle_ms, 100) / 1000)
+        discard_bytes = STALE_BYTES + int(rate * 2 * max(self.settings.settle_ms, 100) / 1000)
         discard_bytes -= discard_bytes % 2
         center = self._tune_center(freq_hz, rate)
         self.analyzing = True
@@ -901,7 +942,7 @@ class SpectrumScanner:
                 if done:
                     break
                 async with asyncio.timeout(IO_TIMEOUT):
-                    if not await reader.read(READ_LIMIT):
+                    if not await _read_some(reader):
                         raise ConnectionError("Connessione chiusa dal server")
             result, png, audio = job.result()
             result["scan_snr_db"] = scan_snr  # quanto stava sopra il rumore nella scansione
@@ -916,8 +957,16 @@ class SpectrumScanner:
         finally:
             self._set_status(auto_mhz=None)
 
+    async def _discard(self, reader: asyncio.StreamReader, nbytes: int) -> None:
+        """Scarta i campioni dopo la sintonia: nbytes = STALE_BYTES + assestamento. Se il segnaposto è
+        già passato i buffer vecchi sono già stati letti, e resta solo l'assestamento."""
+        if id(reader) in self._marked:
+            self._marked.discard(id(reader))
+            nbytes = max(0, nbytes - STALE_BYTES)
+        await self._skip(reader, nbytes)
+
     @staticmethod
-    async def _discard(reader: asyncio.StreamReader, nbytes: int) -> None:
+    async def _skip(reader: asyncio.StreamReader, nbytes: int) -> None:
         remaining = nbytes
         while remaining > 0:
             chunk = await reader.read(min(remaining, READ_LIMIT))
@@ -1066,7 +1115,7 @@ class SpectrumScanner:
         data_task: asyncio.Task | None = None
         last_data = loop.time()
         log = self._log_start("ISS", "iss", auto) if title == "ISS" else None
-        discard = RCV_BUF + 2 * READ_LIMIT + int(LIVE_RATE * 2 * max(self.settings.settle_ms, 100) / 1000)
+        discard = STALE_BYTES + int(LIVE_RATE * 2 * max(self.settings.settle_ms, 100) / 1000)
         discard -= discard % 2
         rds_task: asyncio.Task | None = None
         fails = 0  # errori di connessione consecutivi (azzerati appena arrivano campioni)
@@ -1181,7 +1230,7 @@ class SpectrumScanner:
         server = self._server("live")
         ch = dab.channel_for(freq_hz / 1e6)
         center = ch[1] * 1e6 if ch else freq_hz
-        discard = RCV_BUF + 2 * READ_LIMIT + int(dab.RATE * 2 * max(self.settings.settle_ms, 100) / 1000)
+        discard = STALE_BYTES + int(dab.RATE * 2 * max(self.settings.settle_ms, 100) / 1000)
         discard -= discard % 2
         rx = DabLiveReceiver(sid)
         self.last_slide = None
@@ -1466,7 +1515,7 @@ class SpectrumScanner:
         freqs = list(self.ism_status["freqs"])
         dwell = float(self.ism_status["dwell_s"])
         chunk = rate // 4 * 2  # ~0,25 s di byte
-        discard = RCV_BUF + 2 * READ_LIMIT + int(rate * 2 * max(self.settings.settle_ms, 100) / 1000)
+        discard = STALE_BYTES + int(rate * 2 * max(self.settings.settle_ms, 100) / 1000)
         discard -= discard % 2
         rtl = ism.Rtl433(rate)
         if rtl.err:
@@ -1540,7 +1589,7 @@ class SpectrumScanner:
         server = self._server("adsb")
         tracker = self.adsb_tracker
         rate = adsb_mod.RATE
-        discard = RCV_BUF + 2 * READ_LIMIT + int(rate * 2 * max(self.settings.settle_ms, 100) / 1000)
+        discard = STALE_BYTES + int(rate * 2 * max(self.settings.settle_ms, 100) / 1000)
         discard -= discard % 2
         tail = b""
         last_emit = 0.0
@@ -1665,7 +1714,7 @@ class SpectrumScanner:
         server = self._server("live")
         rate = LIVE_RATE
         center = float(round(freq_hz + rate / 8))
-        discard = RCV_BUF + 2 * READ_LIMIT + int(rate * 2 * max(self.settings.settle_ms, 100) / 1000)
+        discard = STALE_BYTES + int(rate * 2 * max(self.settings.settle_ms, 100) / 1000)
         discard -= discard % 2
         chunk = int(rate * 0.2) * 2
 
@@ -1694,7 +1743,7 @@ class SpectrumScanner:
                         job = loop.run_in_executor(None, work, raw)
                         while not job.done():
                             async with asyncio.timeout(IO_TIMEOUT):
-                                if not await reader.read(READ_LIMIT):
+                                if not await _read_some(reader):
                                     raise ConnectionError("Connessione chiusa dal server")
                             await asyncio.sleep(0)
                         level, peak, row = job.result()
@@ -1741,7 +1790,7 @@ class SpectrumScanner:
             name, center_mhz, bw = dvbt.channel_for(freq_hz / 1e6) or ("?", freq_hz / 1e6, 8)
         center = center_mhz * 1e6
         rate = dab.RATE
-        discard = RCV_BUF + 2 * READ_LIMIT + int(rate * 2 * max(self.settings.settle_ms, 100) / 1000)
+        discard = STALE_BYTES + int(rate * 2 * max(self.settings.settle_ms, 100) / 1000)
         discard -= discard % 2
         chunk = int(rate * TV_LIVE_S) * 2
         known: dict[str, Any] | None = None
@@ -1770,7 +1819,7 @@ class SpectrumScanner:
                         # durante il calcolo si scartano i campioni in arrivo: la misura dopo è fresca
                         while not job.done():
                             async with asyncio.timeout(IO_TIMEOUT):
-                                if not await reader.read(READ_LIMIT):
+                                if not await _read_some(reader):
                                     raise ConnectionError("Connessione chiusa dal server")
                             await asyncio.sleep(0)
                         m, row, level = job.result()
@@ -1916,7 +1965,7 @@ class SpectrumScanner:
         self._emit({"kind": "meteo_live", **self.meteo_rx})
         rate = weather.IN_RATE
         chunk = rate // 4 * 2  # 0,25 s
-        discard = RCV_BUF + 2 * READ_LIMIT + int(rate * 2 * max(self.settings.settle_ms, 100) / 1000)
+        discard = STALE_BYTES + int(rate * 2 * max(self.settings.settle_ms, 100) / 1000)
         discard -= discard % 2
         rx: weather.MeteorReceiver | None = None
         log = self._log_start(p["satellite"], "meteor", bool(p.get("auto")))
@@ -2165,6 +2214,7 @@ class SpectrumScanner:
 
         Cambiare il direct sampling reinizializza il sintonizzatore: il guadagno torna quello di
         fabbrica e per qualche istante i campioni non valgono. Si reimposta il guadagno e si scartano.
+        Poi si scarta tutto fino al segnaposto (_wait_mark): da lì i campioni sono della nuova frequenza.
         """
         mode = self.settings.hf_sampling if freq_hz < HF_MAX_HZ else 0
         changed = self._direct.get(id(writer), -1) != mode
@@ -2173,9 +2223,62 @@ class SpectrumScanner:
             self._direct[id(writer)] = mode
             await self._set_gain(writer)
         await self._send(writer, CMD_SET_FREQ, int(round(freq_hz)))
+        rate = self._rates.get(id(writer), self.settings.sample_rate)
+        await self._wait_mark(reader, writer, rate)
         if changed:
-            rate = self._rates.get(id(writer), self.settings.sample_rate)
-            await self._discard(reader, int(rate * 2 * DIRECT_SETTLE_S) // 2 * 2)
+            await self._skip(reader, int(rate * 2 * DIRECT_SETTLE_S) // 2 * 2)
+
+    async def _wait_mark(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, rate: int) -> None:
+        """Scarta i campioni fino al segnaposto mandato subito dopo il cambio di frequenza.
+
+        rtl_tcp accoda i campioni che il client non legge subito (anche secondi, mentre si calcola o si
+        aggiorna il pannello): uno scarto fisso non basta a sapere dove finisce la frequenza vecchia, che
+        finiva in cima alle analisi. Si accende per un attimo il test mode della chiavetta, in cui al posto
+        dei campioni esce un contatore (ogni byte vale il precedente + 1), e si scarta tutto fino alla sua
+        fine: rtl_tcp esegue i comandi in ordine, quindi ciò che segue è già della nuova frequenza.
+        Un server che non conosce il comando non manda il contatore: si torna allo scarto fisso.
+        """
+        peer = writer.get_extra_info("peername")
+        known = peer in self._mark_ok
+        if not known and time.monotonic() - self._mark_off.get(peer, -MARK_RETRY_S) < MARK_RETRY_S:
+            return
+        await self._send(writer, CMD_SET_TESTMODE, 1)
+        await asyncio.sleep(MARK_S)
+        await self._send(writer, CMD_SET_TESTMODE, 0)
+        budget = int(rate * 2 * (MARK_MAX_S if known else MARK_PROBE_S))
+        pos, last, run, inside = 0, -1, 0, False
+        try:
+            async with asyncio.timeout(IO_TIMEOUT):
+                while pos < budget:
+                    chunk = await _read_some(reader)  # sempre pari: si resta allineati a I/Q
+                    if not chunk:
+                        raise ConnectionError("Connessione chiusa dal server")
+                    a = np.frombuffer(chunk, np.uint8)
+                    prev = np.empty_like(a)
+                    prev[0] = max(last, 0)
+                    prev[1:] = a[:-1]
+                    step = (a - prev) == 1  # in uint8 255 -> 0 vale +1, come nel contatore
+                    if last < 0:
+                        step[0] = False
+                    last = int(a[-1])
+                    pos += len(chunk)
+                    end, run, inside = find_mark_end(step, run, inside)
+                    if end is not None:
+                        # il resto del blocco dopo il contatore è già nuova frequenza: va nell'assestamento
+                        self._mark_ok.add(peer)
+                        self._mark_off.pop(peer, None)
+                        self._marked.add(id(reader))
+                        return
+        except TimeoutError:
+            pass
+        if not known:
+            log = _LOGGER.debug if peer in self._mark_off else _LOGGER.info  # nel log una volta sola
+            self._mark_off[peer] = time.monotonic()
+            log("Il server rtl_tcp %s non supporta il test mode: dopo la sintonia si usa uno "
+                         "scarto fisso, e in cima alle analisi possono restare campioni della frequenza "
+                         "precedente", peer)
+        else:
+            _LOGGER.debug("Segnaposto dopo la sintonia non trovato su %s", peer)
 
     async def _configure(self, writer: asyncio.StreamWriter, rate: int) -> None:
         """Sample rate, correzione ppm e guadagno presi dalle impostazioni."""
@@ -2223,7 +2326,7 @@ class SpectrumScanner:
         window = np.hanning(n).astype(np.float32)
         norm = float((127.5 * window.sum()) ** 2)
         capture_bytes = n * AVERAGES * 2
-        discard_bytes = RCV_BUF + 2 * READ_LIMIT + int(rate * 2 * s.settle_ms / 1000)
+        discard_bytes = STALE_BYTES + int(rate * 2 * s.settle_ms / 1000)
         discard_bytes -= discard_bytes % 2
 
         spectrum = np.empty(steps * keep, dtype=np.float32)
