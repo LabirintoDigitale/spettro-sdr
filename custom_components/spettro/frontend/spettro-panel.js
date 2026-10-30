@@ -1,7 +1,7 @@
 // Pannello "Spettro" per Home Assistant: grafico dello spettro, waterfall e picchi.
 
 // deve coincidere con VERSION in const.py: se il backend ne riporta un'altra manca un riavvio
-const PANEL_VERSION = "1.60.1";
+const PANEL_VERSION = "1.61.0";
 
 const PRESETS = [
   ["Personalizzato", null, null],
@@ -64,6 +64,7 @@ const LIVE_DECODERS = [
   ["ft8", "Messaggi FT8", ["usb"]],
   ["wspr", "Radiofari WSPR", ["usb"]],
   ["dati", "Riconosci e decodifica dati (FSK, DMR, POCSAG, APRS…)", ["nfm"]],
+  ["lora", "LoRa / MeshCore (nodi, SNR, ripetitori)", ["nfm", "am", "usb", "lsb", "cw", "wfm"]],
 ];
 const TEXT_DECODERS = ["cw", "rtty45", "rtty50"];
 const SLOT_DECODERS = ["ft8", "wspr"]; // periodi UTC: continuano anche a pannello chiuso
@@ -344,6 +345,13 @@ class SpettroPanel extends HTMLElement {
       this._live.data_protocols = m.protocols;
       this._dataNow = m;
       this._renderData();
+      return;
+    }
+    if (m.kind === "live_lora") {
+      if (!this._live || this._live.decoder !== "lora") return;
+      this._live.lora_log = (this._live.lora_log || []).concat(m.new).slice(-100);
+      this._live.lora = { nodes: m.nodes, heard: m.heard, stats: m.stats };
+      this._renderLora();
       return;
     }
     if (m.kind === "digi_log") { this._digiLog = m.log; this._renderDigi(); return; }
@@ -1694,6 +1702,9 @@ class SpettroPanel extends HTMLElement {
     else if (live.decoder === "dati") {
       if (!was || was.decoder !== live.decoder || was.freq_mhz !== live.freq_mhz) { this._dataNow = null; $("liveimg").innerHTML = ""; }
       this._renderData();
+    } else if (live.decoder === "lora") {
+      if (!was || was.decoder !== live.decoder || was.freq_mhz !== live.freq_mhz) $("liveimg").innerHTML = "";
+      this._renderLora();
     } else if (SLOT_DECODERS.includes(live.decoder)) {
       if (!was || was.decoder !== live.decoder || was.freq_mhz !== live.freq_mhz) { this._digiNote = null; $("liveimg").innerHTML = ""; this._renderDigi(); }
     } else if (TEXT_DECODERS.includes(live.decoder)) {
@@ -1835,7 +1846,7 @@ class SpettroPanel extends HTMLElement {
     // si muove), così non dipende da _setLive né dall'ordine dei messaggi. Un doppio contatore mostra
     // quanti frame arrivano in tutto e quanti portano l'output del plugin. Protetto da try/catch.
     const dec = this._live && this._live.decoder;
-    const isPlugin = dec && dec !== "sstv" && dec !== "fax" && dec !== "dati"
+    const isPlugin = dec && dec !== "sstv" && dec !== "fax" && dec !== "dati" && dec !== "lora"
       && !SLOT_DECODERS.includes(dec) && !TEXT_DECODERS.includes(dec);
     if (isPlugin) {
       try {
@@ -2320,6 +2331,59 @@ class SpettroPanel extends HTMLElement {
       ${prm ? `<table><tbody>${prm.map(([k, v]) => `<tr><td>${k}</td><td class="num">${esc(v)}</td></tr>`).join("")}</tbody></table>`
         : `<div class="hint" style="margin-top:6px">${now ? "In questo momento non c'è un segnale dati riconoscibile (silenzio, voce o rumore)." : "Prima misura tra un paio di secondi…"}</div>`}
       ${log.length ? `<pre class="livetext">${log.map((x) => `${hm(x.time)}  [${esc(x.protocol)}] ${esc(x.line)}`).join("\n")}</pre>` : ""}`;
+  }
+
+  _renderLora() {
+    const live = this._live;
+    if (!live || live.decoder !== "lora") return;
+    const el = this.shadowRoot.getElementById("liveimg");
+    const info = live.lora || {};
+    const st = info.stats || {};
+    const log = (live.lora_log || []).slice(-50).reverse();
+    const hm = (t) => new Date(t * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false });
+    const num = (v, d = 1) => (v == null ? "—" : Number(v).toLocaleString("it-IT", { maximumFractionDigits: d }));
+    const db = (v) => (v == null ? "—" : `${v > 0 ? "+" : ""}${num(v)} dB`);
+    const node = (h, name) => (h ? `${name ? `<b>${esc(name)}</b> ` : ""}<span class="hint">${esc(h)}</span>` : "?");
+    const last = log.find((x) => x.status === "ok") || log.find((x) => x.sf);
+    const sync = last && last.sync != null
+      ? ` · sync 0x${last.sync.toString(16).padStart(2, "0")}${last.sync === 0x12 ? " (MeshCore)" : last.sync === 0x2b ? " (Meshtastic)" : ""}` : "";
+    const phy = last ? `SF${last.sf} · ${num(last.bw_khz)} kHz${last.cr ? ` · CR ${last.cr}` : ""}${sync} · `
+      + `${num(last.freq_mhz, 4)} MHz (${last.offset_khz > 0 ? "+" : ""}${num(last.offset_khz)} kHz dalla sintonia)` : "";
+    const what = (x) => {
+      if (x.status === "illeggibile") return `<span class="hint">LoRa illeggibile${x.error ? ` (${esc(x.error)})` : ""}</span>`;
+      if (x.status === "crc") return `<span style="color:#e53935">CRC errato</span> <span class="hint">${x.len} byte</span>`;
+      return `${esc(x.label || x.type)}${x.route ? ` <span class="hint">${esc(x.route)}</span>` : ""}`;
+    };
+    const who = (x) => {
+      if (x.status !== "ok") return "";
+      if (x.type === "ADVERT") return `${node(x.src, x.name)}${x.node_type ? ` <span class="hint">${esc(x.node_type)}</span>` : ""}`;
+      if (x.channel) return `canale ${x.channel_name ? `<b>${esc(x.channel_name)}</b> ` : ""}<span class="hint">${esc(x.channel)}</span>`;
+      if (x.src || x.dst) return `${node(x.src, x.src_name)} → ${node(x.dst, x.dst_name)}`;
+      return "";
+    };
+    const hops = (x) => {
+      if (x.hop_snr) return (x.trace_route || []).map((h, i) => `${node(h, null)}${x.hop_snr[i] != null ? ` (${db(x.hop_snr[i])})` : ""}`).join(" › ") || "—";
+      if (!x.path) return "";
+      if (!x.path.length) return `<span class="hint">${x.route && x.route.startsWith("flood") ? "nessuno: sentito dal mittente" : "—"}</span>`;
+      return x.path.map((h, i) => node(h, x.path_names && x.path_names[i])).join(" › ");
+    };
+    const nodes = info.nodes || [];
+    const heard = info.heard || [];
+    el.innerHTML = `<h3 style="margin:10px 0 4px">LoRa / MeshCore</h3>
+      <div class="hint">Le raffiche LoRa entro circa ±90 kHz dalla sintonia si decodificano da sole (SF7–12, 62,5/125/250 kHz).
+        Di MeshCore si legge quello che viaggia in chiaro: annunci dei nodi e hash di mittente, destinatario e ripetitori;
+        i messaggi restano cifrati. «Sentiti direttamente» sono i nodi che hanno trasmesso proprio il pacchetto ricevuto qui.</div>
+      <div style="margin:6px 0">${st.ok || 0} pacchetti letti · ${st.crc_err || 0} con CRC errato · ${st.unreadable || 0} illeggibili${phy ? `<div class="hint">${phy}</div>` : ""}</div>
+      ${log.length ? `<div style="overflow-x:auto"><table class="digitab"><thead><tr><th>Ora</th><th>Tipo</th><th>Da → A</th><th>Ripetitori</th><th class="num">SNR</th><th class="num">Livello</th></tr></thead><tbody>
+        ${log.map((x) => `<tr><td class="num">${hm(x.time)}</td><td>${what(x)}</td><td>${who(x)}</td><td>${hops(x)}</td>
+          <td class="num">${db(x.snr)}</td><td class="num">${x.level_db == null ? "—" : `${num(x.level_db)} dBFS`}</td></tr>`).join("")}</tbody></table></div>`
+        : `<div class="hint" style="margin-top:6px">In ascolto: ancora nessuna raffica LoRa. MeshCore in Europa: 869,618 MHz, 62,5 kHz, SF8.</div>`}
+      ${heard.length ? `<h4 style="margin:10px 0 4px">Sentiti direttamente</h4><div style="overflow-x:auto"><table class="digitab"><thead><tr><th>Nodo</th><th>Come</th><th class="num">SNR</th><th class="num">Livello</th><th class="num">Pacchetti</th><th class="num">Ultimo</th></tr></thead><tbody>
+        ${heard.map((h) => `<tr><td>${node(h.hash, h.name)}</td><td>${h.repeater ? "ripetitore" : "mittente"}</td><td class="num">${db(h.snr)}</td>
+          <td class="num">${h.level_db == null ? "—" : `${num(h.level_db)} dBFS`}</td><td class="num">${h.count}</td><td class="num">${hm(h.last)}</td></tr>`).join("")}</tbody></table></div>` : ""}
+      ${nodes.length ? `<h4 style="margin:10px 0 4px">Nodi annunciati</h4><div style="overflow-x:auto"><table class="digitab"><thead><tr><th>Nome</th><th>ID</th><th>Tipo</th><th>Posizione</th><th class="num">Annunci</th><th class="num">Ultimo</th></tr></thead><tbody>
+        ${nodes.map((n) => `<tr><td><b>${esc(n.name || "—")}</b></td><td class="hint">${esc(n.id)}</td><td>${esc(n.node_type || "—")}</td>
+          <td>${n.lat != null ? `${num(n.lat, 5)}, ${num(n.lon, 5)}` : "—"}</td><td class="num">${n.count}</td><td class="num">${n.last ? hm(n.last) : "—"}</td></tr>`).join("")}</tbody></table></div>` : ""}`;
   }
 
   _renderDigi(note) {

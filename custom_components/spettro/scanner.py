@@ -26,7 +26,7 @@ import numpy as np
 from . import adsb as adsb_mod
 from . import adsb_db
 from . import adsb_online
-from . import dab, dvbt, ism, mqtt_pub, rds, satellite, slots, textdec, verify, weather
+from . import dab, dvbt, ism, lora, meshcore, mqtt_pub, rds, satellite, slots, textdec, verify, weather
 from .analysis import encode_png
 from .fax import FaxDecoder
 from .sstv import SstvDecoder, ToneTracker
@@ -105,6 +105,7 @@ LIVE_RETRY_MAX = 6  # come sopra, per l'analisi continua: un reset non la ferma,
 DATA_WINDOW_S = 2.0  # "Riconosci dati": finestra di IQ esaminata
 DATA_EVERY_S = 1.5  # ogni quanto (le finestre si sovrappongono: i pacchetti a cavallo non si perdono)
 TEXT_KEEP = 4000  # caratteri di testo decodificato tenuti nello stato (per chi apre il pannello dopo)
+LORA_LOG = 100  # pacchetti LoRa tenuti nello stato della diretta
 ANALYSIS_MAX_S = 5  # durata massima di una registrazione per l'analisi
 TV_LIVE_S = 0.4  # campioni di ogni misura del multiplex TV in diretta
 SPIKE_TOL_HZ = 100e3  # due picchi così vicini sono lo stesso segnale
@@ -412,6 +413,7 @@ class SpectrumScanner:
         self._meteo_done: set[tuple[int, float]] = set()  # passaggi già ricevuti (norad, aos)
         self.meteo_log: deque[dict[str, Any]] = deque(maxlen=15)  # ultime ricezioni dei satelliti
         self.digi_log: deque[dict[str, Any]] = deque(maxlen=DIGI_LOG)  # messaggi FT8/WSPR ricevuti (dal più vecchio)
+        self.mesh = meshcore.MeshTracker()  # nodi MeshCore sentiti (restano tra un'analisi e l'altra)
         self._ism_task: asyncio.Task | None = None  # ricevitore sensori ISM (rtl_433) a ciclo di frequenze
         self._ism_resume = False  # ISM da riavviare dopo che un'altra funzione libera la sua chiavetta
         self.ism_rows: deque[dict[str, Any]] = deque(maxlen=ISM_ROWS)  # ultimi sensori decodificati
@@ -1081,8 +1083,11 @@ class SpectrumScanner:
         slot = (slots.SlotDecoder(decoder, freq_hz, self.meteo.location if self.meteo else None)
                 if decoder in SLOT_DECODERS else None)
         center = float(round(freq_hz + LIVE_RATE / 8))
+        lora_rx = lora.LoraReceiver(int(LIVE_RATE), freq_hz - center) if decoder == "lora" else None
+        if lora_rx is not None and self.status["live"]:
+            self.status["live"].update(lora_log=[], lora=self.mesh.summary())
         builtin_dec = (decoder in IMAGE_DECODERS or decoder in SLOT_DECODERS
-                       or decoder in textdec.DECODERS or decoder == "dati")
+                       or decoder in textdec.DECODERS or decoder in ("dati", "lora"))
         pmeta = pluginhost.get(decoder)
         # se il decoder scelto non è predefinito ma non risulta caricato, riprovo a caricare i plugin
         # (es. cartella sincronizzata da poco): così la selezione funziona senza riavviare HA
@@ -1138,7 +1143,7 @@ class SpectrumScanner:
                                 async with asyncio.timeout(IO_TIMEOUT):
                                     raw = await reader.readexactly(CHUNK * 2)
                                 fails = 0  # arrivano campioni: azzera i tentativi di riconnessione
-                                out = await loop.run_in_executor(None, _live_chunk, demod, raw, img, text, slot, time.time(), plugin, plugin_iq, baseband)
+                                out = await loop.run_in_executor(None, _live_chunk, demod, raw, img, text, slot, time.time(), plugin, plugin_iq, baseband, lora_rx)
                                 if img is not None:
                                     await self._image_events(img, out)
                                 extra: dict[str, Any] = {}
@@ -1155,6 +1160,8 @@ class SpectrumScanner:
                                         data_task = loop.create_task(self._live_data(b"".join(data_raw), freq_hz - center))
                                         slot_tasks.add(data_task)
                                         data_task.add_done_callback(slot_tasks.discard)
+                                if out.get("lora"):
+                                    self._live_lora(out["lora"], freq_hz)
                                 if slot is not None:
                                     extra = {"digi": slot.status()}
                                     for start, seg in out["slots"]:
@@ -2143,6 +2150,19 @@ class SpectrumScanner:
                     "params_text": verify.params_text(res["params"]) if res["params"] else None,
                     "found": [v["kind"] for v in res["found"]], "new": new, "protocols": live["data_protocols"]})
 
+    def _live_lora(self, found: list[dict[str, Any]], freq_hz: float) -> None:
+        """Pacchetti LoRa appena ricevuti: righe per il pannello e nodi MeshCore aggiornati."""
+        live = self.status["live"]
+        if not live:
+            return
+        now = time.time()
+        new = [self.mesh.packet(res, freq_hz, now - res.get("end_s", 0)) for res in found]
+        log = live.setdefault("lora_log", [])
+        log.extend(new)
+        del log[:-LORA_LOG]
+        live["lora"] = self.mesh.summary()
+        self._emit({"kind": "live_lora", "new": new, **live["lora"]})
+
     async def _decode_slot(self, slot: slots.SlotDecoder, start: float, seg: np.ndarray) -> None:
         """Un periodo FT8/WSPR decodificato a parte: la lettura dei campioni non si ferma."""
         try:
@@ -2565,7 +2585,8 @@ class _Baseband:
 def _live_chunk(demod: LiveDemod, raw: bytes, img: _ImageListener | None = None,
                 text: textdec.MorseDecoder | textdec.RttyDecoder | None = None,
                 slot: slots.SlotDecoder | None = None, now: float = 0.0,
-                plugin: Any = None, plugin_iq: bool = False, baseband: Any = None) -> dict[str, Any]:
+                plugin: Any = None, plugin_iq: bool = False, baseband: Any = None,
+                lora_rx: lora.LoraReceiver | None = None) -> dict[str, Any]:
     """Un blocco di byte rtl_tcp elaborato dal demodulatore in diretta (nell'executor)."""
     a = np.frombuffer(raw, dtype=np.uint8).astype(np.float32) - 127.5
     iq = (a[0::2] + 1j * a[1::2]).astype(np.complex64)
@@ -2577,6 +2598,8 @@ def _live_chunk(demod: LiveDemod, raw: bytes, img: _ImageListener | None = None,
         out["text"] = text.feed(audio)
     if slot is not None:
         out["slots"] = slot.feed(audio, now)
+    if lora_rx is not None:
+        out["lora"] = lora_rx.feed(iq)
     if plugin is not None:
         samples = baseband.process(iq) if baseband is not None else (iq if plugin_iq else audio)
         try:
