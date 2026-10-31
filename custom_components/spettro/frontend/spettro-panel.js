@@ -1,7 +1,7 @@
 // Pannello "Spettro" per Home Assistant: grafico dello spettro, waterfall e picchi.
 
 // deve coincidere con VERSION in const.py: se il backend ne riporta un'altra manca un riavvio
-const PANEL_VERSION = "1.64.0";
+const PANEL_VERSION = "1.65.0";
 
 const PRESETS = [
   ["Personalizzato", null, null],
@@ -774,19 +774,31 @@ class SpettroPanel extends HTMLElement {
               </div>
               <label class="chk" style="margin-top:6px" title="Le analisi fatte a mano salvano sempre la registrazione grezza (circa 4 MB al secondo); le automatiche solo con questa opzione, perché riempirebbero il disco">
                 <input type="checkbox" id="saveiq"> Salva la registrazione IQ anche delle analisi automatiche</label>
-              <div class="hint" style="margin-top:12px">📡 <b>Chiavette separate</b> (rtl_tcp) — opzionale. Lascia vuoto per usare la chiavetta principale. Se metti l'IP (e porta) di un'altra chiavetta, quella funzione la userà in parallelo, senza fermare le altre. «Una cosa alla volta» vale solo tra funzioni sulla <b>stessa</b> chiavetta (stesso IP+porta; anche solo porta diversa = chiavetta diversa).</div>
+              <div class="hint" style="margin-top:12px">📡 <b>Chiavette separate</b> (rtl_tcp) — opzionale. Lascia vuoto per usare la chiavetta principale. Se metti l'IP (e porta) di un'altra chiavetta, quella funzione la userà in parallelo, senza fermare le altre. «Una cosa alla volta» vale solo tra funzioni sulla <b>stessa</b> chiavetta (stesso IP+porta; anche solo porta diversa = chiavetta diversa). <b>ppm/guadagno</b> per chiavetta: ogni RTL-SDR ha un errore di cristallo diverso — col ppm unico una seconda chiavetta può non agganciare il DAB. Vuoto = come la principale; guadagno «auto» = automatico, oppure dB (es. 30).</div>
               <div class="grid2" style="margin-top:4px">
                 <label title="Vale sia per la radio FM sia per l'ascolto delle stazioni DAB+ (la ricerca/scansione DAB+ usa invece la chiavetta principale)">Ascolto FM/DAB+ · IP<input id="livehost" type="text" placeholder="come principale" autocomplete="off"></label>
                 <label>Ascolto FM/DAB+ · porta<input id="liveport" type="number" step="1" min="0" max="65535" placeholder="0"></label>
+                <label>Ascolto · ppm<input id="liveppm" type="text" placeholder="come principale" autocomplete="off"></label>
+                <label>Ascolto · guadagno<input id="livegain" type="text" placeholder="come principale" autocomplete="off"></label>
                 <label>Aerei · IP<input id="adsbhost" type="text" placeholder="come principale" autocomplete="off"></label>
                 <label>Aerei · porta<input id="adsbport" type="number" step="1" min="0" max="65535" placeholder="0"></label>
+                <label>Aerei · ppm<input id="adsbppm" type="text" placeholder="come principale" autocomplete="off"></label>
+                <label>Aerei · guadagno<input id="adsbgain" type="text" placeholder="come principale" autocomplete="off"></label>
                 <label>Meteo · IP<input id="meteohost" type="text" placeholder="come principale" autocomplete="off"></label>
                 <label>Meteo · porta<input id="meteoport" type="number" step="1" min="0" max="65535" placeholder="0"></label>
+                <label>Meteo · ppm<input id="meteoppm" type="text" placeholder="come principale" autocomplete="off"></label>
+                <label>Meteo · guadagno<input id="meteogain" type="text" placeholder="come principale" autocomplete="off"></label>
                 <label>Sensori ISM · IP<input id="ismhost" type="text" placeholder="come principale" autocomplete="off"></label>
                 <label>Sensori ISM · porta<input id="ismport" type="number" step="1" min="0" max="65535" placeholder="0"></label>
+                <label>Sensori ISM · ppm<input id="ismppm" type="text" placeholder="come principale" autocomplete="off"></label>
+                <label>Sensori ISM · guadagno<input id="ismgain" type="text" placeholder="come principale" autocomplete="off"></label>
               </div>
-              <div class="hint" style="margin-top:12px">🔎 <b>Analisi chiavette</b> — interroga ogni chiavetta configurata (rtl_tcp) e mostra che chip/tuner è, quanti guadagni ha, la gamma di frequenza e se supporta DVB-T / DVB-T2.</div>
-              <div class="row" style="margin-top:4px"><button id="dongles">Analizza chiavette</button></div>
+              <div class="hint" style="margin-top:12px">🔎 <b>Analisi chiavette</b> — interroga ogni chiavetta configurata (rtl_tcp) e mostra che chip/tuner è, quanti guadagni ha, la gamma di frequenza e se supporta DVB-T / DVB-T2. Con <b>Prova ricezione</b> misura il livello su una frequenza: picco molto sopra il fondo = riceve; spettro piatto = antenna scollegata o segnale assente.</div>
+              <div class="row" style="margin-top:4px">
+                <button id="dongles">Analizza chiavette</button>
+                <input id="dongfreq" type="text" inputmode="decimal" placeholder="MHz (es. 100.0)" autocomplete="off" style="width:120px">
+                <button id="dongtest">Prova ricezione</button>
+              </div>
               <div id="donglesout" style="margin-top:6px"></div>
             </details>
             <div class="row" style="margin-top:10px">
@@ -807,7 +819,8 @@ class SpettroPanel extends HTMLElement {
 
     const form = ["start", "stop", "interval", "gain", "threshold", "viewonly", "autoana", "lnb", "reana", "archhours", "limstep", "maxstep", "limsweep", "maxsweep",
       "rate", "fft", "settle", "ppm", "anadur", "hfs", "saveiq",
-      "livehost", "liveport", "adsbhost", "adsbport", "meteohost", "meteoport", "ismhost", "ismport"];
+      "livehost", "liveport", "adsbhost", "adsbport", "meteohost", "meteoport", "ismhost", "ismport",
+      "liveppm", "livegain", "adsbppm", "adsbgain", "meteoppm", "meteogain", "ismppm", "ismgain"];
     for (const id of form) $(id).addEventListener("input", () => {
       this._formDirty = true;
       if (id === "start" || id === "stop") $("preset").value = "0";
@@ -822,6 +835,7 @@ class SpettroPanel extends HTMLElement {
     });
     $("apply").addEventListener("click", () => this._apply());
     $("dongles").addEventListener("click", () => this._analyzeDongles());
+    $("dongtest").addEventListener("click", () => this._testDongles());
     $("enabled").addEventListener("change", async (e) => {
       const enabled = e.target.checked;
       // spegnerla per sbaglio (un tocco mentre la pagina scorre) ferma tutto: si chiede conferma
@@ -1090,6 +1104,8 @@ class SpettroPanel extends HTMLElement {
     for (const [id, host, port] of [["live", s.live_host, s.live_port], ["adsb", s.adsb_host, s.adsb_port], ["meteo", s.meteo_host, s.meteo_port], ["ism", s.ism_host, s.ism_port]]) {
       if (this.shadowRoot.activeElement !== $(id + "host")) $(id + "host").value = host || "";
       if (this.shadowRoot.activeElement !== $(id + "port")) $(id + "port").value = port || "";
+      if (this.shadowRoot.activeElement !== $(id + "ppm")) $(id + "ppm").value = s[id + "_ppm"] || "";
+      if (this.shadowRoot.activeElement !== $(id + "gain")) $(id + "gain").value = s[id + "_gain"] || "";
     }
     this._syncLimits();
     const idx = PRESETS.findIndex((p) => p[1] === s.start_mhz && p[2] === s.stop_mhz);
@@ -1127,6 +1143,42 @@ class SpettroPanel extends HTMLElement {
       out.innerHTML = `<div class="hint err" style="margin-top:6px">Errore: ${esc(err.message || String(err))}</div>`;
     } finally {
       btn.disabled = false; btn.textContent = "Analizza chiavette";
+    }
+  }
+
+  async _testDongles() {
+    const $ = (id) => this.shadowRoot.getElementById(id);
+    const btn = $("dongtest"), out = $("donglesout");
+    const freq = parseFloat(($("dongfreq").value || "").replace(",", "."));
+    if (!(freq >= 0.5 && freq <= 2200)) { out.innerHTML = `<div class="hint err" style="margin-top:6px">Scrivi una frequenza in MHz (es. 100.0 per una FM forte, 194.064 per il DAB 7D, 1090 per gli aerei).</div>`; return; }
+    btn.disabled = true; btn.textContent = "Prova in corso…";
+    out.innerHTML = `<div class="hint">Misura del livello a ${freq} MHz su ogni chiavetta…</div>`;
+    try {
+      const res = await this._hass.callWS({ type: "spettro/dongle_signal", freq_mhz: freq });
+      const list = (res && res.chiavette) || [];
+      if (!list.length) { out.innerHTML = `<div class="hint">Nessuna chiavetta configurata.</div>`; return; }
+      out.innerHTML = list.map((d) => {
+        const addr = `${esc(d.host)}:${d.port}`;
+        const ruoli = (d.funzioni || []).map((f) => esc(f)).join(", ");
+        if (!d.ok) {
+          return `<div class="hint err" style="margin-top:6px"><b>${addr}</b> — non raggiungibile`
+            + (d.errore ? `: ${esc(d.errore)}` : "") + `<br><small>${ruoli}</small></div>`;
+        }
+        // sopra = quanto il picco supera il fondo: <6 dB piatto (no segnale), 6–15 debole, >15 buono
+        const sopra = d.sopra_db;
+        const col = sopra < 6 ? "var(--error-color,#e53935)" : sopra < 15 ? "var(--warning-color,#fb8c00)" : "var(--success-color,#4caf50)";
+        const giudizio = sopra < 6 ? "spettro piatto: antenna scollegata o nessun segnale qui"
+          : sopra < 15 ? "segnale debole" : "segnale presente";
+        return `<div class="hint" style="margin-top:6px">
+          <b>${addr}</b> a ${d.freq_mhz} MHz — <b style="color:${col}">${sopra} dB sopra il fondo</b> (${giudizio})<br>
+          <small>picco ${d.picco_db} dBFS · fondo ${d.fondo_db} dBFS · ${ruoli}</small>
+        </div>`;
+      }).join("")
+      + `<div class="hint" style="margin-top:8px"><small>ℹ️ Il livello dipende dalla frequenza scelta e dall'antenna. Prova una FM forte locale (es. 100 MHz) per capire se l'antenna riceve; per gli aerei prova 1090, per il DAB il centro del canale (es. 194.064).</small></div>`;
+    } catch (err) {
+      out.innerHTML = `<div class="hint err" style="margin-top:6px">Errore: ${esc(err.message || String(err))}</div>`;
+    } finally {
+      btn.disabled = false; btn.textContent = "Prova ricezione";
     }
   }
 
@@ -1168,6 +1220,10 @@ class SpettroPanel extends HTMLElement {
       meteo_port: parseInt($("meteoport").value, 10) || 0,
       ism_host: $("ismhost").value.trim(),
       ism_port: parseInt($("ismport").value, 10) || 0,
+      live_ppm: $("liveppm").value.trim(), live_gain: $("livegain").value.trim(),
+      adsb_ppm: $("adsbppm").value.trim(), adsb_gain: $("adsbgain").value.trim(),
+      meteo_ppm: $("meteoppm").value.trim(), meteo_gain: $("meteogain").value.trim(),
+      ism_ppm: $("ismppm").value.trim(), ism_gain: $("ismgain").value.trim(),
     };
     $("apply").disabled = true;
     try {

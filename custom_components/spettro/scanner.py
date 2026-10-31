@@ -161,6 +161,18 @@ class ScanSettings:
     meteo_port: int = 0
     ism_host: str = ""    # sensori ISM (rtl_433, 433/868/315 MHz)
     ism_port: int = 0
+    # Correzione (ppm) e guadagno per chiavetta dedicata: ogni RTL-SDR ha un errore di cristallo
+    # diverso (col ppm unico il DAB può non agganciare su una seconda chiavetta). Testo: vuoto = come
+    # la principale; per il guadagno "auto" = automatico, altrimenti dB (es. 30). Si usano solo quando
+    # la funzione ha una chiavetta dedicata; la principale usa sempre ppm/guadagno globali.
+    live_ppm: str = ""
+    live_gain: str = ""
+    adsb_ppm: str = ""
+    adsb_gain: str = ""
+    meteo_ppm: str = ""
+    meteo_gain: str = ""
+    ism_ppm: str = ""
+    ism_gain: str = ""
     # sensori ISM: frequenze (MHz) scorse a ciclo e secondi di ascolto su ognuna
     ism_freqs: list[float] = field(default_factory=lambda: [433.92, 868.3])
     ism_dwell_s: float = 30.0
@@ -485,6 +497,7 @@ class SpectrumScanner:
         self._locks: dict[tuple[str, int], asyncio.Lock] = {}
         self._direct: dict[int, int] = {}  # direct sampling attivo per connessione (chiave id(writer))
         self._rates: dict[int, int] = {}   # sample rate per connessione (chiave id(writer))
+        self._conn_gain: dict[int, float | None] = {}  # guadagno risolto per connessione (per chiavetta)
         self._mark_ok: set[Any] = set()  # server (peername) che mandano il segnaposto dopo la sintonia
         self._mark_off: dict[Any, float] = {}  # server senza segnaposto -> quando lo si è visto (monotonic)
         self._marked: set[int] = set()  # connessioni (id(reader)) appena passate il segnaposto
@@ -635,6 +648,38 @@ class SpectrumScanner:
             lock = self._locks[server] = asyncio.Lock()
         return lock
 
+    def _ppm_for(self, what: str) -> int:
+        """Correzione ppm per una funzione: override della chiavetta dedicata, se c'è, altrimenti globale."""
+        raw = (getattr(self.settings, f"{what}_ppm", "") or "").strip()
+        if raw:
+            try:
+                return int(round(float(raw.replace(",", "."))))
+            except ValueError:
+                pass
+        return int(self.settings.ppm)
+
+    def _gain_for(self, what: str) -> float | None:
+        """Guadagno (dB) per una funzione: override della chiavetta dedicata, se c'è, altrimenti globale.
+
+        Testo override: vuoto = come globale; "auto" = automatico (None); numero = quei dB.
+        """
+        raw = (getattr(self.settings, f"{what}_gain", "") or "").strip().lower()
+        if raw:
+            if raw in ("auto", "a"):
+                return None
+            try:
+                return float(raw.replace(",", "."))
+            except ValueError:
+                pass
+        return self.settings.gain_db
+
+    def _role_for_server(self, server: tuple[str, int]) -> str:
+        """Qual è la funzione che usa quella chiavetta (per ppm/guadagno della prova di ricezione)."""
+        for what in ("live", "adsb", "meteo", "ism"):
+            if self._server(what) == server:
+                return what
+        return "scan"
+
     async def analyze_dongles(self) -> list[dict[str, Any]]:
         """Analizza ogni chiavetta configurata: che chip è e cosa supporta.
 
@@ -659,6 +704,64 @@ class SpectrumScanner:
                 info = await analyze(*server)
             info["funzioni"] = funzioni
             out.append(info)
+        return out
+
+    async def test_signal(self, server: tuple[str, int], freq_mhz: float) -> dict[str, Any]:
+        """Prova di ricezione: sintonizza la chiavetta su freq_mhz e misura il livello del segnale.
+
+        Restituisce picco e fondo (rumore) in dBFS: se il picco supera il fondo di pochi dB lo spettro
+        è piatto (antenna scollegata/segnale assente); un picco netto = la chiavetta sta ricevendo.
+        """
+        what = self._role_for_server(server)
+        rate = 2_048_000
+        n = 1024
+        window = np.hanning(n).astype(np.float32)
+        norm = float((127.5 * window.sum()) ** 2)
+        discard = STALE_BYTES + int(rate * 2 * max(self.settings.settle_ms, 100) / 1000)
+        discard -= discard % 2
+        try:
+            async with self._lock(server):
+                reader, writer, _tuner = await _open(*server)
+                try:
+                    await self._configure(writer, rate, what)
+                    await self._tune(writer, freq_mhz * 1e6, reader)
+                    async with asyncio.timeout(IO_TIMEOUT):
+                        await self._discard(reader, discard)
+                        raw = await reader.readexactly(n * AVERAGES * 2)
+                finally:
+                    writer.close()
+                    try:
+                        await writer.wait_closed()
+                    except OSError:
+                        pass
+        except (OSError, asyncio.IncompleteReadError, TimeoutError, RtlTcpError) as err:
+            return {"host": server[0], "port": server[1], "ok": False, "errore": str(err) or type(err).__name__}
+        spec = compute_psd(raw, n, window, norm)
+        picco = float(np.max(spec))
+        fondo = float(np.median(spec))
+        return {
+            "host": server[0], "port": server[1], "ok": True,
+            "freq_mhz": round(float(freq_mhz), 4),
+            "picco_db": round(picco, 1),
+            "fondo_db": round(fondo, 1),
+            "sopra_db": round(picco - fondo, 1),  # picco sopra il rumore: pochi dB = piatto, netto = segnale
+        }
+
+    async def test_signal_all(self, freq_mhz: float) -> list[dict[str, Any]]:
+        """Prova di ricezione su ogni chiavetta distinta configurata, alla stessa frequenza."""
+        seen: set[tuple[str, int]] = set()
+        out: list[dict[str, Any]] = []
+        for what in ("scan", "live", "adsb", "meteo", "ism"):
+            srv = self._server(what)
+            if srv in seen:
+                continue
+            seen.add(srv)
+            res = await self.test_signal(srv, freq_mhz)
+            res["funzioni"] = [l for w, l in (
+                ("scan", "Scansione / ricerca DAB+"), ("live", "Ascolto in diretta (FM e DAB+)"),
+                ("adsb", "Aerei (ADS-B)"), ("meteo", "Meteo / satelliti"), ("ism", "Sensori ISM (433/868)"),
+            ) if self._server(w) == srv]
+            out.append(res)
         return out
 
     # --- pausa -------------------------------------------------------------
@@ -1217,7 +1320,7 @@ class SpectrumScanner:
                         reader, writer, tuner = await _open(*server)
                         try:
                             self.status["tuner"] = TUNER_NAMES.get(tuner, f"Tipo {tuner}")
-                            await self._configure(writer, LIVE_RATE)
+                            await self._configure(writer, LIVE_RATE, "live")
                             await self._tune(writer, center, reader)
                             async with asyncio.timeout(IO_TIMEOUT):
                                 await self._discard(reader, discard)
@@ -1335,7 +1438,7 @@ class SpectrumScanner:
                 reader, writer, tuner = await _open(*server)
                 try:
                     self.status["tuner"] = TUNER_NAMES.get(tuner, f"Tipo {tuner}")
-                    await self._configure(writer, dab.RATE)
+                    await self._configure(writer, dab.RATE, "live")
                     await self._tune(writer, center, reader)
                     async with asyncio.timeout(IO_TIMEOUT):
                         await self._discard(reader, discard)
@@ -1622,7 +1725,7 @@ class SpectrumScanner:
                     try:
                         reader, writer, _tuner = await _open(*server)
                         try:
-                            await self._configure(writer, rate)
+                            await self._configure(writer, rate, "ism")
                             while self._ism_task is not None:
                                 for fmhz in freqs:
                                     center = float(round(fmhz * 1e6))
@@ -1703,7 +1806,7 @@ class SpectrumScanner:
                         reader, writer, tuner = await _open(*server)
                         try:
                             self.status["tuner"] = TUNER_NAMES.get(tuner, f"Tipo {tuner}")
-                            await self._configure(writer, rate)
+                            await self._configure(writer, rate, "adsb")
                             await self._tune(writer, adsb_mod.FREQ, reader)
                             async with asyncio.timeout(IO_TIMEOUT):
                                 await self._discard(reader, discard)
@@ -1826,7 +1929,7 @@ class SpectrumScanner:
                 reader, writer, tuner = await _open(*server)
                 try:
                     self.status["tuner"] = TUNER_NAMES.get(tuner, f"Tipo {tuner}")
-                    await self._configure(writer, rate)
+                    await self._configure(writer, rate, "live")
                     await self._tune(writer, center, reader)
                     async with asyncio.timeout(IO_TIMEOUT):
                         await self._discard(reader, discard)
@@ -1901,7 +2004,7 @@ class SpectrumScanner:
                 reader, writer, tuner = await _open(*server)
                 try:
                     self.status["tuner"] = TUNER_NAMES.get(tuner, f"Tipo {tuner}")
-                    await self._configure(writer, rate)
+                    await self._configure(writer, rate, "live")
                     await self._tune(writer, center, reader)
                     async with asyncio.timeout(IO_TIMEOUT):
                         await self._discard(reader, discard)
@@ -2068,7 +2171,7 @@ class SpectrumScanner:
                 reader, writer, tuner = await _open(*server)
                 try:
                     self.status["tuner"] = TUNER_NAMES.get(tuner, f"Tipo {tuner}")
-                    await self._configure(writer, rate)
+                    await self._configure(writer, rate, "meteo")
                     fi = 0
                     last_preview = loop.time()
                     while True:
@@ -2386,24 +2489,24 @@ class SpectrumScanner:
         else:
             _LOGGER.debug("Segnaposto dopo la sintonia non trovato su %s", peer)
 
-    async def _configure(self, writer: asyncio.StreamWriter, rate: int) -> None:
-        """Sample rate, correzione ppm e guadagno presi dalle impostazioni."""
-        s = self.settings
+    async def _configure(self, writer: asyncio.StreamWriter, rate: int, what: str = "scan") -> None:
+        """Sample rate, correzione ppm e guadagno; ppm/guadagno sono per chiavetta (vedi _ppm_for/_gain_for)."""
         # stato per QUESTA connessione (chiave id(writer)): con più chiavette insieme non si pestano
         self._direct[id(writer)] = -1  # il direct sampling va reimpostato alla prima sintonia
         self._rates[id(writer)] = rate
+        self._conn_gain[id(writer)] = self._gain_for(what)  # guadagno della chiavetta di questa funzione
         await self._send(writer, CMD_SET_SAMPLE_RATE, rate)
-        await self._send(writer, CMD_SET_FREQ_CORRECTION, int(s.ppm))
+        await self._send(writer, CMD_SET_FREQ_CORRECTION, self._ppm_for(what))
         await self._set_gain(writer)
 
     async def _set_gain(self, writer: asyncio.StreamWriter) -> None:
-        s = self.settings
+        gain = self._conn_gain.get(id(writer), self.settings.gain_db)
         await self._send(writer, CMD_SET_AGC_MODE, 0)
-        if s.gain_db is None:
+        if gain is None:
             await self._send(writer, CMD_SET_GAIN_MODE, 0)
         else:
             await self._send(writer, CMD_SET_GAIN_MODE, 1)
-            await self._send(writer, CMD_SET_GAIN, int(round(s.gain_db * 10)))
+            await self._send(writer, CMD_SET_GAIN, int(round(gain * 10)))
 
     async def _sweep(self) -> None:
         server = self._server("scan")

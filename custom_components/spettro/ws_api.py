@@ -57,6 +57,7 @@ def async_setup(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, ws_mqtt_config)
     websocket_api.async_register_command(hass, ws_autostart)
     websocket_api.async_register_command(hass, ws_dongles)
+    websocket_api.async_register_command(hass, ws_dongle_signal)
     websocket_api.async_register_command(hass, ws_set_enabled)
     websocket_api.async_register_command(hass, ws_analyze)
     websocket_api.async_register_command(hass, ws_ask_ai)
@@ -145,6 +146,15 @@ def ws_subscribe(hass: HomeAssistant, connection: websocket_api.ActiveConnection
         vol.Optional("meteo_port"): vol.All(vol.Coerce(int), vol.Range(min=0, max=65535)),
         vol.Optional("ism_host"): vol.Any(None, str),
         vol.Optional("ism_port"): vol.All(vol.Coerce(int), vol.Range(min=0, max=65535)),
+        # ppm/guadagno per chiavetta dedicata (testo: vuoto = come principale; guadagno "auto" = automatico)
+        vol.Optional("live_ppm"): vol.Any(None, str),
+        vol.Optional("live_gain"): vol.Any(None, str),
+        vol.Optional("adsb_ppm"): vol.Any(None, str),
+        vol.Optional("adsb_gain"): vol.Any(None, str),
+        vol.Optional("meteo_ppm"): vol.Any(None, str),
+        vol.Optional("meteo_gain"): vol.Any(None, str),
+        vol.Optional("ism_ppm"): vol.Any(None, str),
+        vol.Optional("ism_gain"): vol.Any(None, str),
     }
 )
 @websocket_api.require_admin
@@ -244,6 +254,22 @@ async def ws_dongles(hass: HomeAssistant, connection: websocket_api.ActiveConnec
         connection.send_result(msg["id"], {"chiavette": await scanner.analyze_dongles()})
     except RuntimeError as err:
         connection.send_error(msg["id"], "dongles_failed", str(err))
+
+
+@websocket_api.websocket_command({
+    vol.Required("type"): "spettro/dongle_signal",
+    vol.Required("freq_mhz"): vol.All(vol.Coerce(float), vol.Range(min=0.5, max=2200)),
+})
+@websocket_api.async_response
+async def ws_dongle_signal(hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]) -> None:
+    """Prova di ricezione: misura il livello del segnale su ogni chiavetta alla frequenza data."""
+    _entry, scanner = _scanner(hass, connection, msg)
+    if scanner is None:
+        return
+    try:
+        connection.send_result(msg["id"], {"chiavette": await scanner.test_signal_all(msg["freq_mhz"])})
+    except RuntimeError as err:
+        connection.send_error(msg["id"], "dongle_signal_failed", str(err))
 
 
 @websocket_api.websocket_command({
