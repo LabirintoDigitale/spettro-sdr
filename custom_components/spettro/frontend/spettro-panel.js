@@ -1,7 +1,7 @@
 // Pannello "Spettro" per Home Assistant: grafico dello spettro, waterfall e picchi.
 
 // deve coincidere con VERSION in const.py: se il backend ne riporta un'altra manca un riavvio
-const PANEL_VERSION = "1.63.0";
+const PANEL_VERSION = "1.64.0";
 
 const PRESETS = [
   ["Personalizzato", null, null],
@@ -776,8 +776,8 @@ class SpettroPanel extends HTMLElement {
                 <input type="checkbox" id="saveiq"> Salva la registrazione IQ anche delle analisi automatiche</label>
               <div class="hint" style="margin-top:12px">📡 <b>Chiavette separate</b> (rtl_tcp) — opzionale. Lascia vuoto per usare la chiavetta principale. Se metti l'IP (e porta) di un'altra chiavetta, quella funzione la userà in parallelo, senza fermare le altre. «Una cosa alla volta» vale solo tra funzioni sulla <b>stessa</b> chiavetta (stesso IP+porta; anche solo porta diversa = chiavetta diversa).</div>
               <div class="grid2" style="margin-top:4px">
-                <label>Ascolto · IP<input id="livehost" type="text" placeholder="come principale" autocomplete="off"></label>
-                <label>Ascolto · porta<input id="liveport" type="number" step="1" min="0" max="65535" placeholder="0"></label>
+                <label title="Vale sia per la radio FM sia per l'ascolto delle stazioni DAB+ (la ricerca/scansione DAB+ usa invece la chiavetta principale)">Ascolto FM/DAB+ · IP<input id="livehost" type="text" placeholder="come principale" autocomplete="off"></label>
+                <label>Ascolto FM/DAB+ · porta<input id="liveport" type="number" step="1" min="0" max="65535" placeholder="0"></label>
                 <label>Aerei · IP<input id="adsbhost" type="text" placeholder="come principale" autocomplete="off"></label>
                 <label>Aerei · porta<input id="adsbport" type="number" step="1" min="0" max="65535" placeholder="0"></label>
                 <label>Meteo · IP<input id="meteohost" type="text" placeholder="come principale" autocomplete="off"></label>

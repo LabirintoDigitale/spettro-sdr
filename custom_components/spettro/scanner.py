@@ -643,8 +643,8 @@ class SpectrumScanner:
         viene interrogata sotto il suo lucchetto, così non disturba un'operazione in corso.
         """
         etichette = {
-            "scan": "Scansione / DAB+",
-            "live": "Ascolto in diretta",
+            "scan": "Scansione / ricerca DAB+",
+            "live": "Ascolto in diretta (FM e DAB+)",
             "adsb": "Aerei (ADS-B)",
             "meteo": "Meteo / satelliti",
             "ism": "Sensori ISM (433/868)",
