@@ -1,7 +1,7 @@
 // Pannello "Spettro" per Home Assistant: grafico dello spettro, waterfall e picchi.
 
 // deve coincidere con VERSION in const.py: se il backend ne riporta un'altra manca un riavvio
-const PANEL_VERSION = "1.61.0";
+const PANEL_VERSION = "1.62.0";
 
 const PRESETS = [
   ["Personalizzato", null, null],
@@ -782,7 +782,12 @@ class SpettroPanel extends HTMLElement {
                 <label>Aerei · porta<input id="adsbport" type="number" step="1" min="0" max="65535" placeholder="0"></label>
                 <label>Meteo · IP<input id="meteohost" type="text" placeholder="come principale" autocomplete="off"></label>
                 <label>Meteo · porta<input id="meteoport" type="number" step="1" min="0" max="65535" placeholder="0"></label>
+                <label>Sensori ISM · IP<input id="ismhost" type="text" placeholder="come principale" autocomplete="off"></label>
+                <label>Sensori ISM · porta<input id="ismport" type="number" step="1" min="0" max="65535" placeholder="0"></label>
               </div>
+              <div class="hint" style="margin-top:12px">🔎 <b>Analisi chiavette</b> — interroga ogni chiavetta configurata (rtl_tcp) e mostra che chip/tuner è, quanti guadagni ha, la gamma di frequenza e se supporta DVB-T / DVB-T2.</div>
+              <div class="row" style="margin-top:4px"><button id="dongles">Analizza chiavette</button></div>
+              <div id="donglesout" style="margin-top:6px"></div>
             </details>
             <div class="row" style="margin-top:10px">
               <button class="primary" id="apply">Applica</button>
@@ -802,7 +807,7 @@ class SpettroPanel extends HTMLElement {
 
     const form = ["start", "stop", "interval", "gain", "threshold", "viewonly", "autoana", "lnb", "reana", "archhours", "limstep", "maxstep", "limsweep", "maxsweep",
       "rate", "fft", "settle", "ppm", "anadur", "hfs", "saveiq",
-      "livehost", "liveport", "adsbhost", "adsbport", "meteohost", "meteoport"];
+      "livehost", "liveport", "adsbhost", "adsbport", "meteohost", "meteoport", "ismhost", "ismport"];
     for (const id of form) $(id).addEventListener("input", () => {
       this._formDirty = true;
       if (id === "start" || id === "stop") $("preset").value = "0";
@@ -816,6 +821,7 @@ class SpettroPanel extends HTMLElement {
       this._formDirty = true;
     });
     $("apply").addEventListener("click", () => this._apply());
+    $("dongles").addEventListener("click", () => this._analyzeDongles());
     $("enabled").addEventListener("change", async (e) => {
       const enabled = e.target.checked;
       // spegnerla per sbaglio (un tocco mentre la pagina scorre) ferma tutto: si chiede conferma
@@ -1081,13 +1087,45 @@ class SpettroPanel extends HTMLElement {
     $("maxstep").value = s.auto_max_per_step || 3;
     $("limsweep").checked = !!s.auto_limit_sweep;
     $("maxsweep").value = s.auto_max_per_sweep || 20;
-    for (const [id, host, port] of [["live", s.live_host, s.live_port], ["adsb", s.adsb_host, s.adsb_port], ["meteo", s.meteo_host, s.meteo_port]]) {
+    for (const [id, host, port] of [["live", s.live_host, s.live_port], ["adsb", s.adsb_host, s.adsb_port], ["meteo", s.meteo_host, s.meteo_port], ["ism", s.ism_host, s.ism_port]]) {
       if (this.shadowRoot.activeElement !== $(id + "host")) $(id + "host").value = host || "";
       if (this.shadowRoot.activeElement !== $(id + "port")) $(id + "port").value = port || "";
     }
     this._syncLimits();
     const idx = PRESETS.findIndex((p) => p[1] === s.start_mhz && p[2] === s.stop_mhz);
     $("preset").value = String(idx > 0 ? idx : 0);
+  }
+
+  async _analyzeDongles() {
+    const $ = (id) => this.shadowRoot.getElementById(id);
+    const btn = $("dongles"), out = $("donglesout");
+    btn.disabled = true; btn.textContent = "Analisi in corso…";
+    out.innerHTML = `<div class="hint">Interrogazione delle chiavette…</div>`;
+    try {
+      const res = await this._hass.callWS({ type: "spettro/dongles" });
+      const list = (res && res.chiavette) || [];
+      if (!list.length) { out.innerHTML = `<div class="hint">Nessuna chiavetta configurata.</div>`; return; }
+      out.innerHTML = list.map((d) => {
+        const addr = `${esc(d.host)}:${d.port}`;
+        const ruoli = (d.funzioni || []).map((f) => esc(f)).join(", ");
+        if (!d.ok) {
+          return `<div class="hint err" style="margin-top:6px"><b>${addr}</b> — non raggiungibile`
+            + (d.errore ? `: ${esc(d.errore)}` : "") + `<br><small>${ruoli}</small></div>`;
+        }
+        const si = `<span style="color:var(--success-color,#4caf50)">sì</span>`;
+        const no = `<span style="color:var(--error-color,#e53935)">no</span>`;
+        return `<div class="hint" style="margin-top:6px">
+          <b>${addr}</b> — tuner <b>${esc(d.tuner_nome)}</b> · demodulatore ${esc(d.demod)}<br>
+          Gamma di frequenza: ${esc(d.gamma)}<br>
+          Guadagni disponibili: ${d.guadagni} · DVB-T: ${d.dvbt ? si : no} · DVB-T2: ${d.dvbt2 ? si : no}<br>
+          <small>Usata per: ${ruoli}</small>
+        </div>`;
+      }).join("");
+    } catch (err) {
+      out.innerHTML = `<div class="hint err" style="margin-top:6px">Errore: ${esc(err.message || String(err))}</div>`;
+    } finally {
+      btn.disabled = false; btn.textContent = "Analizza chiavette";
+    }
   }
 
   async _apply() {
@@ -1126,6 +1164,8 @@ class SpettroPanel extends HTMLElement {
       adsb_port: parseInt($("adsbport").value, 10) || 0,
       meteo_host: $("meteohost").value.trim(),
       meteo_port: parseInt($("meteoport").value, 10) || 0,
+      ism_host: $("ismhost").value.trim(),
+      ism_port: parseInt($("ismport").value, 10) || 0,
     };
     $("apply").disabled = true;
     try {

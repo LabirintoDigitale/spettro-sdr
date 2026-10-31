@@ -56,6 +56,7 @@ def async_setup(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, ws_ism_config)
     websocket_api.async_register_command(hass, ws_mqtt_config)
     websocket_api.async_register_command(hass, ws_autostart)
+    websocket_api.async_register_command(hass, ws_dongles)
     websocket_api.async_register_command(hass, ws_set_enabled)
     websocket_api.async_register_command(hass, ws_analyze)
     websocket_api.async_register_command(hass, ws_ask_ai)
@@ -230,6 +231,19 @@ async def ws_ism(hass: HomeAssistant, connection: websocket_api.ActiveConnection
             connection.send_result(msg["id"], await scanner.ism_start())
     except RuntimeError as err:
         connection.send_error(msg["id"], "ism_failed", str(err))
+
+
+@websocket_api.websocket_command({vol.Required("type"): "spettro/dongles"})
+@websocket_api.async_response
+async def ws_dongles(hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]) -> None:
+    """Analizza le chiavette configurate: che chip/tuner sono e cosa supportano."""
+    _entry, scanner = _scanner(hass, connection, msg)
+    if scanner is None:
+        return
+    try:
+        connection.send_result(msg["id"], {"chiavette": await scanner.analyze_dongles()})
+    except RuntimeError as err:
+        connection.send_error(msg["id"], "dongles_failed", str(err))
 
 
 @websocket_api.websocket_command({

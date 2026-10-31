@@ -68,6 +68,16 @@ TUNER_NAMES = {
     6: "R828D",
 }
 
+# Gamma di frequenza indicativa per tipo di tuner (quello che il chip riesce a sintonizzare).
+TUNER_GAMMA = {
+    1: "52–2200 MHz (con un buco ~1100–1250 MHz)",
+    2: "22–948 MHz",
+    3: "22–1100 MHz",
+    4: "146–308 e 438–924 MHz (con un buco in mezzo)",
+    5: "24–1766 MHz",
+    6: "24–1766 MHz",
+}
+
 SAMPLE_RATES = [250_000, 1_024_000, 1_400_000, 1_800_000, 2_048_000, 2_400_000, 2_560_000, 2_880_000]
 FFT_SIZES = [256, 512, 1024, 2048, 4096]
 
@@ -287,6 +297,56 @@ def find_mark_end(step: np.ndarray, run: int, inside: bool) -> tuple[int | None,
         return None, int(lens[-1]), False
     end = int(bounds[hit[0] + 1])
     return (end, 0, False) if end < len(step) else (None, 0, True)
+
+
+async def analyze(host: str, port: int) -> dict[str, Any]:
+    """Interroga rtl_tcp e descrive la chiavetta: chip tuner, guadagni, gamma, DVB-T/T2.
+
+    L'header di rtl_tcp ('RTL0' + tipo tuner + numero guadagni) è l'unica cosa che il
+    protocollo espone. Il demodulatore è sempre un RTL2832U (è l'unico che rtl_tcp pilota):
+    nasce per il DVB-T, mentre il DVB-T2 non è supportato da questo chip. Qui comunque il
+    DVB-T lo demoduliamo via software dai campioni I/Q.
+    """
+    loop = asyncio.get_running_loop()
+    try:
+        infos = await loop.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+        family, type_, proto, _, addr = infos[0]
+        sock = socket.socket(family, type_, proto)
+        try:
+            sock.setblocking(False)
+            async with asyncio.timeout(CONNECT_TIMEOUT):
+                await loop.sock_connect(sock, addr)
+        except BaseException:
+            sock.close()
+            raise
+        reader, writer = await asyncio.open_connection(sock=sock, limit=READ_LIMIT)
+        try:
+            async with asyncio.timeout(CONNECT_TIMEOUT):
+                header = await reader.readexactly(12)
+        finally:
+            writer.close()
+            try:
+                await writer.wait_closed()
+            except OSError:
+                pass
+    except (OSError, asyncio.IncompleteReadError, TimeoutError) as err:
+        return {"host": host, "port": port, "ok": False, "errore": str(err) or type(err).__name__}
+    if header[:4] != b"RTL0":
+        return {"host": host, "port": port, "ok": False,
+                "errore": "Il server non parla il protocollo rtl_tcp"}
+    tuner, gains = struct.unpack(">II", header[4:])
+    return {
+        "host": host,
+        "port": port,
+        "ok": True,
+        "tuner": tuner,
+        "tuner_nome": TUNER_NAMES.get(tuner, f"Tipo {tuner}"),
+        "guadagni": int(gains),
+        "gamma": TUNER_GAMMA.get(tuner, "non nota"),
+        "demod": "RTL2832U",
+        "dvbt": True,   # il RTL2832U nasce per il DVB-T (qui demodulato via software)
+        "dvbt2": False, # il RTL2832U non supporta il DVB-T2
+    }
 
 
 def compute_psd(raw: bytes, fft_size: int, window: np.ndarray, norm: float) -> np.ndarray:
@@ -574,6 +634,32 @@ class SpectrumScanner:
         if lock is None:
             lock = self._locks[server] = asyncio.Lock()
         return lock
+
+    async def analyze_dongles(self) -> list[dict[str, Any]]:
+        """Analizza ogni chiavetta configurata: che chip è e cosa supporta.
+
+        Raggruppa le funzioni (scansione/DAB, diretta, aerei, meteo, sensori ISM) per
+        host+porta: più funzioni sulla stessa chiavetta compaiono insieme. Ogni chiavetta
+        viene interrogata sotto il suo lucchetto, così non disturba un'operazione in corso.
+        """
+        etichette = {
+            "scan": "Scansione / DAB+",
+            "live": "Ascolto in diretta",
+            "adsb": "Aerei (ADS-B)",
+            "meteo": "Meteo / satelliti",
+            "ism": "Sensori ISM (433/868)",
+        }
+        ruoli: dict[tuple[str, int], list[str]] = {}
+        for what, label in etichette.items():
+            server = self._server(what)
+            ruoli.setdefault(server, []).append(label)
+        out: list[dict[str, Any]] = []
+        for server, funzioni in ruoli.items():
+            async with self._lock(server):
+                info = await analyze(*server)
+            info["funzioni"] = funzioni
+            out.append(info)
+        return out
 
     # --- pausa -------------------------------------------------------------
 
