@@ -1,7 +1,7 @@
 // Pannello "Spettro" per Home Assistant: grafico dello spettro, waterfall e picchi.
 
 // deve coincidere con VERSION in const.py: se il backend ne riporta un'altra manca un riavvio
-const PANEL_VERSION = "1.62.0";
+const PANEL_VERSION = "1.63.0";
 
 const PRESETS = [
   ["Personalizzato", null, null],
@@ -1114,13 +1114,15 @@ class SpettroPanel extends HTMLElement {
         }
         const si = `<span style="color:var(--success-color,#4caf50)">sì</span>`;
         const no = `<span style="color:var(--error-color,#e53935)">no</span>`;
+        const t2 = `<span title="I dongle RTL-SDR usano il demodulatore RTL2832U, che non ha il DVB-T2. Un apparecchio con un vero DVB-T2 non parlerebbe rtl_tcp (si userebbe come scheda TV coi driver DVB).">${d.dvbt2 ? si : no}</span>`;
         return `<div class="hint" style="margin-top:6px">
           <b>${addr}</b> — tuner <b>${esc(d.tuner_nome)}</b> · demodulatore ${esc(d.demod)}<br>
           Gamma di frequenza: ${esc(d.gamma)}<br>
-          Guadagni disponibili: ${d.guadagni} · DVB-T: ${d.dvbt ? si : no} · DVB-T2: ${d.dvbt2 ? si : no}<br>
+          Guadagni disponibili: ${d.guadagni} · DVB-T: ${d.dvbt ? si : no} · DVB-T2: ${t2}<br>
           <small>Usata per: ${ruoli}</small>
         </div>`;
-      }).join("");
+      }).join("")
+      + `<div class="hint" style="margin-top:8px"><small>ℹ️ Via rtl_tcp la chiavetta espone solo tuner e numero di guadagni. Il demodulatore è sempre un RTL2832U (solo DVB-T, mai DVB-T2: un vero DVB-T2 non userebbe rtl_tcp). Per nome USB, seriale e sample rate supportati, sul PC dove è collegata la chiavetta (fermato rtl_tcp): <b>lsusb</b>, <b>rtl_test</b>, <b>rtl_eeprom</b>.</small></div>`;
     } catch (err) {
       out.innerHTML = `<div class="hint err" style="margin-top:6px">Errore: ${esc(err.message || String(err))}</div>`;
     } finally {
