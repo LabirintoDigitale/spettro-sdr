@@ -375,7 +375,7 @@ class FicState:
 def decode(iq: np.ndarray, rate: int, offset_hz: float = 0.0, keep_state: bool = False) -> dict[str, Any] | None:
     """Nome del multiplex e servizi da una registrazione centrata sul canale (offset_hz = centro DAB − centro)."""
     if rate != RATE:
-        return {"error": "serve la frequenza di campionamento 2,048 MS/s (Avanzate → Sample rate)"}
+        return {"error": "serve la frequenza di campionamento 2,048 MS/s (⚙ Impostazioni → Sample rate)"}
     x = iq.astype(np.complex64)
     if offset_hz:
         x = x * np.exp(-2j * np.pi * offset_hz * np.arange(len(x)) / RATE).astype(np.complex64)

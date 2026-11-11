@@ -83,6 +83,10 @@ FFT_SIZES = [256, 512, 1024, 2048, 4096]
 
 READ_LIMIT = 64 * 1024  # buffer dello StreamReader
 RCV_BUF = 128 * 1024  # buffer socket piccolo: meno campioni "vecchi" dopo un cambio frequenza
+# ascolto continuo (DAB+, FM…): buffer grande. Col TCP il flusso massimo è circa buffer/RTT: con 128 kB
+# e una chiavetta in rete (Wi-Fi, altro PC) 2,048 MS/s = 4 MB/s non passano, rtl_tcp butta via campioni e
+# il DAB non aggancia anche se la chiavetta risponde. Dopo la sintonia i campioni vecchi li toglie il segnaposto.
+STREAM_RCV_BUF = 2 * 1024 * 1024
 STALE_BYTES = RCV_BUF + 2 * READ_LIMIT  # campioni vecchi nei buffer locali (scarto fisso senza segnaposto)
 USABLE_FRACTION = 0.75  # parte centrale della banda tenuta (i bordi sono attenuati dal filtro)
 AVERAGES = 16  # FFT mediate per ogni passo
@@ -92,6 +96,7 @@ HISTORY = 60  # scansioni complete ricordate (cascata del pannello, stesso valor
 PARTIAL_EVERY = 1.5  # secondi tra un aggiornamento parziale e l'altro
 CONNECT_TIMEOUT = 8
 IO_TIMEOUT = 10
+STREAM_TEST_S = 2.0  # prova di ricezione: secondi di flusso continuo per misurare i campioni persi
 MIN_ERROR_RETRY = 10
 OPEN_RETRIES = 4  # rtl_tcp (spesso a client singolo) resetta una nuova connessione finché non ha
 OPEN_RETRY_DELAY = 0.5  # rilasciato la precedente: si riprova ad aprire dopo una breve attesa
@@ -219,7 +224,7 @@ class ScanPaused(Exception):
     """La scansione è stata messa in pausa mentre era in corso."""
 
 
-async def _open(host: str, port: int) -> tuple[asyncio.StreamReader, asyncio.StreamWriter, int]:
+async def _open(host: str, port: int, rcvbuf: int = RCV_BUF) -> tuple[asyncio.StreamReader, asyncio.StreamWriter, int]:
     """Apre la connessione a rtl_tcp, con qualche ritentativo se il server resetta.
 
     rtl_tcp accetta un solo client alla volta: quando si passa la chiavetta da un'operazione all'altra
@@ -229,7 +234,7 @@ async def _open(host: str, port: int) -> tuple[asyncio.StreamReader, asyncio.Str
     last: BaseException | None = None
     for attempt in range(OPEN_RETRIES):
         try:
-            return await _open_once(host, port)
+            return await _open_once(host, port, rcvbuf)
         except asyncio.CancelledError:
             raise
         except (ConnectionError, asyncio.IncompleteReadError, TimeoutError, RtlTcpError) as err:
@@ -241,14 +246,14 @@ async def _open(host: str, port: int) -> tuple[asyncio.StreamReader, asyncio.Str
     raise last
 
 
-async def _open_once(host: str, port: int) -> tuple[asyncio.StreamReader, asyncio.StreamWriter, int]:
+async def _open_once(host: str, port: int, rcvbuf: int = RCV_BUF) -> tuple[asyncio.StreamReader, asyncio.StreamWriter, int]:
     """Apre la connessione, legge l'header 'RTL0' e restituisce il tipo di tuner."""
     loop = asyncio.get_running_loop()
     infos = await loop.getaddrinfo(host, port, type=socket.SOCK_STREAM)
     family, type_, proto, _, addr = infos[0]
     sock = socket.socket(family, type_, proto)
     try:
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, RCV_BUF)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, rcvbuf)
         sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         sock.setblocking(False)
         async with asyncio.timeout(CONNECT_TIMEOUT):
@@ -688,8 +693,8 @@ class SpectrumScanner:
         viene interrogata sotto il suo lucchetto, così non disturba un'operazione in corso.
         """
         etichette = {
-            "scan": "Scansione / ricerca DAB+",
-            "live": "Ascolto in diretta (FM e DAB+)",
+            "scan": "Scansione",
+            "live": "Ascolto in diretta (FM e DAB+) e ricerca DAB+",
             "adsb": "Aerei (ADS-B)",
             "meteo": "Meteo / satelliti",
             "ism": "Sensori ISM (433/868)",
@@ -717,17 +722,34 @@ class SpectrumScanner:
         n = 1024
         window = np.hanning(n).astype(np.float32)
         norm = float((127.5 * window.sum()) ** 2)
-        discard = STALE_BYTES + int(rate * 2 * max(self.settings.settle_ms, 100) / 1000)
+        # col buffer grande, senza segnaposto, restano più campioni vecchi: si scarta anche quella parte
+        discard = STALE_BYTES + (STREAM_RCV_BUF - RCV_BUF) + int(rate * 2 * max(self.settings.settle_ms, 100) / 1000)
         discard -= discard % 2
         try:
             async with self._lock(server):
-                reader, writer, _tuner = await _open(*server)
+                reader, writer, _tuner = await _open(*server, STREAM_RCV_BUF)  # come l'ascolto: misura il flusso vero
                 try:
                     await self._configure(writer, rate, what)
                     await self._tune(writer, freq_mhz * 1e6, reader)
                     async with asyncio.timeout(IO_TIMEOUT):
                         await self._discard(reader, discard)
                         raw = await reader.readexactly(n * AVERAGES * 2)
+                    # flusso: quanti campioni arrivano davvero in STREAM_TEST_S. Se la rete (o l'host della
+                    # chiavetta) non ce la fa, rtl_tcp butta via buffer: la prova di livello passa ma il DAB
+                    # e l'ascolto continuo, che vogliono tutti i campioni, non agganciano
+                    got = 0
+                    async with asyncio.timeout(IO_TIMEOUT + STREAM_TEST_S + 1):
+                        t_warm = time.monotonic()  # prima si svuotano i buffer locali, che gonfierebbero la misura
+                        while time.monotonic() - t_warm < 0.3:
+                            if not await _read_some(reader):
+                                raise ConnectionError("Connessione chiusa dal server")
+                        t0 = time.monotonic()
+                        while (elapsed := time.monotonic() - t0) < STREAM_TEST_S:
+                            chunk = await _read_some(reader)
+                            if not chunk:
+                                raise ConnectionError("Connessione chiusa dal server")
+                            got += len(chunk)
+                    flusso = got / 2 / max(elapsed, 1e-3)
                 finally:
                     writer.close()
                     try:
@@ -739,12 +761,20 @@ class SpectrumScanner:
         spec = compute_psd(raw, n, window, norm)
         picco = float(np.max(spec))
         fondo = float(np.median(spec))
+        b = np.frombuffer(raw, np.uint8)
         return {
             "host": server[0], "port": server[1], "ok": True,
             "freq_mhz": round(float(freq_mhz), 4),
             "picco_db": round(picco, 1),
             "fondo_db": round(fondo, 1),
             "sopra_db": round(picco - fondo, 1),  # picco sopra il rumore: pochi dB = piatto, netto = segnale
+            # campioni tutti uguali = la chiavetta manda dati vuoti (non sta campionando davvero)
+            "escursione": int(b.max()) - int(b.min()),
+            "saturi_pct": round(float(np.mean((b == 0) | (b == 255))) * 100, 2),  # ADC al limite: guadagno troppo alto
+            "flusso_ms": round(flusso / 1e6, 3),  # MS/s ricevuti davvero
+            "flusso_pct": round(min(100.0, flusso / rate * 100), 1),
+            "ppm": self._ppm_for(what),
+            "guadagno": self._gain_for(what),
         }
 
     async def test_signal_all(self, freq_mhz: float) -> list[dict[str, Any]]:
@@ -758,7 +788,7 @@ class SpectrumScanner:
             seen.add(srv)
             res = await self.test_signal(srv, freq_mhz)
             res["funzioni"] = [l for w, l in (
-                ("scan", "Scansione / ricerca DAB+"), ("live", "Ascolto in diretta (FM e DAB+)"),
+                ("scan", "Scansione"), ("live", "Ascolto in diretta (FM e DAB+) e ricerca DAB+"),
                 ("adsb", "Aerei (ADS-B)"), ("meteo", "Meteo / satelliti"), ("ism", "Sensori ISM (433/868)"),
             ) if self._server(w) == srv]
             out.append(res)
@@ -916,15 +946,18 @@ class SpectrumScanner:
             self.dab_list, self.dab_scan_time = data.get("found", []), data.get("time")
 
     def dab_scan_start(self) -> None:
-        """Prova tutti i canali della banda III: per ognuno nome del multiplex e radio (scansione sospesa).
+        """Prova tutti i canali della banda III: per ognuno nome del multiplex e radio.
 
+        Usa la chiavetta dell'Ascolto (la stessa che poi suona le radio DAB+, con il suo ppm e
+        guadagno): se è dedicata la scansione continua, altrimenti si sospende come prima.
         Usa sempre 2,048 MS/s, qualunque sia il sample rate della scansione.
         """
         if self._dab_task is not None:
             raise RuntimeError("Ricerca DAB già in corso")
-        if self.analyzing or self._live_task is not None:
+        server = self._server("live")
+        if self._live_task is not None or (self.analyzing and self._server("scan") == server):
             raise RuntimeError("Ferma prima l'analisi in corso")
-        if (sat := self._pass_busy()):
+        if (sat := self._pass_busy(server)):
             raise RuntimeError(f"Ricezione satellitare in corso ({sat}): aspetta la fine o fermala prima")
         self._dab_task = asyncio.get_running_loop().create_task(self._dab_scan_run(), name="spettro_dab_scan")
 
@@ -943,16 +976,21 @@ class SpectrumScanner:
         chans = list(dab.CHANNELS.items())
         discard = STALE_BYTES + int(dab.RATE * 2 * max(self.settings.settle_ms, 100) / 1000)
         discard -= discard % 2
-        server = self._server("scan")
+        server = self._server("live")  # la chiavetta che poi ascolta il DAB+
+        on_scan = server == self._server("scan")
         await self._adsb_yield(resume=False, server=server)
-        self.analyzing = True
+        if self._ism_task is not None and self._server("ism") == server:
+            self._ism_resume = True
+            await self.ism_stop()
+        if on_scan:
+            self.analyzing = True  # stessa chiavetta della scansione: la scansione si sospende
         self._update_active()
         error = None
         try:
             async with self._lock(server):
                 reader, writer, _tuner = await _open(*server)
                 try:
-                    await self._configure(writer, dab.RATE)
+                    await self._configure(writer, dab.RATE, "live")
                     for i, (ch, mhz) in enumerate(chans):
                         self._emit({"kind": "dab_scan", "done": False, "progress": i / len(chans), "channel": ch,
                                     "found": found})
@@ -981,9 +1019,11 @@ class SpectrumScanner:
         except (OSError, TimeoutError, asyncio.IncompleteReadError, RtlTcpError) as err:
             error = str(err) or type(err).__name__
         finally:
-            self.analyzing = False
+            if on_scan:
+                self.analyzing = False
             self._dab_task = None
             self._update_active()
+            await self._adsb_maybe_resume()
         if error is None or found:
             self.dab_list, self.dab_scan_time = found, time.time()
             path = self._dab_file()
@@ -1198,6 +1238,8 @@ class SpectrumScanner:
             raise RuntimeError(f"Ricezione satellitare in corso ({sat}): aspetta la fine o fermala prima")
         if mode == "dab" and not sid:
             raise RuntimeError("Scegli una radio del multiplex")
+        if self._dab_task is not None:
+            raise RuntimeError("Ricerca DAB+ in corso sulla chiavetta dell'ascolto: aspetta la fine")
         await self.live_stop()
         await self._adsb_yield(resume=False, server=live_server)
         mode = mode or self.live_mode_for(freq_hz)
@@ -1317,7 +1359,7 @@ class SpectrumScanner:
             async with self._lock(server):
                 while True:  # un reset non ferma l'analisi: si prova a riconnettersi
                     try:
-                        reader, writer, tuner = await _open(*server)
+                        reader, writer, tuner = await _open(*server, STREAM_RCV_BUF)
                         try:
                             self.status["tuner"] = TUNER_NAMES.get(tuner, f"Tipo {tuner}")
                             await self._configure(writer, LIVE_RATE, "live")
@@ -1435,7 +1477,7 @@ class SpectrumScanner:
         last_stats = 0.0
         try:
             async with self._lock(server):
-                reader, writer, tuner = await _open(*server)
+                reader, writer, tuner = await _open(*server, STREAM_RCV_BUF)
                 try:
                     self.status["tuner"] = TUNER_NAMES.get(tuner, f"Tipo {tuner}")
                     await self._configure(writer, dab.RATE, "live")
@@ -1494,7 +1536,8 @@ class SpectrumScanner:
         online=True: scarica da internet modello, immatricolazione e rotta (adsbdb.com).
         """
         adsb_server = self._server("adsb")
-        if (self.analyzing or self._dab_task is not None) and self._server("scan") == adsb_server:
+        if ((self.analyzing and self._server("scan") == adsb_server)
+                or (self._dab_task is not None and self._server("live") == adsb_server)):
             raise RuntimeError("C'è un'altra operazione in corso, riprova tra poco")
         if self.meteo_rx is not None and self._server("meteo") == adsb_server:
             raise RuntimeError("C'è una ricezione satellitare in corso")
@@ -1647,7 +1690,8 @@ class SpectrumScanner:
         def free(server: tuple[str, int]) -> bool:
             return not ((self.status["live"] and self._server("live") == server)
                         or (self.meteo_rx is not None and self._server("meteo") == server)
-                        or ((self.analyzing or self._dab_task is not None) and scan == server))
+                        or (self.analyzing and scan == server)
+                        or (self._dab_task is not None and self._server("live") == server))
 
         if self._ism_resume and self._ism_task is None and free(self._server("ism")):
             self._ism_resume = False
@@ -1682,6 +1726,8 @@ class SpectrumScanner:
         server = self._server("ism")
         if self.meteo_rx is not None and self._server("meteo") == server:
             raise RuntimeError("C'è una ricezione satellitare in corso su questa chiavetta")
+        if self._dab_task is not None and self._server("live") == server:
+            raise RuntimeError("Ricerca DAB+ in corso su questa chiavetta: aspetta la fine")
         # sulla stessa chiavetta l'ISM esclude gli altri: ferma aerei e ascolto se sono qui
         await self._adsb_yield(resume=False, server=server)
         if self._server("live") == server:

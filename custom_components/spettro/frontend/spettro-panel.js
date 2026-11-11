@@ -1,7 +1,7 @@
 // Pannello "Spettro" per Home Assistant: grafico dello spettro, waterfall e picchi.
 
 // deve coincidere con VERSION in const.py: se il backend ne riporta un'altra manca un riavvio
-const PANEL_VERSION = "1.65.0";
+const PANEL_VERSION = "1.66.0";
 
 const PRESETS = [
   ["Personalizzato", null, null],
@@ -487,6 +487,18 @@ class SpettroPanel extends HTMLElement {
         .chk { flex-direction:row; align-items:center; gap:6px; font-size:13px; width:fit-content; max-width:100%; }
         .chk input, #adsbhist .pleft input { width:auto; }
         .msg { font-size:12px; min-height:16px; }
+        .toolbar .gear { background:none; border:none; color:inherit; font-size:24px; line-height:1; padding:6px 8px;
+                         cursor:pointer; border-radius:50%; min-width:0; }
+        .toolbar .gear:hover { background:rgba(255,255,255,.15); }
+        .dlg { position:fixed; inset:0; z-index:100; background:rgba(0,0,0,.5); display:flex; align-items:flex-start;
+               justify-content:center; padding:24px 12px; box-sizing:border-box; overflow:auto; }
+        .dlgbox { background:var(--card-background-color,#fff); color:var(--primary-text-color); border-radius:var(--ha-card-border-radius,12px);
+                  width:100%; max-width:760px; box-shadow:0 8px 32px rgba(0,0,0,.4); display:flex; flex-direction:column; max-height:calc(100vh - 48px); }
+        .dlghead { display:flex; align-items:center; gap:8px; padding:12px 16px; border-bottom:1px solid var(--divider-color); }
+        .dlgbody { padding:12px 16px; overflow:auto; }
+        .dlgfoot { padding:10px 16px; border-top:1px solid var(--divider-color); justify-content:flex-end; }
+        .dlgbox:focus { outline:none; }
+        .dlgx { background:none; border:none; font-size:18px; cursor:pointer; color:inherit; padding:4px 8px; }
         .msg.err { color:var(--error-color,#db4437); }
         .ana { border-top:1px solid var(--divider-color); padding-top:10px; margin-top:4px; display:flex; flex-direction:column; gap:10px; }
         .ana select, .ana input { width:auto; }
@@ -542,7 +554,63 @@ class SpettroPanel extends HTMLElement {
         #livert div { font-size:13px; padding:2px 0; border-bottom:1px solid var(--divider-color); }
         #livert span { color:var(--secondary-text-color); font-size:11px; margin-right:6px; }
       </style>
-      <div class="toolbar"><ha-menu-button></ha-menu-button><div class="title"><span>👻 Spettro</span><span class="ver">versione ${PANEL_VERSION}</span></div></div>
+      <div class="toolbar"><ha-menu-button></ha-menu-button><div class="title"><span>👻 Spettro</span><span class="ver">versione ${PANEL_VERSION}</span></div><button id="setbtn" class="gear" title="Impostazioni avanzate (sample rate, ppm, chiavette separate…)" aria-label="Impostazioni">⚙</button></div>
+      <div id="setdlg" class="dlg" style="display:none">
+        <div class="dlgbox" tabindex="-1" role="dialog" aria-modal="true" aria-labelledby="setdlgtitle">
+          <div class="dlghead"><h3 id="setdlgtitle" style="margin:0;flex:1">⚙ Impostazioni avanzate</h3><button id="setclose" class="dlgx" title="Chiudi">✕</button></div>
+          <div class="dlgbody">
+              <div class="grid2">
+                <label>Sample rate
+                  <select id="rate">${SAMPLE_RATES.map((r) => `<option value="${r}">${(r / 1e6).toFixed(3)} MS/s</option>`).join("")}</select>
+                </label>
+                <label>Punti FFT
+                  <select id="fft">${FFT_SIZES.map((n) => `<option value="${n}">${n}</option>`).join("")}</select>
+                </label>
+                <label>Assestamento (ms)<input id="settle" type="number" step="10" min="0" max="1000"></label>
+                <label>Correzione (ppm)<input id="ppm" type="number" step="1" min="-200" max="200"></label>
+                <label title="Sotto i 24 MHz la chiavetta riceve senza sintonizzatore (direct sampling): Nooelec SMArt v5 e RTL-SDR Blog V3 sul ramo Q; la Blog V4 ha già le onde corte (spento)">Onde corte
+                  <select id="hfs"><option value="2">Direct sampling Q</option><option value="1">Direct sampling I</option><option value="0">Spento</option></select>
+                </label>
+                <label title="Quanto registrare per ogni analisi, sia con Analizza sia per i picchi analizzati in automatico (ogni secondo in più allunga la scansione per ogni picco nuovo)">Durata analisi
+                  <select id="anadur"><option value="1">1 s</option><option value="2">2 s</option><option value="5">5 s</option></select>
+                </label>
+              </div>
+              <label class="chk" style="margin-top:6px" title="Le analisi fatte a mano salvano sempre la registrazione grezza (circa 4 MB al secondo); le automatiche solo con questa opzione, perché riempirebbero il disco">
+                <input type="checkbox" id="saveiq"> Salva la registrazione IQ anche delle analisi automatiche</label>
+              <div class="hint" style="margin-top:12px">📡 <b>Chiavette separate</b> (rtl_tcp) — opzionale. Lascia vuoto per usare la chiavetta principale. Se metti l'IP (e porta) di un'altra chiavetta, quella funzione la userà in parallelo, senza fermare le altre. «Una cosa alla volta» vale solo tra funzioni sulla <b>stessa</b> chiavetta (stesso IP+porta; anche solo porta diversa = chiavetta diversa). <b>ppm/guadagno</b> per chiavetta: ogni RTL-SDR ha un errore di cristallo diverso — col ppm unico una seconda chiavetta può non agganciare il DAB. Vuoto = come la principale; guadagno «auto» = automatico, oppure dB (es. 30).</div>
+              <div class="grid2" style="margin-top:4px">
+                <label title="Vale per la radio FM, per l'ascolto delle stazioni DAB+ e per la ricerca dei multiplex DAB+">Ascolto FM/DAB+ · IP<input id="livehost" type="text" placeholder="come principale" autocomplete="off"></label>
+                <label>Ascolto FM/DAB+ · porta<input id="liveport" type="number" step="1" min="0" max="65535" placeholder="0"></label>
+                <label>Ascolto · ppm<input id="liveppm" type="text" placeholder="come principale" autocomplete="off"></label>
+                <label>Ascolto · guadagno<input id="livegain" type="text" placeholder="come principale" autocomplete="off"></label>
+                <label>Aerei · IP<input id="adsbhost" type="text" placeholder="come principale" autocomplete="off"></label>
+                <label>Aerei · porta<input id="adsbport" type="number" step="1" min="0" max="65535" placeholder="0"></label>
+                <label>Aerei · ppm<input id="adsbppm" type="text" placeholder="come principale" autocomplete="off"></label>
+                <label>Aerei · guadagno<input id="adsbgain" type="text" placeholder="come principale" autocomplete="off"></label>
+                <label>Meteo · IP<input id="meteohost" type="text" placeholder="come principale" autocomplete="off"></label>
+                <label>Meteo · porta<input id="meteoport" type="number" step="1" min="0" max="65535" placeholder="0"></label>
+                <label>Meteo · ppm<input id="meteoppm" type="text" placeholder="come principale" autocomplete="off"></label>
+                <label>Meteo · guadagno<input id="meteogain" type="text" placeholder="come principale" autocomplete="off"></label>
+                <label>Sensori ISM · IP<input id="ismhost" type="text" placeholder="come principale" autocomplete="off"></label>
+                <label>Sensori ISM · porta<input id="ismport" type="number" step="1" min="0" max="65535" placeholder="0"></label>
+                <label>Sensori ISM · ppm<input id="ismppm" type="text" placeholder="come principale" autocomplete="off"></label>
+                <label>Sensori ISM · guadagno<input id="ismgain" type="text" placeholder="come principale" autocomplete="off"></label>
+              </div>
+              <div class="hint" style="margin-top:12px">🔎 <b>Analisi chiavette</b> — interroga ogni chiavetta configurata (rtl_tcp) e mostra che chip/tuner è, quanti guadagni ha, la gamma di frequenza e se supporta DVB-T / DVB-T2. Con <b>Prova ricezione</b> misura il livello su una frequenza (picco molto sopra il fondo = riceve; spettro piatto = antenna scollegata o segnale assente) e il <b>flusso</b>: sotto il 90% la rete o il PC della chiavetta non reggono i 2 MS/s e il DAB+ non aggancia anche se la chiavetta risponde.</div>
+              <div class="row" style="margin-top:4px">
+                <button id="dongles">Analizza chiavette</button>
+                <input id="dongfreq" type="text" inputmode="decimal" placeholder="MHz (es. 100.0)" autocomplete="off" style="width:120px">
+                <button id="dongtest">Prova ricezione</button>
+              </div>
+              <div id="donglesout" style="margin-top:6px"></div>
+          </div>
+          <div class="row dlgfoot">
+            <div class="msg" id="setmsg" style="flex:1"></div>
+            <button id="setcancel">Chiudi</button>
+            <button class="primary" id="setsave">Salva</button>
+          </div>
+        </div>
+      </div>
       <div id="verwarn" class="err" style="display:none;padding:10px 16px;font-size:14px"></div>
       <div class="content">
         <div class="maincol">
@@ -620,8 +688,8 @@ class SpettroPanel extends HTMLElement {
           <h3 style="margin:0">📟 Sensori ISM (rtl_433)<span class="led" id="ismled" title="Ricezione sensori attiva"></span></h3>
           <div class="hint">Riceve i sensori senza fili — stazioni meteo, termometri/igrometri, TPMS delle auto, contatti… — a
             433/868/315 MHz. Scorre a ciclo le frequenze della lista: si sintonizza, ascolta per qualche secondo, poi passa
-            alla successiva (i sensori stanno su bande diverse). Conviene dargli una <b>chiavetta dedicata</b> (Impostazioni →
-            Avanzate → Chiavette separate): così riceve mentre continui a scansionare.</div>
+            alla successiva (i sensori stanno su bande diverse). Conviene dargli una <b>chiavetta dedicata</b> (⚙ in alto a destra →
+            Chiavette separate): così riceve mentre continui a scansionare.</div>
           <div class="row" style="margin-top:6px;align-items:center;flex-wrap:wrap;gap:6px">
             <input id="ismfreq" type="number" step="0.001" placeholder="es. 433.920" style="width:120px"> <span class="hint">MHz</span>
             <button id="ismadd">+ Aggiungi</button>
@@ -735,7 +803,7 @@ class SpettroPanel extends HTMLElement {
             </div>
             <label class="chk" style="margin-top:8px" title="Con il pannello chiuso il server rtl_tcp resta libero (niente traffico di rete)">
               <input type="checkbox" id="viewonly"> Scansiona solo con il pannello aperto</label>
-            <label class="chk" style="margin-top:4px" title="Quando un passo della scansione trova un picco sopra la soglia, la scansione si ferma, il picco viene registrato e analizzato (per la «Durata analisi» delle Avanzate) e poi si riprende">
+            <label class="chk" style="margin-top:4px" title="Quando un passo della scansione trova un picco sopra la soglia, la scansione si ferma, il picco viene registrato e analizzato (per la «Durata analisi» delle impostazioni ⚙) e poi si riprende">
               <input type="checkbox" id="autoana"> Analizza subito i picchi trovati</label>
             <label class="chk" style="margin-top:4px" title="La chiavetta è collegata al cavo della parabola: tra 950 e 2150 MHz ci sono i transponder della TV satellitare, e Spettro riconosce il satellite">
               <input type="checkbox" id="lnb"> LNB satellitare sul cavo (parabola)</label>
@@ -754,53 +822,6 @@ class SpettroPanel extends HTMLElement {
                 <span class="chk" style="display:flex"><input type="checkbox" id="limsweep"> Max per scansione</span>
                 <input id="maxsweep" type="number" step="1" min="1"></label>
             </div>
-            <details>
-              <summary>Avanzate</summary>
-              <div class="grid2">
-                <label>Sample rate
-                  <select id="rate">${SAMPLE_RATES.map((r) => `<option value="${r}">${(r / 1e6).toFixed(3)} MS/s</option>`).join("")}</select>
-                </label>
-                <label>Punti FFT
-                  <select id="fft">${FFT_SIZES.map((n) => `<option value="${n}">${n}</option>`).join("")}</select>
-                </label>
-                <label>Assestamento (ms)<input id="settle" type="number" step="10" min="0" max="1000"></label>
-                <label>Correzione (ppm)<input id="ppm" type="number" step="1" min="-200" max="200"></label>
-                <label title="Sotto i 24 MHz la chiavetta riceve senza sintonizzatore (direct sampling): Nooelec SMArt v5 e RTL-SDR Blog V3 sul ramo Q; la Blog V4 ha già le onde corte (spento)">Onde corte
-                  <select id="hfs"><option value="2">Direct sampling Q</option><option value="1">Direct sampling I</option><option value="0">Spento</option></select>
-                </label>
-                <label title="Quanto registrare per ogni analisi, sia con Analizza sia per i picchi analizzati in automatico (ogni secondo in più allunga la scansione per ogni picco nuovo)">Durata analisi
-                  <select id="anadur"><option value="1">1 s</option><option value="2">2 s</option><option value="5">5 s</option></select>
-                </label>
-              </div>
-              <label class="chk" style="margin-top:6px" title="Le analisi fatte a mano salvano sempre la registrazione grezza (circa 4 MB al secondo); le automatiche solo con questa opzione, perché riempirebbero il disco">
-                <input type="checkbox" id="saveiq"> Salva la registrazione IQ anche delle analisi automatiche</label>
-              <div class="hint" style="margin-top:12px">📡 <b>Chiavette separate</b> (rtl_tcp) — opzionale. Lascia vuoto per usare la chiavetta principale. Se metti l'IP (e porta) di un'altra chiavetta, quella funzione la userà in parallelo, senza fermare le altre. «Una cosa alla volta» vale solo tra funzioni sulla <b>stessa</b> chiavetta (stesso IP+porta; anche solo porta diversa = chiavetta diversa). <b>ppm/guadagno</b> per chiavetta: ogni RTL-SDR ha un errore di cristallo diverso — col ppm unico una seconda chiavetta può non agganciare il DAB. Vuoto = come la principale; guadagno «auto» = automatico, oppure dB (es. 30).</div>
-              <div class="grid2" style="margin-top:4px">
-                <label title="Vale sia per la radio FM sia per l'ascolto delle stazioni DAB+ (la ricerca/scansione DAB+ usa invece la chiavetta principale)">Ascolto FM/DAB+ · IP<input id="livehost" type="text" placeholder="come principale" autocomplete="off"></label>
-                <label>Ascolto FM/DAB+ · porta<input id="liveport" type="number" step="1" min="0" max="65535" placeholder="0"></label>
-                <label>Ascolto · ppm<input id="liveppm" type="text" placeholder="come principale" autocomplete="off"></label>
-                <label>Ascolto · guadagno<input id="livegain" type="text" placeholder="come principale" autocomplete="off"></label>
-                <label>Aerei · IP<input id="adsbhost" type="text" placeholder="come principale" autocomplete="off"></label>
-                <label>Aerei · porta<input id="adsbport" type="number" step="1" min="0" max="65535" placeholder="0"></label>
-                <label>Aerei · ppm<input id="adsbppm" type="text" placeholder="come principale" autocomplete="off"></label>
-                <label>Aerei · guadagno<input id="adsbgain" type="text" placeholder="come principale" autocomplete="off"></label>
-                <label>Meteo · IP<input id="meteohost" type="text" placeholder="come principale" autocomplete="off"></label>
-                <label>Meteo · porta<input id="meteoport" type="number" step="1" min="0" max="65535" placeholder="0"></label>
-                <label>Meteo · ppm<input id="meteoppm" type="text" placeholder="come principale" autocomplete="off"></label>
-                <label>Meteo · guadagno<input id="meteogain" type="text" placeholder="come principale" autocomplete="off"></label>
-                <label>Sensori ISM · IP<input id="ismhost" type="text" placeholder="come principale" autocomplete="off"></label>
-                <label>Sensori ISM · porta<input id="ismport" type="number" step="1" min="0" max="65535" placeholder="0"></label>
-                <label>Sensori ISM · ppm<input id="ismppm" type="text" placeholder="come principale" autocomplete="off"></label>
-                <label>Sensori ISM · guadagno<input id="ismgain" type="text" placeholder="come principale" autocomplete="off"></label>
-              </div>
-              <div class="hint" style="margin-top:12px">🔎 <b>Analisi chiavette</b> — interroga ogni chiavetta configurata (rtl_tcp) e mostra che chip/tuner è, quanti guadagni ha, la gamma di frequenza e se supporta DVB-T / DVB-T2. Con <b>Prova ricezione</b> misura il livello su una frequenza: picco molto sopra il fondo = riceve; spettro piatto = antenna scollegata o segnale assente.</div>
-              <div class="row" style="margin-top:4px">
-                <button id="dongles">Analizza chiavette</button>
-                <input id="dongfreq" type="text" inputmode="decimal" placeholder="MHz (es. 100.0)" autocomplete="off" style="width:120px">
-                <button id="dongtest">Prova ricezione</button>
-              </div>
-              <div id="donglesout" style="margin-top:6px"></div>
-            </details>
             <div class="row" style="margin-top:10px">
               <button class="primary" id="apply">Applica</button>
               <button id="scannow">Scansiona ora</button>
@@ -834,6 +855,15 @@ class SpettroPanel extends HTMLElement {
       this._formDirty = true;
     });
     $("apply").addEventListener("click", () => this._apply());
+    // impostazioni avanzate in una finestra: si apre dall'ingranaggio in alto a destra
+    const dlg = $("setdlg");
+    const closeDlg = () => { dlg.style.display = "none"; };
+    $("setbtn").addEventListener("click", () => { dlg.style.display = "flex"; dlg.querySelector(".dlgbox").focus(); });
+    $("setclose").addEventListener("click", closeDlg);
+    $("setcancel").addEventListener("click", closeDlg);
+    dlg.addEventListener("click", (e) => { if (e.target === dlg) closeDlg(); });
+    dlg.addEventListener("keydown", (e) => { if (e.key === "Escape") closeDlg(); });
+    $("setsave").addEventListener("click", () => this._apply());
     $("dongles").addEventListener("click", () => this._analyzeDongles());
     $("dongtest").addEventListener("click", () => this._testDongles());
     $("enabled").addEventListener("change", async (e) => {
@@ -1169,10 +1199,21 @@ class SpettroPanel extends HTMLElement {
         const col = sopra < 6 ? "var(--error-color,#e53935)" : sopra < 15 ? "var(--warning-color,#fb8c00)" : "var(--success-color,#4caf50)";
         const giudizio = sopra < 6 ? "spettro piatto: antenna scollegata o nessun segnale qui"
           : sopra < 15 ? "segnale debole" : "segnale presente";
+        // problemi che la sola misura del livello non mostra
+        const warn = [];
+        if (d.escursione != null && d.escursione < 4) warn.push("campioni tutti uguali: la chiavetta manda dati vuoti (riavvia rtl_tcp o ricollega la chiavetta)");
+        if (d.flusso_pct != null && d.flusso_pct < 90) warn.push(`arrivano solo ${d.flusso_ms} MS/s su 2,048 (${d.flusso_pct}%): rtl_tcp scarta campioni, il DAB+ e l'ascolto continuo non agganciano. Collega la chiavetta via cavo / più vicino, oppure controlla che il PC della chiavetta non sia sovraccarico`);
+        if (d.saturi_pct != null && d.saturi_pct > 1) warn.push(`${d.saturi_pct}% di campioni al limite: chiavetta saturata, abbassa il guadagno di questa chiavetta`);
+        const flussoCol = d.flusso_pct == null ? "" : d.flusso_pct < 90 ? "var(--error-color,#e53935)" : "var(--success-color,#4caf50)";
+        const gainTxt = d.guadagno == null ? "auto" : `${d.guadagno} dB`;
         return `<div class="hint" style="margin-top:6px">
           <b>${addr}</b> a ${d.freq_mhz} MHz — <b style="color:${col}">${sopra} dB sopra il fondo</b> (${giudizio})<br>
-          <small>picco ${d.picco_db} dBFS · fondo ${d.fondo_db} dBFS · ${ruoli}</small>
-        </div>`;
+          <small>picco ${d.picco_db} dBFS · fondo ${d.fondo_db} dBFS`
+          + (d.flusso_pct != null ? ` · flusso <b style="color:${flussoCol}">${d.flusso_pct}%</b>` : "")
+          + (d.ppm != null ? ` · ppm ${d.ppm} · guadagno ${gainTxt}` : "")
+          + ` · ${ruoli}</small>`
+          + warn.map((w) => `<div class="err" style="color:var(--error-color,#e53935)"><small>⚠ ${esc(w)}</small></div>`).join("")
+          + `</div>`;
       }).join("")
       + `<div class="hint" style="margin-top:8px"><small>ℹ️ Il livello dipende dalla frequenza scelta e dall'antenna. Prova una FM forte locale (es. 100 MHz) per capire se l'antenna riceve; per gli aerei prova 1090, per il DAB il centro del canale (es. 194.064).</small></div>`;
     } catch (err) {
@@ -1226,6 +1267,7 @@ class SpettroPanel extends HTMLElement {
       ism_ppm: $("ismppm").value.trim(), ism_gain: $("ismgain").value.trim(),
     };
     $("apply").disabled = true;
+    $("setsave").disabled = true;
     try {
       await this._hass.callWS(msg);
       this._formDirty = false;
@@ -1235,6 +1277,7 @@ class SpettroPanel extends HTMLElement {
       this._msg(err.message || String(err), true);
     } finally {
       $("apply").disabled = false;
+      $("setsave").disabled = false;
     }
   }
 
@@ -1248,11 +1291,14 @@ class SpettroPanel extends HTMLElement {
   }
 
   _msg(text, err = false) {
-    const el = this.shadowRoot.getElementById("msg");
-    el.textContent = text;
-    el.className = "msg" + (err ? " err" : "");
+    // stesso messaggio sotto la Scansione e nella finestra delle impostazioni ⚙
+    const els = ["msg", "setmsg"].map((id) => this.shadowRoot.getElementById(id)).filter(Boolean);
+    for (const el of els) {
+      el.textContent = text;
+      el.className = "msg" + (err ? " err" : "");
+    }
     clearTimeout(this._msgT);
-    this._msgT = setTimeout(() => { el.textContent = ""; }, err ? 20000 : 6000);
+    this._msgT = setTimeout(() => { for (const el of els) el.textContent = ""; }, err ? 20000 : 6000);
   }
 
   // un'operazione non è partita perché la chiavetta è occupata (ricezione satellitare, altra
@@ -3295,7 +3341,7 @@ class SpettroPanel extends HTMLElement {
     $("anaout").innerHTML = `<div class="hint">Registrazione e analisi di ${(this._sel / 1e6).toFixed(4)} MHz…</div>`;
     try {
       this._ana = await this._hass.callWS({
-        type: "spettro/analyze", freq_mhz: this._sel / 1e6, // durata dalle impostazioni (Avanzate)
+        type: "spettro/analyze", freq_mhz: this._sel / 1e6, // durata dalle impostazioni avanzate (⚙)
       });
       this._renderAnalysis();
       this._archSel = this._ana.id || null; // nell'archivio si evidenzia l'analisi appena fatta
