@@ -549,6 +549,8 @@ class DabLiveReceiver:
         self._load: float | None = None
         self._t_feed = 0.0
         self._slides = 0
+        self._unsync = 0  # campioni ricevuti senza aggancio (per la diagnosi)
+        self._diag_psd: np.ndarray | None = None  # spettro medio mentre non si aggancia
 
     def process(self, raw: bytes) -> dict[str, Any]:
         t_feed = time.perf_counter()
@@ -605,4 +607,45 @@ class DabLiveReceiver:
             out["stats"] = dict(self.rx.stats, load=round(self._load or 0, 2))
         out["error"] = self.error
         out["synced"] = self.stream.next_start is not None
+        if not frames and not out["synced"]:
+            self._unsynced(a, out)
+        elif out["synced"]:
+            self._unsync, self._diag_psd = 0, None
         return out
+
+    def _unsynced(self, a: np.ndarray, out: dict[str, Any]) -> None:
+        """Senza aggancio: spettro grezzo per la cascata e, dopo qualche secondo, una diagnosi.
+
+        Senza questo la cascata resta nera e non si capisce se manca il segnale o se c'è ma non si
+        aggancia. Il blocco DAB occupa 1536 kHz dei 2048 ricevuti: si cerca dove sta (scarto di
+        frequenza, da ppm sbagliati) e quanto sta sopra il fondo.
+        """
+        n = 2048
+        x = a[0::2] + 1j * a[1::2]
+        seg = len(x) // n
+        if seg == 0:
+            return
+        seg = min(seg, 48)
+        blocks = x[: seg * n].reshape(seg, n) * np.hanning(n)
+        psd = np.fft.fftshift(np.mean(np.abs(np.fft.fft(blocks, axis=1)) ** 2, axis=0)) / (127.5 * n) ** 2 / 0.375  # 0,375 = guadagno di potenza della finestra di Hann
+        self._diag_psd = psd if self._diag_psd is None else 0.8 * self._diag_psd + 0.2 * psd
+        out["row"] = np.round(10 * np.log10(psd.reshape(256, -1).mean(axis=1) + 1e-20), 1).tolist()
+        out["level_db"] = round(float(10 * np.log10(np.mean(psd) + 1e-20)), 1)
+        self._unsync += len(x)
+        secs = self._unsync / 2_048_000
+        if secs < 6:
+            return
+        p = self._diag_psd
+        c = np.concatenate(([0.0], np.cumsum(p)))
+        # finestra di 1536 bin (1 kHz l'uno) con più energia: il suo centro rispetto a quello del canale
+        best = max(range(-200, 201, 2), key=lambda e: c[1024 + e + 768] - c[1024 + e - 768])
+        lo, hi = 1024 + best - 768, 1024 + best + 768
+        inside = float(np.median(p[lo + 100 : hi - 100]))
+        edge = np.concatenate((p[60 : max(61, lo - 30)], p[min(hi + 30, n - 61) : n - 60]))
+        outside = float(np.median(edge)) if len(edge) > 20 else float(np.percentile(p, 5))
+        out["acquire"] = {
+            "secondi": round(secs),
+            "sopra_db": round(float(10 * np.log10((inside + 1e-20) / (outside + 1e-20))), 1),
+            "scarto_khz": int(best),
+            "saturi_pct": round(float(np.mean((a <= -127) | (a >= 127))) * 100, 2),
+        }

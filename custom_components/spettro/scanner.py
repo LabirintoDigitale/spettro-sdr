@@ -1492,6 +1492,8 @@ class SpectrumScanner:
                                                    "synced": out["synced"], "error": out["error"]}
                         if out["row"] is not None:
                             payload.update(row=out["row"], span_hz=dab.RATE, level_db=out["level_db"])
+                        if "acquire" in out:
+                            payload["acquire"] = out["acquire"]  # non si aggancia: diagnosi per il pannello
                         if out["aus"]:
                             payload["aus"] = [base64.b64encode(a).decode() for a in out["aus"]]
                             payload["config"] = out["config"]

@@ -1,7 +1,7 @@
 // Pannello "Spettro" per Home Assistant: grafico dello spettro, waterfall e picchi.
 
 // deve coincidere con VERSION in const.py: se il backend ne riporta un'altra manca un riavvio
-const PANEL_VERSION = "1.66.0";
+const PANEL_VERSION = "1.67.0";
 
 const PRESETS = [
   ["Personalizzato", null, null],
@@ -493,7 +493,7 @@ class SpettroPanel extends HTMLElement {
         .dlg { position:fixed; inset:0; z-index:100; background:rgba(0,0,0,.5); display:flex; align-items:flex-start;
                justify-content:center; padding:24px 12px; box-sizing:border-box; overflow:auto; }
         .dlgbox { background:var(--card-background-color,#fff); color:var(--primary-text-color); border-radius:var(--ha-card-border-radius,12px);
-                  width:100%; max-width:760px; box-shadow:0 8px 32px rgba(0,0,0,.4); display:flex; flex-direction:column; max-height:calc(100vh - 48px); }
+                  width:100%; max-width:760px; box-shadow:0 8px 32px rgba(0,0,0,.4); display:flex; flex-direction:column; max-height:calc(100vh - 48px); max-height:calc(100dvh - 48px); }
         .dlghead { display:flex; align-items:center; gap:8px; padding:12px 16px; border-bottom:1px solid var(--divider-color); }
         .dlgbody { padding:12px 16px; overflow:auto; }
         .dlgfoot { padding:10px 16px; border-top:1px solid var(--divider-color); justify-content:flex-end; }
@@ -3052,6 +3052,8 @@ class SpettroPanel extends HTMLElement {
       if (this._live && m.info.service) { this._live.service = m.info.service; this._updateFavBtn(); }
     }
     if (m.error) st.error = m.error;
+    st.acquire = m.synced ? null : (m.acquire || st.acquire || null);
+    st.freq = m.freq_mhz;
     if (m.stats) st.stats = m.stats;
     if (m.dls !== undefined && m.dls !== null) {
       st.dls = m.dls;
@@ -3071,12 +3073,38 @@ class SpettroPanel extends HTMLElement {
     this._renderDabLive();
   }
 
+  // non si aggancia da qualche secondo: cosa vede la chiavetta (dal backend, sullo spettro grezzo)
+  _dabAcquireHint(st) {
+    const a = st.acquire;
+    if (!a) return "";
+    const ppm = st.freq ? Math.round((a.scarto_khz * 1e3) / (st.freq * 1e6) * 1e6) : null;
+    let why;
+    if (a.saturi_pct > 1) {
+      why = `la chiavetta è <b>saturata</b> (${a.saturi_pct}% di campioni al limite): abbassa il guadagno dell'Ascolto (⚙ → Ascolto · guadagno, es. 20–30).`;
+    } else if (a.sopra_db < 3) {
+      why = `<b>nessun blocco DAB</b> sopra il rumore (${a.sopra_db} dB): su questa chiavetta il multiplex non arriva. Controlla l'antenna collegata `
+        + `(un'antenna per gli aerei a 1090 MHz riceve male la banda III a 174–240 MHz) e che il canale sia quello giusto per la tua zona.`;
+    } else if (Math.abs(a.scarto_khz) >= 8) {
+      why = `il blocco DAB c'è (+${a.sopra_db} dB) ma è spostato di <b>${a.scarto_khz > 0 ? "+" : ""}${a.scarto_khz} kHz</b>`
+        + (ppm != null ? ` (circa ${ppm > 0 ? "+" : ""}${ppm} ppm)` : "") + `: correggi il ppm di questa chiavetta (⚙ → Ascolto · ppm).`;
+    } else if (a.sopra_db < 8) {
+      why = `il blocco DAB c'è ma è <b>debole</b> (+${a.sopra_db} dB sopra il rumore): alza il guadagno dell'Ascolto o migliora l'antenna.`;
+    } else {
+      why = `il blocco DAB c'è (+${a.sopra_db} dB) e la frequenza è giusta, ma le trame non si leggono: di solito sono campioni persi per strada `
+        + `(⚙ → Prova ricezione: guarda il flusso) o disturbi forti.`;
+    }
+    return `<div class="hint err" style="margin-top:6px">⚠ Nessun aggancio dopo ${a.secondi} s: ${why}</div>`;
+  }
+
   _renderDabLive() {
     const st = this._dabState;
     const el = this.shadowRoot.getElementById("liverds");
     if (!st) return;
     if (st.error) { el.innerHTML = `<div class="err" style="margin-top:6px">${esc(st.error)}</div>`; return; }
-    if (!st.synced || !st.info) { el.innerHTML = `<div class="hint" style="margin-top:6px">Aggancio del multiplex DAB…</div>`; return; }
+    if (!st.synced || !st.info) {
+      el.innerHTML = `<div class="hint" style="margin-top:6px">Aggancio del multiplex DAB…</div>` + this._dabAcquireHint(st);
+      return;
+    }
     const s = st.stats;
     const tot = s ? s.au_ok + s.au_bad : 0;
     const rows = [
