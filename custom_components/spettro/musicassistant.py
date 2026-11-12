@@ -460,8 +460,11 @@ class _RadioStream:
 
         async def later() -> None:
             await asyncio.sleep(STOP_GRACE_S)
-            if self._is_ours() and self.scanner.stream_clients <= 0 and self.scanner.viewers <= 0:
-                await self.scanner.live_stop()  # nessuno ascolta più: si libera la chiavetta
+            live = self.scanner.status.get("live") or {}
+            # la diretta l'ha avviata Music Assistant (titolo): si ferma anche col pannello aperto.
+            # Se nel frattempo è stata riavviata dal pannello il titolo non c'è più e resta accesa
+            if self._is_ours() and live.get("title") == LIVE_TITLE and self.scanner.stream_clients <= 0:
+                await self.scanner.live_stop()  # Music Assistant ha chiuso: si libera la chiavetta
 
         self.hass.async_create_task(later(), "spettro_ma_stop")
 
