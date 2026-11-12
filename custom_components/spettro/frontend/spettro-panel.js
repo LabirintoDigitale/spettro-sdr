@@ -1,7 +1,7 @@
 // Pannello "Spettro" per Home Assistant: grafico dello spettro, waterfall e picchi.
 
 // deve coincidere con VERSION in const.py: se il backend ne riporta un'altra manca un riavvio
-const PANEL_VERSION = "1.67.0";
+const PANEL_VERSION = "1.68.0";
 
 const PRESETS = [
   ["Personalizzato", null, null],
@@ -498,6 +498,12 @@ class SpettroPanel extends HTMLElement {
         .dlgbody { padding:12px 16px; overflow:auto; }
         .dlgfoot { padding:10px 16px; border-top:1px solid var(--divider-color); justify-content:flex-end; }
         .dlgbox:focus { outline:none; }
+        .donglist { display:flex; flex-direction:column; gap:6px; margin-top:6px; }
+        .dongrow { display:flex; align-items:center; gap:10px; padding:8px 10px; border:1px solid var(--divider-color); border-radius:8px; }
+        .dongrow .dongname { flex:1; min-width:0; word-break:break-word; }
+        .dgbtn { padding:4px 10px; min-width:0; }
+        .dongedit { margin-top:6px; padding:10px; border:1px solid var(--primary-color); border-radius:8px; }
+        .dname { font-size:12px; font-weight:400; color:var(--secondary-text-color); margin-left:6px; vertical-align:middle; }
         .dlgx { background:none; border:none; font-size:18px; cursor:pointer; color:inherit; padding:4px 8px; }
         .msg.err { color:var(--error-color,#db4437); }
         .ana { border-top:1px solid var(--divider-color); padding-top:10px; margin-top:4px; display:flex; flex-direction:column; gap:10px; }
@@ -577,25 +583,29 @@ class SpettroPanel extends HTMLElement {
               </div>
               <label class="chk" style="margin-top:6px" title="Le analisi fatte a mano salvano sempre la registrazione grezza (circa 4 MB al secondo); le automatiche solo con questa opzione, perché riempirebbero il disco">
                 <input type="checkbox" id="saveiq"> Salva la registrazione IQ anche delle analisi automatiche</label>
-              <div class="hint" style="margin-top:12px">📡 <b>Chiavette separate</b> (rtl_tcp) — opzionale. Lascia vuoto per usare la chiavetta principale. Se metti l'IP (e porta) di un'altra chiavetta, quella funzione la userà in parallelo, senza fermare le altre. «Una cosa alla volta» vale solo tra funzioni sulla <b>stessa</b> chiavetta (stesso IP+porta; anche solo porta diversa = chiavetta diversa). <b>ppm/guadagno</b> per chiavetta: ogni RTL-SDR ha un errore di cristallo diverso — col ppm unico una seconda chiavetta può non agganciare il DAB. Vuoto = come la principale; guadagno «auto» = automatico, oppure dB (es. 30).</div>
-              <div class="grid2" style="margin-top:4px">
-                <label title="Vale per la radio FM, per l'ascolto delle stazioni DAB+ e per la ricerca dei multiplex DAB+">Ascolto FM/DAB+ · IP<input id="livehost" type="text" placeholder="come principale" autocomplete="off"></label>
-                <label>Ascolto FM/DAB+ · porta<input id="liveport" type="number" step="1" min="0" max="65535" placeholder="0"></label>
-                <label>Ascolto · ppm<input id="liveppm" type="text" placeholder="come principale" autocomplete="off"></label>
-                <label>Ascolto · guadagno<input id="livegain" type="text" placeholder="come principale" autocomplete="off"></label>
-                <label>Aerei · IP<input id="adsbhost" type="text" placeholder="come principale" autocomplete="off"></label>
-                <label>Aerei · porta<input id="adsbport" type="number" step="1" min="0" max="65535" placeholder="0"></label>
-                <label>Aerei · ppm<input id="adsbppm" type="text" placeholder="come principale" autocomplete="off"></label>
-                <label>Aerei · guadagno<input id="adsbgain" type="text" placeholder="come principale" autocomplete="off"></label>
-                <label>Meteo · IP<input id="meteohost" type="text" placeholder="come principale" autocomplete="off"></label>
-                <label>Meteo · porta<input id="meteoport" type="number" step="1" min="0" max="65535" placeholder="0"></label>
-                <label>Meteo · ppm<input id="meteoppm" type="text" placeholder="come principale" autocomplete="off"></label>
-                <label>Meteo · guadagno<input id="meteogain" type="text" placeholder="come principale" autocomplete="off"></label>
-                <label>Sensori ISM · IP<input id="ismhost" type="text" placeholder="come principale" autocomplete="off"></label>
-                <label>Sensori ISM · porta<input id="ismport" type="number" step="1" min="0" max="65535" placeholder="0"></label>
-                <label>Sensori ISM · ppm<input id="ismppm" type="text" placeholder="come principale" autocomplete="off"></label>
-                <label>Sensori ISM · guadagno<input id="ismgain" type="text" placeholder="come principale" autocomplete="off"></label>
+              <h4 class="sub">📡 Chiavette</h4>
+              <div class="hint">Le chiavette (server rtl_tcp) che Spettro può usare. Funzioni su chiavette diverse lavorano in parallelo; sulla <b>stessa</b> chiavetta (stesso IP e porta) una cosa alla volta.</div>
+              <div id="donglist" class="donglist"></div>
+              <div id="dongedit" class="dongedit" style="display:none">
+                <div class="grid2">
+                  <label>Nome<input id="dgname" type="text" placeholder="es. Chiavetta DAB" autocomplete="off" maxlength="60"></label>
+                  <span></span>
+                  <label>IP<input id="dghost" type="text" placeholder="es. 192.168.1.5" autocomplete="off"></label>
+                  <label>Porta<input id="dgport" type="number" step="1" min="1" max="65535" placeholder="1234"></label>
+                  <label title="Errore del cristallo di questa chiavetta. Vuoto = come la principale">Correzione (ppm)<input id="dgppm" type="text" placeholder="come principale" autocomplete="off"></label>
+                  <label title="Vuoto = come la principale; auto = automatico; oppure dB (es. 30)">Guadagno<input id="dggain" type="text" placeholder="come principale" autocomplete="off"></label>
+                </div>
+                <div class="hint" id="dgmainnote" style="display:none;margin-top:4px">La principale è quella configurata nell'integrazione: qui si cambia solo il nome. Il suo ppm è qui sopra (Correzione), il guadagno nella card Scansione.</div>
+                <div class="row" style="margin-top:8px;justify-content:flex-end">
+                  <span class="msg err" id="dgerr" style="flex:1"></span>
+                  <button id="dgcancel">Annulla</button>
+                  <button class="primary" id="dgok">Salva chiavetta</button>
+                </div>
               </div>
+              <div class="row" style="margin-top:6px"><button id="dongadd">＋ Aggiungi chiavetta</button></div>
+              <h4 class="sub">🔀 Assegnazioni</h4>
+              <div class="hint">Quale chiavetta fa cosa. Si salvano con <b>Salva</b> in fondo.</div>
+              <div class="grid2" id="dongassign" style="margin-top:4px"></div>
               <div class="hint" style="margin-top:12px">🔎 <b>Analisi chiavette</b> — interroga ogni chiavetta configurata (rtl_tcp) e mostra che chip/tuner è, quanti guadagni ha, la gamma di frequenza e se supporta DVB-T / DVB-T2. Con <b>Prova ricezione</b> misura il livello su una frequenza (picco molto sopra il fondo = riceve; spettro piatto = antenna scollegata o segnale assente) e il <b>flusso</b>: sotto il 90% la rete o il PC della chiavetta non reggono i 2 MS/s e il DAB+ non aggancia anche se la chiavetta risponde.</div>
               <div class="row" style="margin-top:4px">
                 <button id="dongles">Analizza chiavette</button>
@@ -615,7 +625,7 @@ class SpettroPanel extends HTMLElement {
       <div class="content">
         <div class="maincol">
         <div class="card ana" id="anacard">
-            <h3 style="margin:0">Analisi segnale<span class="led" id="analed" title="Ascolto in diretta attivo"></span></h3>
+            <h3 style="margin:0">Analisi segnale<span class="led" id="analed" title="Ascolto in diretta attivo"></span><span class="dname" id="analedname"></span></h3>
             <div class="row">
               <label class="selfreq" title="Frequenza da analizzare: si prende dal clic sul grafico o si scrive qui (Invio per confermare)">MHz
                 <input id="selfreq" type="text" inputmode="decimal" placeholder="es. 99.6" autocomplete="off"></label>
@@ -660,7 +670,7 @@ class SpettroPanel extends HTMLElement {
           <div class="hint">Trascina sul grafico per ingrandire, doppio clic per tornare all'intervallo completo.</div>
         </div>
         <div class="card" id="dabcard">
-          <h3 style="margin:0">📻 Radio DAB+<span class="led" id="dabled" title="DAB in ascolto o ricerca in corso"></span></h3>
+          <h3 style="margin:0">📻 Radio DAB+<span class="led" id="dabled" title="DAB in ascolto o ricerca in corso"></span><span class="dname" id="dabledname"></span></h3>
           <div class="hint">I multiplex vicini (es. 12A–12D) nello spettro si fondono in un unico blocco e la scansione può
             non vederli tutti: la ricerca prova ogni canale della banda III (5A–13F, circa un minuto, scansione sospesa) e
             ne legge nome e radio. Il risultato resta salvato.</div>
@@ -668,7 +678,7 @@ class SpettroPanel extends HTMLElement {
           <div id="dablist"></div>
         </div>
         <div class="card" id="adsbcard">
-          <h3 style="margin:0">✈️ Aerei (ADS-B)<span class="led" id="adsbled" title="Ricezione aerei attiva"></span></h3>
+          <h3 style="margin:0">✈️ Aerei (ADS-B)<span class="led" id="adsbled" title="Ricezione aerei attiva"></span><span class="dname" id="adsbledname"></span></h3>
           <div class="hint">La chiavetta resta su 1090 MHz e raccoglie gli aerei che trasmettono in chiaro la loro posizione
             (ADS-B): volo, quota, velocità e distanza da te. La scansione è sospesa mentre è attivo. Serve un'antenna per i
             1090 MHz (un'antennina corta, ~6,9 cm, va bene).</div>
@@ -685,7 +695,7 @@ class SpettroPanel extends HTMLElement {
           <div id="adsbhist"></div>
         </div>
         <div class="card" id="ismcard">
-          <h3 style="margin:0">📟 Sensori ISM (rtl_433)<span class="led" id="ismled" title="Ricezione sensori attiva"></span></h3>
+          <h3 style="margin:0">📟 Sensori ISM (rtl_433)<span class="led" id="ismled" title="Ricezione sensori attiva"></span><span class="dname" id="ismledname"></span></h3>
           <div class="hint">Riceve i sensori senza fili — stazioni meteo, termometri/igrometri, TPMS delle auto, contatti… — a
             433/868/315 MHz. Scorre a ciclo le frequenze della lista: si sintonizza, ascolta per qualche secondo, poi passa
             alla successiva (i sensori stanno su bande diverse). Conviene dargli una <b>chiavetta dedicata</b> (⚙ in alto a destra →
@@ -732,7 +742,7 @@ class SpettroPanel extends HTMLElement {
           </div>
         </div>
         <div class="card" id="meteocard">
-          <h3 style="margin:0">🛰️ Satelliti meteo e immagini<span class="led" id="meteoled" title="Ricezione satellitare in corso"></span></h3>
+          <h3 style="margin:0">🛰️ Satelliti meteo e immagini<span class="led" id="meteoled" title="Ricezione satellitare in corso"></span><span class="dname" id="meteoledname"></span></h3>
           <div id="meteolive"></div>
           <h4 class="sub">Satelliti in passaggio</h4>
           <div class="hint">Meteor e ISS si ricevono solo quando passano sopra di te: ecco i prossimi passaggi. Con le caselle la
@@ -840,8 +850,7 @@ class SpettroPanel extends HTMLElement {
 
     const form = ["start", "stop", "interval", "gain", "threshold", "viewonly", "autoana", "lnb", "reana", "archhours", "limstep", "maxstep", "limsweep", "maxsweep",
       "rate", "fft", "settle", "ppm", "anadur", "hfs", "saveiq",
-      "livehost", "liveport", "adsbhost", "adsbport", "meteohost", "meteoport", "ismhost", "ismport",
-      "liveppm", "livegain", "adsbppm", "adsbgain", "meteoppm", "meteogain", "ismppm", "ismgain"];
+    ];
     for (const id of form) $(id).addEventListener("input", () => {
       this._formDirty = true;
       if (id === "start" || id === "stop") $("preset").value = "0";
@@ -865,6 +874,12 @@ class SpettroPanel extends HTMLElement {
     dlg.addEventListener("keydown", (e) => { if (e.key === "Escape") closeDlg(); });
     $("setsave").addEventListener("click", () => this._apply());
     $("dongles").addEventListener("click", () => this._analyzeDongles());
+    $("dongadd").addEventListener("click", () => this._editDongle(null));
+    $("dgcancel").addEventListener("click", () => this._closeDongleEdit());
+    $("dgok").addEventListener("click", () => this._saveDongle());
+    for (const f of ["dgname", "dghost", "dgport", "dgppm", "dggain"]) {
+      $(f).addEventListener("keydown", (e) => { if (e.key === "Enter") this._saveDongle(); });
+    }
     $("dongtest").addEventListener("click", () => this._testDongles());
     $("enabled").addEventListener("change", async (e) => {
       const enabled = e.target.checked;
@@ -1131,15 +1146,151 @@ class SpettroPanel extends HTMLElement {
     $("maxstep").value = s.auto_max_per_step || 3;
     $("limsweep").checked = !!s.auto_limit_sweep;
     $("maxsweep").value = s.auto_max_per_sweep || 20;
-    for (const [id, host, port] of [["live", s.live_host, s.live_port], ["adsb", s.adsb_host, s.adsb_port], ["meteo", s.meteo_host, s.meteo_port], ["ism", s.ism_host, s.ism_port]]) {
-      if (this.shadowRoot.activeElement !== $(id + "host")) $(id + "host").value = host || "";
-      if (this.shadowRoot.activeElement !== $(id + "port")) $(id + "port").value = port || "";
-      if (this.shadowRoot.activeElement !== $(id + "ppm")) $(id + "ppm").value = s[id + "_ppm"] || "";
-      if (this.shadowRoot.activeElement !== $(id + "gain")) $(id + "gain").value = s[id + "_gain"] || "";
+    if (!this._dongEditing) {
+      this._dongles = (s.dongles || []).map((d) => ({ ...d }));
+      this._mainName = s.main_name || "Principale";
+      this._assign = { ...(s.assign || {}) };
+      this._renderDongles();
     }
     this._syncLimits();
     const idx = PRESETS.findIndex((p) => p[1] === s.start_mhz && p[2] === s.stop_mhz);
     $("preset").value = String(idx > 0 ? idx : 0);
+  }
+
+  // --- elenco delle chiavette (impostazioni ⚙) ---------------------------------
+
+  // funzione -> etichetta (le stesse del backend)
+  static get ROLES() {
+    return [["scan", "Scansione e analisi"], ["live", "Ascolto FM/DAB+ e ricerca DAB+"], ["adsb", "Aerei (ADS-B)"],
+      ["meteo", "Meteo / satelliti"], ["ism", "Sensori ISM"]];
+  }
+
+  _assignFull() {
+    const ids = new Set(["main", ...(this._dongles || []).map((d) => d.id)]);
+    const out = {};
+    for (const [k] of SpettroPanel.ROLES) out[k] = ids.has((this._assign || {})[k]) ? this._assign[k] : "main";
+    return out;
+  }
+
+  // nome della chiavetta che fa una funzione (per le scritte accanto ai LED)
+  _dongleNameFor(what) {
+    const s = (this._status && this._status.settings) || {};
+    const id = (s.assign || {})[what] || "main";
+    const d = id === "main" ? null : (s.dongles || []).find((x) => x.id === id);
+    return d ? d.name || "Chiavetta" : s.main_name || "Principale";
+  }
+
+  // funzioni attive adesso (per il LED di ogni chiavetta nell'elenco)
+  _activeRoles() {
+    const live = !!this._live, dabScan = !!(this._dabScan && !this._dabScan.done);
+    const st = this._status || {};
+    return {
+      scan: st.state === "scanning" || !!st.analyzing,
+      live: live || dabScan,
+      adsb: !!this._adsb,
+      meteo: !!this._meteoKey,
+      ism: !!this._ismOn,
+    };
+  }
+
+  _renderDongles() {
+    const box = this.shadowRoot.getElementById("donglist");
+    if (!box) return;
+    const st = this._status || {};
+    const assign = this._assignFull();
+    const active = this._activeRoles();
+    const all = [{ id: "main", name: this._mainName || "Principale", host: st.host, port: st.port, main: true },
+      ...(this._dongles || [])];
+    const labels = Object.fromEntries(SpettroPanel.ROLES);
+    box.innerHTML = all.map((d) => {
+      const roles = SpettroPanel.ROLES.filter(([k]) => assign[k] === d.id).map(([k]) => k);
+      const on = roles.some((k) => active[k]);
+      const addr = d.main ? `${esc(d.host || "?")}:${d.port || ""} · dalla configurazione` : `${esc(d.host || "?")}:${d.port || ""}`;
+      const extra = d.main ? "" : [d.ppm ? `ppm ${esc(d.ppm)}` : "", d.gain ? `guadagno ${esc(d.gain)}` : ""].filter(Boolean).join(" · ");
+      return `<div class="dongrow">
+        <span class="led${on ? " on" : ""}" style="margin:0" title="${on ? "Al lavoro" : "Ferma"}"></span>
+        <div class="dongname"><b>${esc(d.name || "Chiavetta")}</b>${d.main ? ` <small class="hint">(principale)</small>` : ""}
+          <div class="hint"><small>${addr}${extra ? ` · ${extra}` : ""}${roles.length ? `<br>${roles.map((k) => labels[k]).join(", ")}` : ""}</small></div></div>
+        <button class="dgbtn" data-edit="${esc(d.id)}" title="Modifica">✎</button>
+        ${d.main ? "" : `<button class="dgbtn" data-del="${esc(d.id)}" title="Rimuovi">🗑</button>`}
+      </div>`;
+    }).join("");
+    box.querySelectorAll("[data-edit]").forEach((b) => b.addEventListener("click", () => this._editDongle(b.dataset.edit)));
+    box.querySelectorAll("[data-del]").forEach((b) => b.addEventListener("click", () => this._removeDongle(b.dataset.del)));
+    // assegnazioni: una tendina per funzione con tutte le chiavette
+    const asg = this.shadowRoot.getElementById("dongassign");
+    if (asg && !asg.contains(this.shadowRoot.activeElement)) {
+      asg.innerHTML = SpettroPanel.ROLES.map(([k, label]) => `<label>${label}<select data-role="${k}">${all.map((d) =>
+        `<option value="${esc(d.id)}"${assign[k] === d.id ? " selected" : ""}>${esc(d.name || "Chiavetta")}</option>`).join("")}</select></label>`).join("");
+      asg.querySelectorAll("select").forEach((sel) => sel.addEventListener("change", () => {
+        this._assign = { ...this._assignFull(), [sel.dataset.role]: sel.value };
+        this._formDirty = true;
+        this._renderDongles();
+      }));
+    }
+  }
+
+  _editDongle(id) {
+    const $ = (x) => this.shadowRoot.getElementById(x);
+    const isMain = id === "main";
+    const d = isMain ? { name: this._mainName } : id ? (this._dongles || []).find((x) => x.id === id) : null;
+    this._dongEditing = id || "new";
+    $("dgname").value = (d && d.name) || "";
+    $("dghost").value = (d && d.host) || "";
+    $("dgport").value = (d && d.port) || "";
+    $("dgppm").value = (d && d.ppm) || "";
+    $("dggain").value = (d && d.gain) || "";
+    for (const f of ["dghost", "dgport", "dgppm", "dggain"]) $(f).closest("label").style.display = isMain ? "none" : "";
+    $("dgmainnote").style.display = isMain ? "" : "none";
+    $("dgerr").textContent = "";
+    $("dongedit").style.display = "";
+    $("dongadd").style.display = "none";
+    $("dgname").focus();
+  }
+
+  _closeDongleEdit() {
+    const $ = (x) => this.shadowRoot.getElementById(x);
+    this._dongEditing = null;
+    $("dongedit").style.display = "none";
+    $("dongadd").style.display = "";
+  }
+
+  async _saveDongle() {
+    const $ = (x) => this.shadowRoot.getElementById(x);
+    const id = this._dongEditing;
+    const name = $("dgname").value.trim();
+    if (!name) { $("dgerr").textContent = "Scrivi un nome."; return; }
+    if (id === "main") {
+      this._mainName = name;
+    } else {
+      const host = $("dghost").value.trim();
+      const port = parseInt($("dgport").value, 10) || 0;
+      if (!host) { $("dgerr").textContent = "Scrivi l'IP (o il nome) del PC con rtl_tcp."; return; }
+      if (!(port > 0 && port < 65536)) { $("dgerr").textContent = "Porta non valida (di solito 1234)."; return; }
+      const ppm = $("dgppm").value.trim(), gain = $("dggain").value.trim();
+      if (ppm && isNaN(parseFloat(ppm.replace(",", ".")))) { $("dgerr").textContent = "ppm: un numero (es. -3) o vuoto."; return; }
+      if (gain && gain.toLowerCase() !== "auto" && isNaN(parseFloat(gain.replace(",", ".")))) { $("dgerr").textContent = "Guadagno: dB (es. 30), «auto» o vuoto."; return; }
+      const st = this._status || {};
+      const dup = (host === st.host && port === st.port) ? this._mainName
+        : ((this._dongles || []).find((x) => x.id !== id && x.host === host && x.port === port) || {}).name;
+      if (dup) { $("dgerr").textContent = `Questo IP e porta sono già di «${dup}».`; return; }
+      const val = { name, host, port, ppm, gain };
+      if (id === "new") this._dongles = [...(this._dongles || []), { id: "d" + Date.now().toString(36), ...val }];
+      else this._dongles = this._dongles.map((x) => (x.id === id ? { ...x, ...val } : x));
+    }
+    this._closeDongleEdit();
+    this._renderDongles();
+    await this._apply(); // si salva subito: resta solo l'elenco
+  }
+
+  async _removeDongle(id) {
+    const d = (this._dongles || []).find((x) => x.id === id);
+    if (!d || !confirm(`Rimuovere la chiavetta «${d.name}»? Le funzioni assegnate a lei passano alla principale.`)) return;
+    this._dongles = this._dongles.filter((x) => x.id !== id);
+    this._assign = this._assignFull(); // le assegnazioni alla chiavetta tolta tornano a "main"
+    if (this._dongEditing === id) this._closeDongleEdit();
+    this._renderDongles();
+    await this._apply();
   }
 
   async _analyzeDongles() {
@@ -1152,7 +1303,7 @@ class SpettroPanel extends HTMLElement {
       const list = (res && res.chiavette) || [];
       if (!list.length) { out.innerHTML = `<div class="hint">Nessuna chiavetta configurata.</div>`; return; }
       out.innerHTML = list.map((d) => {
-        const addr = `${esc(d.host)}:${d.port}`;
+        const addr = (d.nome ? `${esc(d.nome)} · ` : "") + `${esc(d.host)}:${d.port}`;
         const ruoli = (d.funzioni || []).map((f) => esc(f)).join(", ");
         if (!d.ok) {
           return `<div class="hint err" style="margin-top:6px"><b>${addr}</b> — non raggiungibile`
@@ -1188,7 +1339,7 @@ class SpettroPanel extends HTMLElement {
       const list = (res && res.chiavette) || [];
       if (!list.length) { out.innerHTML = `<div class="hint">Nessuna chiavetta configurata.</div>`; return; }
       out.innerHTML = list.map((d) => {
-        const addr = `${esc(d.host)}:${d.port}`;
+        const addr = (d.nome ? `${esc(d.nome)} · ` : "") + `${esc(d.host)}:${d.port}`;
         const ruoli = (d.funzioni || []).map((f) => esc(f)).join(", ");
         if (!d.ok) {
           return `<div class="hint err" style="margin-top:6px"><b>${addr}</b> — non raggiungibile`
@@ -1253,18 +1404,12 @@ class SpettroPanel extends HTMLElement {
       auto_max_per_step: Math.max(1, parseInt($("maxstep").value, 10) || 3),
       auto_limit_sweep: $("limsweep").checked,
       auto_max_per_sweep: Math.max(1, parseInt($("maxsweep").value, 10) || 20),
-      live_host: $("livehost").value.trim(),
-      live_port: parseInt($("liveport").value, 10) || 0,
-      adsb_host: $("adsbhost").value.trim(),
-      adsb_port: parseInt($("adsbport").value, 10) || 0,
-      meteo_host: $("meteohost").value.trim(),
-      meteo_port: parseInt($("meteoport").value, 10) || 0,
-      ism_host: $("ismhost").value.trim(),
-      ism_port: parseInt($("ismport").value, 10) || 0,
-      live_ppm: $("liveppm").value.trim(), live_gain: $("livegain").value.trim(),
-      adsb_ppm: $("adsbppm").value.trim(), adsb_gain: $("adsbgain").value.trim(),
-      meteo_ppm: $("meteoppm").value.trim(), meteo_gain: $("meteogain").value.trim(),
-      ism_ppm: $("ismppm").value.trim(), ism_gain: $("ismgain").value.trim(),
+      // chiavette con nome e assegnazioni (le vecchie per funzione si svuotano: sono già nell'elenco)
+      dongles: (this._dongles || []).map((d) => ({ id: d.id, name: d.name, host: d.host || "", port: d.port || 0, ppm: d.ppm || "", gain: d.gain || "" })),
+      main_name: this._mainName || "Principale",
+      assign: this._assignFull(),
+      live_host: "", live_port: 0, adsb_host: "", adsb_port: 0, meteo_host: "", meteo_port: 0, ism_host: "", ism_port: 0,
+      live_ppm: "", live_gain: "", adsb_ppm: "", adsb_gain: "", meteo_ppm: "", meteo_gain: "", ism_ppm: "", ism_gain: "",
     };
     $("apply").disabled = true;
     $("setsave").disabled = true;
@@ -1320,6 +1465,7 @@ class SpettroPanel extends HTMLElement {
     if (!s || !this.shadowRoot.getElementById("status")) return;
     const bar = this.shadowRoot.getElementById("bar");
     const extra = [];
+    if (s.settings && (s.settings.dongles || []).length) extra.push(`📡 ${this._dongleNameFor("scan")}`);
     if (s.tuner) extra.push(`tuner ${s.tuner}`);
     if (s.sweep_s != null) extra.push(`ultima scansione ${s.sweep_s} s`);
     if (s.auto_count != null) extra.push(`${s.auto_count} picchi analizzati`);
@@ -2432,6 +2578,12 @@ class SpettroPanel extends HTMLElement {
     set("ismled", !!this._ismOn);
     set("meteoled", !!this._meteoKey);
     set("dabled", (this._dabScan && !this._dabScan.done) || (this._live && this._live.mode === "dab"));
+    // accanto al LED acceso, il nome della chiavetta che sta facendo il lavoro
+    for (const [id, what] of [["analed", "live"], ["dabled", "live"], ["adsbled", "adsb"], ["ismled", "ism"], ["meteoled", "meteo"]]) {
+      const led = this.shadowRoot.getElementById(id), nm = this.shadowRoot.getElementById(id + "name");
+      if (led && nm) nm.textContent = led.classList.contains("on") ? `📡 ${this._dongleNameFor(what)}` : "";
+    }
+    this._renderDongles(); // LED nell'elenco delle chiavette
   }
 
   _renderDabScan() {

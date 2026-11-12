@@ -178,6 +178,13 @@ class ScanSettings:
     meteo_gain: str = ""
     ism_ppm: str = ""
     ism_gain: str = ""
+    # Elenco delle chiavette (rtl_tcp) con nome: {"id", "name", "host", "port", "ppm", "gain"}; ppm e
+    # guadagno sono testo (vuoto = come la principale; guadagno "auto" = automatico). La principale è
+    # quella della configurazione dell'integrazione (id "main", qui c'è solo il suo nome).
+    dongles: list[dict[str, Any]] = field(default_factory=list)
+    main_name: str = "Principale"
+    # quale chiavetta fa cosa: funzione ("scan", "live", "adsb", "meteo", "ism") -> id chiavetta
+    assign: dict[str, str] = field(default_factory=dict)
     # sensori ISM: frequenze (MHz) scorse a ciclo e secondi di ascolto su ognuna
     ism_freqs: list[float] = field(default_factory=lambda: [433.92, 868.3])
     ism_dwell_s: float = 30.0
@@ -204,7 +211,25 @@ class ScanSettings:
             s.auto_max_per_step = defaults.auto_max_per_step
         if s.auto_max_per_sweep < 1:
             s.auto_max_per_sweep = defaults.auto_max_per_sweep
+        if not s.dongles and not s.assign:
+            s._migrate_dongles()
         return s
+
+    def _migrate_dongles(self) -> None:
+        """Dalle vecchie «chiavette separate» (IP/porta/ppm/guadagno per funzione) all'elenco con nome."""
+        for what, label in (("live", "Ascolto"), ("adsb", "Aerei"), ("meteo", "Meteo"), ("ism", "Sensori ISM")):
+            host = (getattr(self, f"{what}_host", "") or "").strip()
+            port = int(getattr(self, f"{what}_port", 0) or 0)
+            if not host and not port:
+                continue
+            ppm = (getattr(self, f"{what}_ppm", "") or "").strip()
+            gain = (getattr(self, f"{what}_gain", "") or "").strip()
+            same = next((d for d in self.dongles if d["host"] == host and d["port"] == port), None)
+            if same is None:
+                same = {"id": f"d{len(self.dongles) + 1}", "name": f"Chiavetta {label}", "host": host,
+                        "port": port, "ppm": ppm, "gain": gain}
+                self.dongles.append(same)
+            self.assign[what] = same["id"]
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -632,19 +657,26 @@ class SpectrumScanner:
 
     # --- chiavette (rtl_tcp) ----------------------------------------------
 
-    def _server(self, what: str) -> tuple[str, int]:
-        """Host e porta della chiavetta per una funzione: 'scan', 'live', 'adsb' o 'meteo'.
+    def _dongle(self, what: str) -> dict[str, Any] | None:
+        """La chiavetta assegnata a una funzione ('scan', 'live', 'adsb', 'meteo', 'ism'); None = principale."""
+        did = (self.settings.assign or {}).get(what) or "main"
+        if did == "main":
+            return None
+        return next((d for d in self.settings.dongles or [] if d.get("id") == did), None)
 
-        Se la funzione non ha un server dedicato (campi vuoti) usa quello principale.
+    def dongle_name(self, what: str) -> str:
+        d = self._dongle(what)
+        return (d.get("name") if d else self.settings.main_name) or ("Chiavetta" if d else "Principale")
+
+    def _server(self, what: str) -> tuple[str, int]:
+        """Host e porta della chiavetta per una funzione: 'scan', 'live', 'adsb', 'meteo' o 'ism'.
+
+        Senza assegnazione (o con una chiavetta rimossa) usa quella principale.
         """
-        s = self.settings
-        host, port = {
-            "live": (s.live_host, s.live_port),
-            "adsb": (s.adsb_host, s.adsb_port),
-            "meteo": (s.meteo_host, s.meteo_port),
-            "ism": (s.ism_host, s.ism_port),
-        }.get(what, ("", 0))
-        return ((host or "").strip() or self.host, int(port or 0) or self.port)
+        d = self._dongle(what)
+        if d is None:
+            return (self.host, self.port)
+        return ((d.get("host") or "").strip() or self.host, int(d.get("port") or 0) or self.port)
 
     def _lock(self, server: tuple[str, int]) -> asyncio.Lock:
         """Il lucchetto di quella chiavetta (uno per coppia host+porta)."""
@@ -655,7 +687,8 @@ class SpectrumScanner:
 
     def _ppm_for(self, what: str) -> int:
         """Correzione ppm per una funzione: override della chiavetta dedicata, se c'è, altrimenti globale."""
-        raw = (getattr(self.settings, f"{what}_ppm", "") or "").strip()
+        d = self._dongle(what)
+        raw = str((d or {}).get("ppm") or "").strip()
         if raw:
             try:
                 return int(round(float(raw.replace(",", "."))))
@@ -668,7 +701,8 @@ class SpectrumScanner:
 
         Testo override: vuoto = come globale; "auto" = automatico (None); numero = quei dB.
         """
-        raw = (getattr(self.settings, f"{what}_gain", "") or "").strip().lower()
+        d = self._dongle(what)
+        raw = str((d or {}).get("gain") or "").strip().lower()
         if raw:
             if raw in ("auto", "a"):
                 return None
@@ -678,12 +712,48 @@ class SpectrumScanner:
                 pass
         return self.settings.gain_db
 
-    def _role_for_server(self, server: tuple[str, int]) -> str:
-        """Qual è la funzione che usa quella chiavetta (per ppm/guadagno della prova di ricezione)."""
-        for what in ("live", "adsb", "meteo", "ism"):
-            if self._server(what) == server:
-                return what
-        return "scan"
+    ROLE_LABELS = {
+        "scan": "Scansione e analisi",
+        "live": "Ascolto FM/DAB+ e ricerca DAB+",
+        "adsb": "Aerei (ADS-B)",
+        "meteo": "Meteo / satelliti",
+        "ism": "Sensori ISM (433/868)",
+    }
+
+    def _dongle_entries(self) -> list[dict[str, Any]]:
+        """Tutte le chiavette dell'elenco (principale compresa), una per host+porta, con funzioni assegnate."""
+        s = self.settings
+        cand = [{"id": "main", "name": s.main_name or "Principale", "server": (self.host, self.port),
+                 "ppm": int(s.ppm), "gain": s.gain_db}]
+        for d in s.dongles or []:
+            server = ((d.get("host") or "").strip() or self.host, int(d.get("port") or 0) or self.port)
+            ppm, gain = int(s.ppm), s.gain_db
+            raw = str(d.get("ppm") or "").strip()
+            if raw:
+                try:
+                    ppm = int(round(float(raw.replace(",", "."))))
+                except ValueError:
+                    pass
+            raw = str(d.get("gain") or "").strip().lower()
+            if raw in ("auto", "a"):
+                gain = None
+            elif raw:
+                try:
+                    gain = float(raw.replace(",", "."))
+                except ValueError:
+                    pass
+            cand.append({"id": d.get("id"), "name": d.get("name") or "Chiavetta", "server": server, "ppm": ppm, "gain": gain})
+        out: dict[tuple[str, int], dict[str, Any]] = {}
+        for c in cand:
+            if c["server"] in out:
+                out[c["server"]]["name"] += f" / {c['name']}"
+                continue
+            out[c["server"]] = {**c, "funzioni": []}
+        for what, label in self.ROLE_LABELS.items():
+            srv = self._server(what)
+            if srv in out:
+                out[srv]["funzioni"].append(label)
+        return list(out.values())
 
     async def analyze_dongles(self) -> list[dict[str, Any]]:
         """Analizza ogni chiavetta configurata: che chip è e cosa supporta.
@@ -692,32 +762,22 @@ class SpectrumScanner:
         host+porta: più funzioni sulla stessa chiavetta compaiono insieme. Ogni chiavetta
         viene interrogata sotto il suo lucchetto, così non disturba un'operazione in corso.
         """
-        etichette = {
-            "scan": "Scansione",
-            "live": "Ascolto in diretta (FM e DAB+) e ricerca DAB+",
-            "adsb": "Aerei (ADS-B)",
-            "meteo": "Meteo / satelliti",
-            "ism": "Sensori ISM (433/868)",
-        }
-        ruoli: dict[tuple[str, int], list[str]] = {}
-        for what, label in etichette.items():
-            server = self._server(what)
-            ruoli.setdefault(server, []).append(label)
         out: list[dict[str, Any]] = []
-        for server, funzioni in ruoli.items():
-            async with self._lock(server):
-                info = await analyze(*server)
-            info["funzioni"] = funzioni
+        for e in self._dongle_entries():
+            async with self._lock(e["server"]):
+                info = await analyze(*e["server"])
+            info["funzioni"] = e["funzioni"] or ["nessuna funzione assegnata"]
+            info["nome"] = e["name"]
             out.append(info)
         return out
 
-    async def test_signal(self, server: tuple[str, int], freq_mhz: float) -> dict[str, Any]:
+    async def test_signal(self, server: tuple[str, int], freq_mhz: float,
+                          ppm: int = 0, gain: float | None = None) -> dict[str, Any]:
         """Prova di ricezione: sintonizza la chiavetta su freq_mhz e misura il livello del segnale.
 
         Restituisce picco e fondo (rumore) in dBFS: se il picco supera il fondo di pochi dB lo spettro
         è piatto (antenna scollegata/segnale assente); un picco netto = la chiavetta sta ricevendo.
         """
-        what = self._role_for_server(server)
         rate = 2_048_000
         n = 1024
         window = np.hanning(n).astype(np.float32)
@@ -729,7 +789,7 @@ class SpectrumScanner:
             async with self._lock(server):
                 reader, writer, _tuner = await _open(*server, STREAM_RCV_BUF)  # come l'ascolto: misura il flusso vero
                 try:
-                    await self._configure(writer, rate, what)
+                    await self._configure(writer, rate, ppm_gain=(ppm, gain))
                     await self._tune(writer, freq_mhz * 1e6, reader)
                     async with asyncio.timeout(IO_TIMEOUT):
                         await self._discard(reader, discard)
@@ -773,24 +833,17 @@ class SpectrumScanner:
             "saturi_pct": round(float(np.mean((b == 0) | (b == 255))) * 100, 2),  # ADC al limite: guadagno troppo alto
             "flusso_ms": round(flusso / 1e6, 3),  # MS/s ricevuti davvero
             "flusso_pct": round(min(100.0, flusso / rate * 100), 1),
-            "ppm": self._ppm_for(what),
-            "guadagno": self._gain_for(what),
+            "ppm": ppm,
+            "guadagno": gain,
         }
 
     async def test_signal_all(self, freq_mhz: float) -> list[dict[str, Any]]:
         """Prova di ricezione su ogni chiavetta distinta configurata, alla stessa frequenza."""
-        seen: set[tuple[str, int]] = set()
         out: list[dict[str, Any]] = []
-        for what in ("scan", "live", "adsb", "meteo", "ism"):
-            srv = self._server(what)
-            if srv in seen:
-                continue
-            seen.add(srv)
-            res = await self.test_signal(srv, freq_mhz)
-            res["funzioni"] = [l for w, l in (
-                ("scan", "Scansione"), ("live", "Ascolto in diretta (FM e DAB+) e ricerca DAB+"),
-                ("adsb", "Aerei (ADS-B)"), ("meteo", "Meteo / satelliti"), ("ism", "Sensori ISM (433/868)"),
-            ) if self._server(w) == srv]
+        for e in self._dongle_entries():
+            res = await self.test_signal(e["server"], freq_mhz, e["ppm"], e["gain"])
+            res["funzioni"] = e["funzioni"] or ["nessuna funzione assegnata"]
+            res["nome"] = e["name"]
             out.append(res)
         return out
 
@@ -2537,14 +2590,19 @@ class SpectrumScanner:
         else:
             _LOGGER.debug("Segnaposto dopo la sintonia non trovato su %s", peer)
 
-    async def _configure(self, writer: asyncio.StreamWriter, rate: int, what: str = "scan") -> None:
-        """Sample rate, correzione ppm e guadagno; ppm/guadagno sono per chiavetta (vedi _ppm_for/_gain_for)."""
+    async def _configure(self, writer: asyncio.StreamWriter, rate: int, what: str = "scan",
+                         ppm_gain: tuple[int, float | None] | None = None) -> None:
+        """Sample rate, correzione ppm e guadagno; ppm/guadagno sono per chiavetta (vedi _ppm_for/_gain_for).
+
+        ppm_gain: valori espliciti (prova di ricezione di una chiavetta qualsiasi dell'elenco).
+        """
         # stato per QUESTA connessione (chiave id(writer)): con più chiavette insieme non si pestano
         self._direct[id(writer)] = -1  # il direct sampling va reimpostato alla prima sintonia
         self._rates[id(writer)] = rate
-        self._conn_gain[id(writer)] = self._gain_for(what)  # guadagno della chiavetta di questa funzione
+        ppm, gain = ppm_gain if ppm_gain is not None else (self._ppm_for(what), self._gain_for(what))
+        self._conn_gain[id(writer)] = gain  # guadagno della chiavetta di questa funzione
         await self._send(writer, CMD_SET_SAMPLE_RATE, rate)
-        await self._send(writer, CMD_SET_FREQ_CORRECTION, self._ppm_for(what))
+        await self._send(writer, CMD_SET_FREQ_CORRECTION, ppm)
         await self._set_gain(writer)
 
     async def _set_gain(self, writer: asyncio.StreamWriter) -> None:

@@ -137,7 +137,18 @@ def ws_subscribe(hass: HomeAssistant, connection: websocket_api.ActiveConnection
         vol.Optional("auto_max_per_step"): vol.All(vol.Coerce(int), vol.Range(min=1, max=1000)),
         vol.Optional("auto_limit_sweep"): bool,
         vol.Optional("auto_max_per_sweep"): vol.All(vol.Coerce(int), vol.Range(min=1, max=100000)),
-        # chiavette separate per funzione (host vuoto = usa la principale; porta 0 = porta principale)
+        # elenco delle chiavette con nome e quale fa cosa (id "main" = quella della configurazione)
+        vol.Optional("dongles"): [vol.Schema({
+            vol.Required("id"): vol.All(str, vol.Length(min=1, max=40)),
+            vol.Required("name"): vol.All(str, vol.Length(max=60)),
+            vol.Optional("host", default=""): vol.Any(None, str),
+            vol.Optional("port", default=0): vol.All(vol.Coerce(int), vol.Range(min=0, max=65535)),
+            vol.Optional("ppm", default=""): vol.Any(None, str),
+            vol.Optional("gain", default=""): vol.Any(None, str),
+        })],
+        vol.Optional("main_name"): vol.All(str, vol.Length(max=60)),
+        vol.Optional("assign"): {vol.In(["scan", "live", "adsb", "meteo", "ism"]): str},
+        # vecchie chiavette separate per funzione (prima della 1.68: ora si migrano nell'elenco)
         vol.Optional("live_host"): vol.Any(None, str),
         vol.Optional("live_port"): vol.All(vol.Coerce(int), vol.Range(min=0, max=65535)),
         vol.Optional("adsb_host"): vol.Any(None, str),
