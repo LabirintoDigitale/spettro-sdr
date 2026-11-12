@@ -7,9 +7,8 @@ Assistant lo apre, Spettro sintonizza la chiavetta dell'Ascolto e manda l'audio 
 della radio e il testo RDS/DLS come metadati ICY. Togliendo il preferito, la radio sparisce anche da
 Music Assistant.
 
-Music Assistant apre l'indirizzo anche solo per capirne il formato (con ffprobe, e una richiesta per
-le intestazioni): per non risintonizzare la chiavetta ogni volta, all'inizio si manda silenzio e si
-sintonizza solo se la connessione resta aperta (e mai per ffprobe, che si presenta come «Lavf»).
+Music Assistant apre l'indirizzo anche solo per capirne il formato (ffprobe, e una richiesta per le
+intestazioni): all'inizio si manda silenzio e si sintonizza solo se la connessione resta aperta.
 
 DAB+: le access unit AAC (blocchi da 960 campioni) si impacchettano in LOAS/LATM, l'unico formato che
 descrive i 960 campioni, e le decodifica l'ffmpeg di Home Assistant. ffmpeg non ha l'SBR a 960
@@ -49,7 +48,6 @@ STREAM_PATH = "/api/spettro/radio"
 MARKER = "/api/spettro/radio/"  # riconosce nella libreria di MA le radio messe da Spettro
 LIVE_TITLE = "🎵 Music Assistant"  # titolo della diretta avviata da uno stream (lo mostra il pannello)
 TUNE_DELAY_S = 1.5  # silenzio prima di sintonizzare: le connessioni di prova si chiudono prima
-PROBE_MAX_S = 8.0  # ffprobe: solo silenzio, poi si chiude
 STOP_GRACE_S = 6.0  # attesa prima di liberare la chiavetta quando MA chiude lo stream
 PREEMPT_S = 10.0  # dopo che un'altra funzione ha preso la chiavetta, MA non la riprende subito
 ICY_METAINT = 16000
@@ -134,6 +132,7 @@ class MusicAssistantSync:
         self.status: dict[str, Any] = {"ok": None, "error": None, "count": 0, "time": None}
         # preferito -> istante in cui un'altra funzione gli ha tolto la chiavetta durante lo stream
         self.preempted: dict[str, float] = {}
+        self.last_access: dict[str, Any] | None = None
 
     # --- impostazioni -------------------------------------------------------
 
@@ -296,11 +295,18 @@ class MusicAssistantSync:
                 for lib_id in (await self._library_radios()).values():
                     await self._call("music/library/remove_item", media_type="radio", library_item_id=lib_id)
 
+    def access(self, fav: dict[str, Any], esito: str) -> None:
+        """Ultimo accesso di Music Assistant a uno stream (per capire dal pannello se ci arriva)."""
+        self.last_access = {"time": time.time(), "name": fav.get("name"), "esito": esito}
+        _LOGGER.info("Music Assistant → %s: %s", fav.get("name"), esito)
+        self._emit()
+
     def event(self) -> dict[str, Any]:
         """Stato per il pannello: esito dell'ultima sincronizzazione e indirizzi usati."""
         return {"kind": "ma", **self.status, "url": self.ma_url(),
                 "stream_base": self.stream_base(),
-                "token_from_ha": not self.settings.ma_token and bool(self.token())}
+                "token_from_ha": not self.settings.ma_token and bool(self.token()),
+                "last_access": self.last_access}
 
     def _emit(self) -> None:
         self.scanner._emit(self.event())  # noqa: SLF001
@@ -328,7 +334,9 @@ class RadioStreamView(HomeAssistantView):
         if item is None:
             return web.Response(status=404, text="Radio non più nei preferiti di Spettro")
         if time.monotonic() - ma.preempted.get(fkey, -1e9) < PREEMPT_S:
+            ma.access(item, "rifiutato: chiavetta presa da un'altra funzione")
             return web.Response(status=503, text="Chiavetta presa da un'altra funzione di Spettro")
+        ma.access(item, "collegato")
         return await _RadioStream(hass, scanner, ma, item, fkey, request).run()
 
 
@@ -418,17 +426,17 @@ class _RadioStream:
         self.resp.headers.update(hdr)
         await self.resp.prepare(self.request)
         await self._write(wav_header(self.rate, self.channels))  # anche l'intestazione conta per l'ICY
-        probe = self.request.headers.get("User-Agent", "").startswith("Lavf")  # ffprobe (o ffmpeg) di MA
         self.scanner.stream_clients += 1
         remove = self.scanner.add_listener(self._on_event)
         try:
             if not self._is_ours():
-                # le connessioni di prova (intestazioni, ffprobe) si chiudono durante il silenzio
+                # le connessioni di prova (intestazioni, esame del formato) si chiudono durante il silenzio.
+                # Non si distingue per User-Agent: l'ffmpeg con cui MA suona si presenta come «Lavf»
+                # proprio come un ffprobe, e l'ffprobe di MA a volte con lo user agent di MA
                 await self._silence(TUNE_DELAY_S, paced=True)
-                if probe:
-                    await self._silence(PROBE_MAX_S, paced=True)
-                    return self.resp
+                self.ma.access(self.fav, "sintonia in corso")
                 await self._start_live()
+                self.ma.access(self.fav, "in onda")
             if self.dab:
                 await self._pump_dab()
             else:
@@ -437,6 +445,7 @@ class _RadioStream:
             pass  # Music Assistant ha chiuso (stop o cambio radio)
         except RuntimeError as err:
             _LOGGER.warning("Stream per Music Assistant (%s) interrotto: %s", self.title, err)
+            self.ma.access(self.fav, f"errore: {err}")
         finally:
             remove()
             self.scanner.stream_clients -= 1

@@ -1,7 +1,7 @@
 // Pannello "Spettro" per Home Assistant: grafico dello spettro, waterfall e picchi.
 
 // deve coincidere con VERSION in const.py: se il backend ne riporta un'altra manca un riavvio
-const PANEL_VERSION = "1.69.1";
+const PANEL_VERSION = "1.69.2";
 
 const PRESETS = [
   ["Personalizzato", null, null],
@@ -1336,13 +1336,15 @@ class SpettroPanel extends HTMLElement {
     if (m.stream_base) $("mastream").placeholder = m.stream_base;
     if (m.token_from_ha) $("matoken").placeholder = "preso dall'integrazione Music Assistant";
     if (m.ok === null || m.ok === undefined) { el.className = "hint"; el.textContent = this._maOn ? "In attesa della prima sincronizzazione…" : "Non collegato."; return; }
+    const la = m.last_access;
+    const acc = la ? `<br>🎵 Ultimo accesso di Music Assistant: <b>${esc(la.name || "")}</b> · ${esc(la.esito)} · ${new Date(la.time * 1000).toLocaleTimeString()}` : "";
     const when = m.time ? new Date(m.time * 1000).toLocaleTimeString() : "";
     if (m.ok) {
       el.className = "hint";
-      el.innerHTML = `✓ ${m.count} radio in Music Assistant` + (m.added || m.removed ? ` (+${m.added || 0}, −${m.removed || 0})` : "") + ` · ${when}`;
+      el.innerHTML = `✓ ${m.count} radio in Music Assistant` + (m.added || m.removed ? ` (+${m.added || 0}, −${m.removed || 0})` : "") + ` · ${when}` + acc;
     } else {
       el.className = "hint err";
-      el.innerHTML = `⚠ ${esc(m.error || "errore")} · ${when}`;
+      el.innerHTML = `⚠ ${esc(m.error || "errore")} · ${when}` + acc;
     }
   }
 
