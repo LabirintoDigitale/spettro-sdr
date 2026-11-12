@@ -50,6 +50,7 @@ MARKER = "/api/spettro/radio/"  # riconosce nella libreria di MA le radio messe 
 LIVE_TITLE = "🎵 Music Assistant"  # titolo della diretta avviata da uno stream (lo mostra il pannello)
 TUNE_DELAY_S = 1.5  # silenzio prima di sintonizzare: le connessioni di prova si chiudono prima
 PROBE_MAX_S = 8.0  # ffprobe: solo silenzio, poi si chiude
+STOP_GRACE_S = 6.0  # attesa prima di liberare la chiavetta quando MA chiude lo stream
 PREEMPT_S = 10.0  # dopo che un'altra funzione ha preso la chiavetta, MA non la riprende subito
 ICY_METAINT = 16000
 DAB_OUT_RATE = 48000
@@ -259,7 +260,7 @@ class MusicAssistantSync:
                     if url in have:
                         continue
                     try:
-                        await self._call("music/library/add_item", item=url)
+                        await self._add(url, fav)
                         added += 1
                     except RuntimeError as err:
                         errors.append(f"{fav.get('name')}: {err}")
@@ -271,6 +272,22 @@ class MusicAssistantSync:
                 _LOGGER.warning("Sincronizzazione con Music Assistant non riuscita: %s", err)
         self._emit()
         return self.status
+
+    async def _add(self, url: str, fav: dict[str, Any]) -> None:
+        """Aggiunge la radio come oggetto completo del provider builtin: MA la salva così com'è, senza
+        aprire lo stream per esaminarlo (che farebbe sintonizzare la chiavetta per niente, radio per radio).
+        Se la versione di MA non accetta l'oggetto, si passa l'indirizzo (MA lo esamina da sé)."""
+        radio = {
+            "item_id": url, "provider": "builtin", "name": fav.get("name") or "Spettro",
+            "media_type": "radio",
+            "provider_mappings": [{"item_id": url, "provider_domain": "builtin",
+                                   "provider_instance": "builtin", "available": True}],
+        }
+        try:
+            await self._call("music/library/add_item", item=radio)
+        except RuntimeError as err:
+            _LOGGER.debug("Radio come oggetto rifiutata (%s): la passo come indirizzo", err)
+            await self._call("music/library/add_item", item=url)
 
     async def clear(self) -> None:
         """Toglie da Music Assistant tutte le radio di Spettro (quando si spegne il collegamento)."""
@@ -423,9 +440,21 @@ class _RadioStream:
         finally:
             remove()
             self.scanner.stream_clients -= 1
-            if self.started and self._is_ours() and self.scanner.stream_clients <= 0 and self.scanner.viewers <= 0:
-                await self.scanner.live_stop()  # nessuno ascolta più: si libera la chiavetta
+            # anche se si era agganciato a una diretta già avviata da un altro stream di MA
+            if self.started or (self.scanner.status.get("live") or {}).get("title") == LIVE_TITLE:
+                self._schedule_stop()
         return self.resp
+
+    def _schedule_stop(self) -> None:
+        """Libera la chiavetta poco dopo l'ultima connessione: MA spesso esamina lo stream (ffprobe) e lo
+        riapre subito per suonarlo; in quel caso la diretta continua senza risintonizzare."""
+
+        async def later() -> None:
+            await asyncio.sleep(STOP_GRACE_S)
+            if self._is_ours() and self.scanner.stream_clients <= 0 and self.scanner.viewers <= 0:
+                await self.scanner.live_stop()  # nessuno ascolta più: si libera la chiavetta
+
+        self.hass.async_create_task(later(), "spettro_ma_stop")
 
     async def _start_live(self) -> None:
         f = float(self.fav["freq_mhz"]) * 1e6
