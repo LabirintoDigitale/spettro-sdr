@@ -58,6 +58,8 @@ def async_setup(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, ws_autostart)
     websocket_api.async_register_command(hass, ws_dongles)
     websocket_api.async_register_command(hass, ws_dongle_signal)
+    websocket_api.async_register_command(hass, ws_ma_config)
+    websocket_api.async_register_command(hass, ws_ma_sync)
     websocket_api.async_register_command(hass, ws_set_enabled)
     websocket_api.async_register_command(hass, ws_analyze)
     websocket_api.async_register_command(hass, ws_ask_ai)
@@ -330,6 +332,43 @@ def ws_mqtt_config(hass: HomeAssistant, connection: websocket_api.ActiveConnecti
     hass.config_entries.async_update_entry(entry, options=merged)
     scanner.update_settings(ScanSettings.from_dict(merged))
     connection.send_result(msg["id"], scanner._mqtt.status())  # noqa: SLF001
+
+
+@websocket_api.websocket_command({
+    vol.Required("type"): "spettro/ma_config",
+    vol.Optional("ma_enabled"): bool,
+    vol.Optional("ma_url"): vol.Any(None, str),
+    vol.Optional("ma_token"): vol.Any(None, str),
+    vol.Optional("ma_stream_url"): vol.Any(None, str),
+})
+@websocket_api.require_admin
+@websocket_api.async_response
+async def ws_ma_config(hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]) -> None:
+    """Collegamento a Music Assistant: indirizzo, token, indirizzo degli stream; poi sincronizza."""
+    entry, scanner = _scanner(hass, connection, msg)
+    if scanner is None:
+        return
+    was_on = scanner.settings.ma_enabled
+    changes = {k: (v.strip() if isinstance(v, str) else v) for k, v in msg.items() if k not in ("id", "type")}
+    if changes.get("ma_token") == "***":  # "***" = tieni il token salvato
+        changes.pop("ma_token")
+    merged = {**ScanSettings().as_dict(), **entry.options, **changes}
+    if was_on and not merged.get("ma_enabled"):
+        await scanner.ma.clear()  # spegnendo il collegamento le radio di Spettro escono da Music Assistant
+    hass.config_entries.async_update_entry(entry, options=merged)
+    scanner.update_settings(ScanSettings.from_dict(merged))
+    connection.send_result(msg["id"], await scanner.ma.sync())
+
+
+@websocket_api.websocket_command({vol.Required("type"): "spettro/ma_sync"})
+@websocket_api.require_admin
+@websocket_api.async_response
+async def ws_ma_sync(hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]) -> None:
+    """Sincronizza adesso le radio di Music Assistant con i preferiti."""
+    _entry, scanner = _scanner(hass, connection, msg)
+    if scanner is None:
+        return
+    connection.send_result(msg["id"], await scanner.ma.sync())
 
 
 @websocket_api.websocket_command({

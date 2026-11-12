@@ -197,6 +197,13 @@ class ScanSettings:
     mqtt_pub_ism: bool = True    # sensori ISM
     mqtt_pub_adsb: bool = False  # aerei (nuovi voli)
     mqtt_pub_photos: bool = False  # foto meteo/ISS scaricate
+    # Music Assistant: i preferiti radio (FM e DAB+) diventano radio della sua libreria; il play apre
+    # uno stream di Spettro, che sintonizza la chiavetta dell'Ascolto
+    ma_enabled: bool = False
+    ma_url: str = ""         # es. http://d5369777-music-assistant:8095 (add-on)
+    ma_token: str = ""       # token creato in Music Assistant (profilo → token)
+    ma_stream_url: str = ""  # come Music Assistant raggiunge Home Assistant (vuoto = automatico)
+    ma_key: str = ""         # segreto negli indirizzi degli stream (generato da Spettro)
     # avvio automatico all'accensione di Home Assistant (persistente ai riavvii)
     adsb_autostart: bool = False
     ism_autostart: bool = False
@@ -238,6 +245,8 @@ class ScanSettings:
         """Come as_dict ma senza la password MQTT (si manda al pannello 'impostata'/vuota, non il valore)."""
         d = asdict(self)
         d["mqtt_pass"] = "***" if self.mqtt_pass else ""
+        d["ma_token"] = "***" if self.ma_token else ""
+        d.pop("ma_key", None)
         return d
 
 
@@ -501,6 +510,9 @@ class SpectrumScanner:
         self.last_analysis_audio: dict[str, bytes] = {}
         self.archive: SpikeArchive | None = None  # impostato dall'integrazione dopo il caricamento
         self.favorites: Any = None  # preferiti (Favorites), impostati dall'integrazione
+        self.on_favorites_changed: Callable[[], None] | None = None  # sincronizzazione con Music Assistant
+        self.ma: Any = None  # sincronizzazione con Music Assistant (MusicAssistantSync)
+        self.stream_clients = 0  # stream audio aperti (Music Assistant): tengono viva la diretta a pannello chiuso
         self._live_task: asyncio.Task | None = None
         self.last_slide: dict[str, str] | None = None  # ultima immagine della slideshow DAB+
         self.last_dab: dict[str, Any] = {}  # ultimi dati della radio DAB+ (nome, testo, statistiche)
@@ -602,6 +614,8 @@ class SpectrumScanner:
         """
         out = [dict(self.status), *self.history]
         out.append({"kind": "plugins", "plugins": pluginhost.listing()})
+        if self.ma is not None:
+            out.append(self.ma.event())
         if self.last_spectrum is not None and not self.last_spectrum["complete"]:
             out.append(self.last_spectrum)
         if self.favorites is not None:
@@ -636,9 +650,11 @@ class SpectrumScanner:
         return out
 
     def favorites_changed(self) -> None:
-        """Avvisa i pannelli che i preferiti sono cambiati."""
+        """Avvisa i pannelli che i preferiti sono cambiati (e Music Assistant, se collegato)."""
         if self.favorites is not None:
             self._emit({"kind": "favorites", "favorites": self.favorites.items})
+        if self.on_favorites_changed is not None:
+            self.on_favorites_changed()
 
     def plugins_changed(self) -> None:
         """Avvisa i pannelli che l'elenco dei plugin è cambiato (dopo una ricarica)."""
@@ -1328,7 +1344,7 @@ class SpectrumScanner:
                else self._live_meter_run(freq_hz) if mode == "meter"
                else self._live_run(freq_hz, mode, decoder, until, title, auto, bw))
         self._live_task = asyncio.get_running_loop().create_task(run, name="spettro_live")
-        if self.viewers <= 0 and decoder not in KEEP_RUNNING:
+        if self.viewers <= 0 and self.stream_clients <= 0 and decoder not in KEEP_RUNNING:
             self._schedule_live_stop()
         return self.status["live"]
 
@@ -1351,7 +1367,8 @@ class SpectrumScanner:
         def check() -> None:
             self._live_stop_handle = None
             live = self.status["live"] or {}
-            if self.viewers <= 0 and self._live_task is not None and live.get("decoder") not in KEEP_RUNNING:
+            if (self.viewers <= 0 and self.stream_clients <= 0 and self._live_task is not None
+                    and live.get("decoder") not in KEEP_RUNNING):
                 _LOGGER.info("Nessun pannello aperto: analisi continua fermata")
                 asyncio.get_running_loop().create_task(self.live_stop())
 

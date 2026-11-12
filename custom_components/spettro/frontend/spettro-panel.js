@@ -1,7 +1,7 @@
 // Pannello "Spettro" per Home Assistant: grafico dello spettro, waterfall e picchi.
 
 // deve coincidere con VERSION in const.py: se il backend ne riporta un'altra manca un riavvio
-const PANEL_VERSION = "1.68.0";
+const PANEL_VERSION = "1.69.0";
 
 const PRESETS = [
   ["Personalizzato", null, null],
@@ -306,6 +306,7 @@ class SpettroPanel extends HTMLElement {
       this._fillIsm(m.settings);
       this._fillMqtt(m.settings);
       this._fillAuto(m.settings);
+      this._fillMa(m.settings);
       this._updateStatus();
       this._updateLeds();
       return;
@@ -335,6 +336,7 @@ class SpettroPanel extends HTMLElement {
     if (m.kind === "dab_scan") { this._dabScan = m; this._renderDabScan(); this._updateLeds(); return; }
     if (m.kind === "ism") { this._onIsm(m); this._updateLeds(); return; }
     if (m.kind === "mqtt") { this._onMqtt(m); return; }
+    if (m.kind === "ma") { this._ma = m; this._renderMa(); return; }
     if (m.kind === "adsb") { this._adsb = m.done ? null : m; this._renderAdsb(); this._updateLeds(); return; }
     if (m.kind === "adsb_error") { this._msg(`ADS-B: ${m.error}`, true); return; }
     if (m.kind === "adsb_history") { this._adsbHistory = m.flights || []; this._adsbRecord = !!m.record; this._adsbHistHours = m.hours; this._adsbHome = m.home || this._adsbHome; this._renderAdsbHist(); return; }
@@ -613,6 +615,20 @@ class SpettroPanel extends HTMLElement {
                 <button id="dongtest">Prova ricezione</button>
               </div>
               <div id="donglesout" style="margin-top:6px"></div>
+              <h4 class="sub">🎵 Music Assistant</h4>
+              <div class="hint">Le radio dei <b>preferiti</b> (FM 87,5–108 MHz e radio DAB+) compaiono tra le Radio di Music Assistant; togliendo il ❤ spariscono anche lì. Con ▶ in Music Assistant Spettro sintonizza la chiavetta dell'<b>Ascolto</b> e manda l'audio, con nome e testo RDS/DLS.</div>
+              <label class="chk" style="margin-top:6px"><input type="checkbox" id="maen"> Collega a Music Assistant</label>
+              <div class="grid2" style="margin-top:4px">
+                <label title="Vuoto = quello dell'integrazione Music Assistant di Home Assistant. Per l'add-on di solito http://d5369777-music-assistant:8095">Indirizzo di Music Assistant<input id="maurl" type="text" autocomplete="off" placeholder="dall'integrazione"></label>
+                <label title="In Music Assistant: in basso a sinistra il tuo profilo → Token di accesso → Crea. Copialo qui.">Token di Music Assistant<input id="matoken" type="password" autocomplete="off" placeholder="incolla il token"></label>
+                <label title="L'indirizzo con cui Music Assistant raggiunge Home Assistant per aprire gli stream. Vuoto = automatico (con l'add-on: http://homeassistant:8123)">Home Assistant visto da Music Assistant<input id="mastream" type="text" autocomplete="off" placeholder="automatico"></label>
+              </div>
+              <div class="row" style="margin-top:6px">
+                <button class="primary" id="masave">Salva e sincronizza</button>
+                <button id="masync">Sincronizza ora</button>
+              </div>
+              <div class="hint" id="mastatus" style="margin-top:6px"></div>
+              <div class="hint" style="margin-top:4px"><small>ℹ️ Il token si crea in Music Assistant: profilo (in basso a sinistra) → token di accesso. Nel DAB+ l'audio per Music Assistant lo decodifica l'ffmpeg di Home Assistant, che non ha l'SBR a 960 campioni: si sente il solo nucleo AAC (meno acuti, mono). Una radio alla volta per chiavetta: se avvii altro sulla stessa chiavetta, Music Assistant si ferma.</small></div>
           </div>
           <div class="row dlgfoot">
             <div class="msg" id="setmsg" style="flex:1"></div>
@@ -875,6 +891,10 @@ class SpettroPanel extends HTMLElement {
     $("setsave").addEventListener("click", () => this._apply());
     $("dongles").addEventListener("click", () => this._analyzeDongles());
     $("dongadd").addEventListener("click", () => this._editDongle(null));
+    $("masave").addEventListener("click", () => this._maSave());
+    $("masync").addEventListener("click", () => this._maSync());
+    for (const id of ["maurl", "matoken", "mastream"]) $(id).addEventListener("input", () => { this._maDirty = true; });
+    $("maen").addEventListener("change", () => { this._maDirty = true; });
     $("dgcancel").addEventListener("click", () => this._closeDongleEdit());
     $("dgok").addEventListener("click", () => this._saveDongle());
     for (const f of ["dgname", "dghost", "dgport", "dgppm", "dggain"]) {
@@ -1291,6 +1311,82 @@ class SpettroPanel extends HTMLElement {
     if (this._dongEditing === id) this._closeDongleEdit();
     this._renderDongles();
     await this._apply();
+  }
+
+  // --- Music Assistant ------------------------------------------------------------
+
+  _fillMa(s) {
+    if (!s || this._maDirty) return;
+    const $ = (id) => this.shadowRoot.getElementById(id);
+    $("maen").checked = !!s.ma_enabled;
+    if (this.shadowRoot.activeElement !== $("maurl")) $("maurl").value = s.ma_url || "";
+    if (this.shadowRoot.activeElement !== $("matoken")) $("matoken").value = s.ma_token || "";
+    if (this.shadowRoot.activeElement !== $("mastream")) $("mastream").value = s.ma_stream_url || "";
+    if (this._maOn !== !!s.ma_enabled) {
+      this._maOn = !!s.ma_enabled;
+      this._renderFavs(); // 🎵 sui preferiti che vanno in Music Assistant
+    }
+  }
+
+  _renderMa() {
+    const m = this._ma, el = this.shadowRoot.getElementById("mastatus");
+    if (!m || !el) return;
+    const $ = (id) => this.shadowRoot.getElementById(id);
+    if (m.url) $("maurl").placeholder = m.url;
+    if (m.stream_base) $("mastream").placeholder = m.stream_base;
+    if (m.token_from_ha) $("matoken").placeholder = "preso dall'integrazione Music Assistant";
+    if (m.ok === null || m.ok === undefined) { el.className = "hint"; el.textContent = this._maOn ? "In attesa della prima sincronizzazione…" : "Non collegato."; return; }
+    const when = m.time ? new Date(m.time * 1000).toLocaleTimeString() : "";
+    if (m.ok) {
+      el.className = "hint";
+      el.innerHTML = `✓ ${m.count} radio in Music Assistant` + (m.added || m.removed ? ` (+${m.added || 0}, −${m.removed || 0})` : "") + ` · ${when}`;
+    } else {
+      el.className = "hint err";
+      el.innerHTML = `⚠ ${esc(m.error || "errore")} · ${when}`;
+    }
+  }
+
+  async _maSave() {
+    const $ = (id) => this.shadowRoot.getElementById(id);
+    const btn = $("masave");
+    btn.disabled = true;
+    $("mastatus").className = "hint";
+    $("mastatus").textContent = "Collegamento a Music Assistant…";
+    try {
+      const res = await this._hass.callWS({ type: "spettro/ma_config", ma_enabled: $("maen").checked,
+        ma_url: $("maurl").value.trim(), ma_token: $("matoken").value.trim(), ma_stream_url: $("mastream").value.trim() });
+      this._maDirty = false;
+      this._maOn = $("maen").checked;
+      this._ma = { ...(this._ma || {}), ...res };
+      this._renderMa();
+    } catch (err) {
+      $("mastatus").className = "hint err";
+      $("mastatus").textContent = err.message || String(err);
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
+  async _maSync() {
+    const $ = (id) => this.shadowRoot.getElementById(id);
+    $("masync").disabled = true;
+    $("mastatus").className = "hint";
+    $("mastatus").textContent = "Sincronizzazione…";
+    try {
+      this._ma = { ...(this._ma || {}), ...(await this._hass.callWS({ type: "spettro/ma_sync" })) };
+      this._renderMa();
+    } catch (err) {
+      $("mastatus").className = "hint err";
+      $("mastatus").textContent = err.message || String(err);
+    } finally {
+      $("masync").disabled = false;
+    }
+  }
+
+  // il preferito va in Music Assistant? (stessa regola del backend)
+  _favIsRadio(f) {
+    if (f.sid) return true;
+    return f.freq_mhz >= 87.5 && f.freq_mhz <= 108 && (!f.mode || f.mode === "wfm") && !f.decoder;
   }
 
   async _analyzeDongles() {
@@ -1867,7 +1963,7 @@ class SpettroPanel extends HTMLElement {
     }
     el.className = "";
     el.innerHTML = `<table><tbody>${this._favs.map((f, i) => `<tr data-i="${i}">
-        <td class="name">${esc(f.name || "—")}</td><td>${f.sid ? `DAB+ ${esc(f.channel || f.freq_mhz.toFixed(3))}` : `${f.freq_mhz.toFixed(4)} MHz`}</td>
+        <td class="name">${esc(f.name || "—")}${this._maOn && this._favIsRadio(f) ? ` <span title="Anche tra le radio di Music Assistant">🎵</span>` : ""}</td><td>${f.sid ? `DAB+ ${esc(f.channel || f.freq_mhz.toFixed(3))}` : `${f.freq_mhz.toFixed(4)} MHz`}</td>
         <td class="act"><button class="edit" title="Cambia nome">✏</button><button class="play" title="Analisi continua">▶</button><button class="heart" title="Togli dai preferiti">❤</button></td></tr>`).join("")}
       </tbody></table>`;
     el.querySelectorAll("tr[data-i]").forEach((tr) => {

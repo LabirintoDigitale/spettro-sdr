@@ -1,7 +1,7 @@
 """Costanti dell'integrazione Spettro."""
 
 DOMAIN = "spettro"
-VERSION = "1.68.0"
+VERSION = "1.69.0"
 
 DEFAULT_PORT = 1234
 
@@ -20,4 +20,5 @@ PANEL_ELEMENT = "spettro-panel"
 STATIC_URL = "/spettro_static"
 
 DATA_STATIC_REGISTERED = f"{DOMAIN}_static_registered"
+DATA_RADIO_VIEW = f"{DOMAIN}_radio_view"  # stream delle radio per Music Assistant (registrato una volta)
 DATA_WS_REGISTERED = f"{DOMAIN}_ws_registered"

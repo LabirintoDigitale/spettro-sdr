@@ -8,13 +8,14 @@ from homeassistant.components import frontend, panel_custom
 from homeassistant.components.http import StaticPathConfig
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_HOST, CONF_PORT, Platform
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.storage import Store
 
 from . import pluginhost, ws_api
 from .const import (
     ARCHIVE_DIR,
+    DATA_RADIO_VIEW,
     DATA_STATIC_REGISTERED,
     DOMAIN,
     METEO_DIR,
@@ -28,6 +29,7 @@ from .const import (
 )
 from .archive import SpikeArchive
 from .favorites import Favorites
+from .musicassistant import MusicAssistantSync, RadioStreamView
 from .scanner import ScanSettings, SpectrumScanner
 from .weather import Meteo, MeteoArchive
 
@@ -61,6 +63,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: SpettroConfigEntry) -> b
 
     scanner.http_get = _http_get  # dettagli online degli aerei (ADS-B), se l'utente li attiva
     scanner.status["version"] = VERSION
+
+    # Music Assistant: preferiti radio <-> radio della sua libreria, e stream da Spettro
+    @callback
+    def _save_ma_key(key: str) -> None:
+        hass.config_entries.async_update_entry(entry, options={**entry.options, "ma_key": key})
+
+    scanner.ma = MusicAssistantSync(hass, scanner, _save_ma_key)
+    scanner.on_favorites_changed = lambda: scanner.ma.schedule() if scanner.settings.ma_enabled else None
+    if not hass.data.get(DATA_RADIO_VIEW):
+        hass.http.register_view(RadioStreamView())
+        hass.data[DATA_RADIO_VIEW] = True
+    if settings.ma_enabled:
+        scanner.ma.schedule(60)  # all'avvio: Music Assistant (add-on) può partire dopo Home Assistant
     entry.runtime_data = scanner
     hass.data[DOMAIN] = entry
 
